@@ -23,7 +23,7 @@ from collections import OrderedDict
 def run_model(stock_portfolio, stock_data):
     # Part 1: Getting recommendations
     #download_and_fix_yfinance_data(stock_portfolio)
-    real_df = lib.create_stock_features(stock_portfolio, stock_data, lib.get_sp500())
+    real_df = lib.create_stock_features(stock_portfolio, stock_data, lib.get_sp500('2015-01-01'))
 
     real_df = real_df.sort_values(by='Date')
     today_stocks_features = real_df.loc[[real_df.index.max()]]
@@ -84,14 +84,20 @@ model_filename = "model.pkl"
 model = xgb.XGBClassifier()
 model.load_model(model_filename)
 
-if len(sys.argv) < 2:
-    print("Usage: python predict.py <path/to/tickers.txt> <path/to/stock_data.csv>")
+importance = model.get_booster().get_score(importance_type='weight')  # or 'gain', 'cover'
+importance2 = model.get_booster().get_score(importance_type='gain')  # or 'gain', 'cover'
+importance3 = model.get_booster().get_score(importance_type='cover')  # or 'gain', 'cover'
+
+#print(importance, importance2, importance3)
+
+if len(sys.argv) < 3:
+    print("Usage: ./model.sh <path/to/tickers.txt> <path/to/stock_data.csv>")
     sys.exit(1)
 
-with open(sys.argv[1]) as f:
+with open("tickers_karen.txt") as f:
     tickers = [line.rstrip() for line in f]
 
-(recommendations, weights) = run_model(tickers, sys.argv[2])
+(recommendations, weights) = run_model(tickers, "stocks.csv")
 
 recommendations.to_csv("recommendations.csv")
 print("Saved trade recommendations to recommendations.csv")

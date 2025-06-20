@@ -25,7 +25,7 @@ def download_and_fix_yfinance_data(stocks): # Takes raw yfinance dataframe and f
 
     for t in stocks:
         df = yf.download(t, interval='1d', start='2015-01-01', auto_adjust=True)
-        df = df.resample('W-THU').agg({ # everything needs to be on the thursday interval. weekly prices sometimes start not on thursday
+        df = df.resample('W-FRI').agg({ # everything needs to be on the thursday interval. weekly prices sometimes start not on thursday
           ('Open', t): 'first',
           ('High', t): 'max',
           ('Low', t): 'min',
@@ -53,6 +53,23 @@ def download_and_fix_yfinance_data(stocks): # Takes raw yfinance dataframe and f
     stockData.to_csv("stocks.csv")
 
     return stockData
+
+
+def download_and_fix_sp500():
+    y = yf.download("^GSPC", start="2015-01-01", interval="1d")
+    y = y.resample('W-FRI').agg({
+        ('Open', "^GSPC"): 'first',
+        ('High', "^GSPC"): 'max',
+        ('Low', "^GSPC"): 'min',
+        ('Close', "^GSPC"): 'last',
+        ('Volume', "^GSPC"): 'sum'
+    })
+    sp500 = y.copy()
+
+    sp500.columns = ["_".join(col) if isinstance(col, tuple) else col for col in sp500.columns]
+
+    sp500 = sp500.loc[:, ~sp500.columns.isin(["level_0", "index"])]
+    sp500.to_csv("SP500.csv")
 
 def extract_ticker_dataframe(csv_filepath: str, ticker: str) -> pd.DataFrame:
     """
@@ -94,7 +111,7 @@ def extract_ticker_dataframe(csv_filepath: str, ticker: str) -> pd.DataFrame:
 
     df_ticker = df_ticker.reset_index().rename(columns={"index": "Date"}).set_index("Date")
 
-    return df_ticker
+    return df_ticker.dropna()
 
 def classify_regimes(sp500):
     model = MarkovRegression(sp500['Log_Returns'], k_regimes=2, trend='c', switching_variance=True)
@@ -219,9 +236,13 @@ def create_stock_features(stocks, stock_data_filename, sp500):
 
     return features_long
 
-def get_sp500():
+def get_sp500(start_date: str):
+    if start_date[4] != '-' or start_date[7] != '-':
+        raise ValueError("Invalid start date format")
+
     sp500 = pd.read_csv("SP500.csv")
     sp500.set_index("Date", inplace=True)
     sp500.index = pd.to_datetime(sp500.index)
-    sp500['Log_Returns'] = np.log(sp500['Close_^GSPC'] / sp500['Close_^GSPC'].shift(1))
+    sp500['Log_Returns'] = np.log(sp500['Close_^GSPC'] / sp500['Close_^GSPC'].shift(1)).dropna()
+    sp500 = sp500.loc[start_date:]
     return sp500.dropna()
