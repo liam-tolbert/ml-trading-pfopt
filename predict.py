@@ -94,7 +94,7 @@ if len(sys.argv) < 3:
     print("Usage: ./model.sh <path/to/tickers.txt> <path/to/stock_data.csv>")
     sys.exit(1)
 
-with open("tickers_karen.txt") as f:
+with open("tickers_k.txt") as f:
     tickers = [line.rstrip() for line in f]
 
 (recommendations, weights) = run_model(tickers, "stocks.csv")
