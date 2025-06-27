@@ -174,8 +174,10 @@ def create_stock_features(stocks, stock_data_filename, sp500):
             prices = extract_ticker_dataframe(stock_data_filename, stock)
         except ValueError:
             continue
-        # weekly return
-        prices["Return"] = prices["Close"].pct_change(periods=2)
+        # 2-week % return
+        prices["Returns-2wk"] = prices["Close"].pct_change(periods=2)
+        # 1-week % return
+        prices["Returns-1wk"] = prices["Close"].pct_change(periods=1)
 
         features = pd.DataFrame(index=prices.index)
 
@@ -216,13 +218,14 @@ def create_stock_features(stocks, stock_data_filename, sp500):
         features["Aroon"] = aroon["aroon_oscillator"]
 
         # Returns features. Overall 4 week percent change, split into 3 week period, 1 week lag and 1 week period, 0 week lag
-        features["Returns-3wk-1wklag"] = prices["Close"].shift(1).pct_change(periods=3)
+        features["Returns-3wk-1wklag"] = prices["Close"].pct_change(periods=3).shift(1)
         features["Returns-1wk-0wklag"] = prices["Close"].pct_change()
 
         # Other technical indicators and fundamentals?
 
         # rolling return (2 week window)
-        features["Returns-2wk"] = prices["Return"]
+        features["Returns-2wk"] = prices["Returns-2wk"]
+
         features["Bull_Probability"] = regime_df["Bull_Prob"]
 
         features["Stock"] = stock

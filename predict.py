@@ -34,7 +34,7 @@ def run_model(stock_portfolio, stock_data):
     # Making recommendations per stock
     recommendations = stock_col.join(pred_col)
     recommendations.columns = ["Stock", "Recommendation"]
-    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Hold', 1: 'Buy', 2: 'Sell'})
+    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Buy', 1: 'Sell', 2: 'Hold'})
 
     # Part 2: Getting the Markowitz mean-variance portfolio
 
@@ -67,6 +67,10 @@ def run_model(stock_portfolio, stock_data):
     common_tickers = adjusted_mu.index.intersection(S.index)
 
     S = S.loc[common_tickers, common_tickers]
+
+    print(adjusted_mu.shape)
+    print(S.shape)
+
     ef = EfficientFrontier(adjusted_mu, S)
     ef.max_sharpe()
     clean_weights = ef.clean_weights()
@@ -88,7 +92,7 @@ importance = model.get_booster().get_score(importance_type='weight')  # or 'gain
 importance2 = model.get_booster().get_score(importance_type='gain')  # or 'gain', 'cover'
 importance3 = model.get_booster().get_score(importance_type='cover')  # or 'gain', 'cover'
 
-#print(importance, importance2, importance3)
+print(importance2)
 
 if len(sys.argv) < 3:
     print("Usage: ./model.sh <path/to/tickers.txt> <path/to/stock_data.csv>")
@@ -96,6 +100,19 @@ if len(sys.argv) < 3:
 
 with open("tickers_k.txt") as f:
     tickers = [line.rstrip() for line in f]
+
+"""tickers = [
+    "AAPL", "ABNB", "ACN", "ALAB", "AMD", "AMZN", "ANET", "AOSL", "APP",
+    "ASAN", "ASML", "AVGO", "BAH", "BITO", "BWXT", "CLS", "COHR", "COIN", "COST",
+    "COWG", "CPRX", "CRDO", "CRM", "CRWV", "DAVE", "DELL", "DKNG", "DOCS",
+    "DXPE", "EPD", "FBTC", "FVRR", "GOOG", "GRNY", "HOOD", "IHAK", "INTA", "IONQ",
+    "JPM", "LITE", "LQDT", "LUNR", "META", "MRVL", "MSFT", "MU", "NBIS", "NEE",
+    "NFLX", "NLR", "NNE", "NUTX", "NVDA", "NVDY", "NVO", "OUST", "OXY", "PANW",
+    "PEP", "PLD", "PLTR", "PYPL", "QCOM", "QTUM", "RBRK", "RDDT", "RDNT", "REAL",
+    "RGTI", "S", "SAIC", "SCHD", "SEZL", "SKYW", "SMCI", "SMTC", "SNOW", "SOXL",
+    "SYM", "TEAM", "TEM", "TOST", "TSM", "U", "UBER", "UPST", "URA", "VIST",
+    "VRT", "WMT", "WRD", "XYZ", "HIMS", "OSCR"
+]"""
 
 (recommendations, weights) = run_model(tickers, "stocks.csv")
 

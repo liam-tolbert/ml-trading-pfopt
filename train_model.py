@@ -3,6 +3,7 @@ from collections import OrderedDict
 
 # imports
 import numpy as np
+import shap
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
@@ -44,11 +45,16 @@ stocks = [
 
 # Alternatively, use stocks2 if you want to
 stocks2 = [
-    "ADBE", "CRM", "ORCL", "SAP", "NOW", "SHOP", "SQ", "ZM", "CRWD", "DDOG",
-    "TXN", "QCOM", "AVGO", "MU", "LRCX", "KLAC", "NXPI", "ADI", "MRVL", "SWKS",
-    "PYPL", "INTU", "FISV", "ADP", "VEEV", "TEAM", "WDAY", "ZS", "OKTA", "MDB",
-    "T", "VZ", "TMUS", "CHTR", "CMCSA", "DIS", "ROKU", "LYV", "TTWO", "ATVI",
-    "PEP", "KMB", "CL", "HSY", "MDLZ", "GIS", "MO", "PM", "EL", "STZ"
+    "AAPL", "ABNB", "ACN", "ALAB", "AMD", "AMZN", "ANET", "AOSL", "APP",
+    "ASAN", "ASML", "AVGO", "BAH", "BITO", "BWXT", "CLS", "COHR", "COIN", "COST",
+    "COWG", "CPRX", "CRDO", "CRM", "CRWV", "DAVE", "DELL", "DKNG", "DOCS",
+    "DXPE", "EPD", "FBTC", "FVRR", "GOOG", "GRNY", "HOOD", "IHAK", "INTA", "IONQ",
+    "JPM", "LITE", "LQDT", "LUNR", "META", "MRVL", "MSFT", "MU", "NBIS", "NEE",
+    "NFLX", "NLR", "NNE", "NUTX", "NVDA", "NVDY", "NVO", "OUST", "OXY", "PANW",
+    "PEP", "PLD", "PLTR", "PYPL", "QCOM", "QTUM", "RBRK", "RDDT", "RDNT", "REAL",
+    "RGTI", "S", "SAIC", "SCHD", "SEZL", "SKYW", "SMCI", "SMTC", "SNOW", "SOXL",
+    "SYM", "TEAM", "TEM", "TOST", "TSM", "U", "UBER", "UPST", "URA", "VIST",
+    "VRT", "WMT", "WRD", "XYZ", "HIMS", "OSCR"
 ]
 
 # Uncomment this if you want to refresh the dataset(s)
@@ -85,15 +91,38 @@ sp500 = lib.get_sp500('2000-01-01') # it's also needed in predict.py, so I put i
 # 2. Cleaning data, train/val/test split
 df = lib.create_stock_features(stocks, "50stocks.csv", sp500)
 
-def label_signal(return_val, buy_thresh=0.01, sell_thresh=-0.01):
-    if return_val > buy_thresh:
-        return 0
-    elif return_val < sell_thresh:
-        return 1
+def label_signal(row):
+    r1 = row['Returns-1wk-0wklag']
+    r2 = row['Returns-2wk']
+    if r1 < -0.01 and r2 < -0.015:
+        return 0  # Sell
+    elif r1 > 0.01 and r2 > 0.015:
+        return 1  # Buy
     else:
-        return 2
+        return 2  # Hold
 
-df['Signal'] = df['Returns-2wk'].apply(label_signal)
+def label_signal_improved(row, buy_thresh=0.01, sell_thresh=-0.015, vol_thresh=0.02):
+    """
+    row: pandas Series containing necessary features like:
+        - Returns-2wk
+        - ATR
+        - SMA_5v20 or directional trend
+    """
+    ret = row['Returns-2wk']
+    atr = row.get('ATR', 0.0)
+    bull_prob = row.get('Bull_Probability', 0.5)
+    short_vs_long = row.get('SMA_5v20', 0.0)
+
+    # Filter out small pullbacks or sideways drift
+    if ret < sell_thresh and atr > vol_thresh and short_vs_long < 0 and bull_prob < 0.4:
+        return 2  # Sell (label as 0)
+    elif ret > buy_thresh and short_vs_long > 0 and bull_prob > 0.6:
+        return 0  # Buy (label as 1)
+    else:
+        return 1  # Hold
+
+
+df['Signal'] = df.apply(label_signal, axis=1)
 
 # Sort by date?
 df = df.sort_values(by='Date')
