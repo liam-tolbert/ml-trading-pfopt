@@ -34,7 +34,7 @@ def run_model(stock_portfolio, stock_data):
     # Making recommendations per stock
     recommendations = stock_col.join(pred_col)
     recommendations.columns = ["Stock", "Recommendation"]
-    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Buy', 1: 'Sell', 2: 'Hold'})
+    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Sell', 1: 'Buy', 2: 'Hold'})
 
     # Part 2: Getting the Markowitz mean-variance portfolio
 
@@ -98,10 +98,10 @@ if len(sys.argv) < 3:
     print("Usage: ./model.sh <path/to/tickers.txt> <path/to/stock_data.csv>")
     sys.exit(1)
 
-with open("tickers_k.txt") as f:
+with open("data/tickers_k.txt") as f:
     tickers = [line.rstrip() for line in f]
 
-"""tickers = [
+tickers = [
     "AAPL", "ABNB", "ACN", "ALAB", "AMD", "AMZN", "ANET", "AOSL", "APP",
     "ASAN", "ASML", "AVGO", "BAH", "BITO", "BWXT", "CLS", "COHR", "COIN", "COST",
     "COWG", "CPRX", "CRDO", "CRM", "CRWV", "DAVE", "DELL", "DKNG", "DOCS",
@@ -112,7 +112,7 @@ with open("tickers_k.txt") as f:
     "RGTI", "S", "SAIC", "SCHD", "SEZL", "SKYW", "SMCI", "SMTC", "SNOW", "SOXL",
     "SYM", "TEAM", "TEM", "TOST", "TSM", "U", "UBER", "UPST", "URA", "VIST",
     "VRT", "WMT", "WRD", "XYZ", "HIMS", "OSCR"
-]"""
+]
 
 (recommendations, weights) = run_model(tickers, "stocks.csv")
 

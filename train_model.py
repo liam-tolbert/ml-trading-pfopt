@@ -89,7 +89,7 @@ stockData.to_csv("50stocks.csv")
 sp500 = lib.get_sp500('2000-01-01') # it's also needed in predict.py, so I put it in lib
 
 # 2. Cleaning data, train/val/test split
-df = lib.create_stock_features(stocks, "50stocks.csv", sp500)
+df = lib.create_stock_features(stocks, "data/50stocks.csv", sp500)
 
 def label_signal(row):
     r1 = row['Returns-1wk-0wklag']
@@ -115,11 +115,11 @@ def label_signal_improved(row, buy_thresh=0.01, sell_thresh=-0.015, vol_thresh=0
 
     # Filter out small pullbacks or sideways drift
     if ret < sell_thresh and atr > vol_thresh and short_vs_long < 0 and bull_prob < 0.4:
-        return 2  # Sell (label as 0)
+        return 0  # Sell
     elif ret > buy_thresh and short_vs_long > 0 and bull_prob > 0.6:
-        return 0  # Buy (label as 1)
+        return 1  # Buy
     else:
-        return 1  # Hold
+        return 2  # Hold
 
 
 df['Signal'] = df.apply(label_signal, axis=1)

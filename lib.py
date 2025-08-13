@@ -243,7 +243,7 @@ def get_sp500(start_date: str):
     if start_date[4] != '-' or start_date[7] != '-':
         raise ValueError("Invalid start date format")
 
-    sp500 = pd.read_csv("SP500.csv")
+    sp500 = pd.read_csv("data/SP500.csv")
     sp500.set_index("Date", inplace=True)
     sp500.index = pd.to_datetime(sp500.index)
     sp500['Log_Returns'] = np.log(sp500['Close_^GSPC'] / sp500['Close_^GSPC'].shift(1)).dropna()
