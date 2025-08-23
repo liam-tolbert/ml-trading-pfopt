@@ -2,3 +2,4 @@
 *.txt
 *.pkl
 *.xlsx
+/__pycache__/
