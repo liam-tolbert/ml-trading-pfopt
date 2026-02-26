@@ -1,5 +1,4 @@
 # indicators for use by my main notebook
-import math
 import pandas as pd
 import numpy as np
 import warnings

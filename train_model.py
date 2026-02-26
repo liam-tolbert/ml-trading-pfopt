@@ -1,25 +1,14 @@
-import datetime
 from collections import OrderedDict
 
 # imports
 import numpy as np
-import shap
 import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
-from pandas.core.interchange.dataframe_protocol import DataFrame
-from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
-from pypfopt.efficient_frontier import EfficientFrontier
-from pypfopt import risk_models
-from pypfopt import expected_returns
 import indicators
 import lib
-import importlib
-importlib.reload(indicators)
 import xgboost as xgb
 from sklearn.metrics import classification_report
 from sklearn.utils.class_weight import compute_class_weight
-from collections import OrderedDict
 
 # 1. Data download + prep
 
@@ -43,49 +32,6 @@ stocks = [
     "PLD", "AMT", "CCI", "EQIX", "SPG", "PSA", "O", "DLR", "VTR", "ARE"
 ]
 
-# Alternatively, use stocks2 if you want to
-stocks2 = [
-    "AAPL", "ABNB", "ACN", "ALAB", "AMD", "AMZN", "ANET", "AOSL", "APP",
-    "ASAN", "ASML", "AVGO", "BAH", "BITO", "BWXT", "CLS", "COHR", "COIN", "COST",
-    "COWG", "CPRX", "CRDO", "CRM", "CRWV", "DAVE", "DELL", "DKNG", "DOCS",
-    "DXPE", "EPD", "FBTC", "FVRR", "GOOG", "GRNY", "HOOD", "IHAK", "INTA", "IONQ",
-    "JPM", "LITE", "LQDT", "LUNR", "META", "MRVL", "MSFT", "MU", "NBIS", "NEE",
-    "NFLX", "NLR", "NNE", "NUTX", "NVDA", "NVDY", "NVO", "OUST", "OXY", "PANW",
-    "PEP", "PLD", "PLTR", "PYPL", "QCOM", "QTUM", "RBRK", "RDDT", "RDNT", "REAL",
-    "RGTI", "S", "SAIC", "SCHD", "SEZL", "SKYW", "SMCI", "SMTC", "SNOW", "SOXL",
-    "SYM", "TEAM", "TEM", "TOST", "TSM", "U", "UBER", "UPST", "URA", "VIST",
-    "VRT", "WMT", "WRD", "XYZ", "HIMS", "OSCR"
-]
-
-# Uncomment this if you want to refresh the dataset(s)
-"""
-x = yf.download(stocks, start="2015-01-01", end="2025-04-15", interval="1wk")
-
-sp500 = yf.download("^GSPC", start="2015-01-01", interval="1wk")
-sp500 = sp500.resample('W-FRI').agg({
-      ('Open', "^GSPC"): 'first',
-      ('High', "^GSPC"): 'max',
-      ('Low', "^GSPC"): 'min',
-      ('Close', "^GSPC"): 'last',
-      ('Volume', "^GSPC"): 'sum'
-    })
-sp500.columns = ["_".join(col) if isinstance(col, tuple) else col for col in sp500.columns]
-
-sp500 = sp500.loc[:, ~sp500.columns.isin(["level_0", "index"])]
-sp500.to_csv("SP500.csv")
-"""
-
-'''
-stockData = x.copy()
-
-# Rename columns, joining multi-level column names into a single string with "_".
-stockData.columns = ["_".join(col) if isinstance(col, tuple) else col for col in stockData.columns]
-
-# Remove unnecessary columns such as "level_0" or "index" that may have been carried over.
-stockData = stockData.loc[:, ~stockData.columns.isin(["level_0", "index"])]
-stockData.to_csv("50stocks.csv")
-'''
-
 sp500 = lib.get_sp500('2000-01-01') # it's also needed in predict.py, so I put it in lib
 
 # 2. Cleaning data, train/val/test split
@@ -100,27 +46,6 @@ def label_signal(row):
         return 1  # Buy
     else:
         return 2  # Hold
-
-def label_signal_improved(row, buy_thresh=0.01, sell_thresh=-0.015, vol_thresh=0.02):
-    """
-    row: pandas Series containing necessary features like:
-        - Returns-2wk
-        - ATR
-        - SMA_5v20 or directional trend
-    """
-    ret = row['Returns-2wk']
-    atr = row.get('ATR', 0.0)
-    bull_prob = row.get('Bull_Probability', 0.5)
-    short_vs_long = row.get('SMA_5v20', 0.0)
-
-    # Filter out small pullbacks or sideways drift
-    if ret < sell_thresh and atr > vol_thresh and short_vs_long < 0 and bull_prob < 0.4:
-        return 0  # Sell
-    elif ret > buy_thresh and short_vs_long > 0 and bull_prob > 0.6:
-        return 1  # Buy
-    else:
-        return 2  # Hold
-
 
 df['Signal'] = df.apply(label_signal, axis=1)
 

@@ -3,20 +3,12 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
-from pandas.core.interchange.dataframe_protocol import DataFrame
-from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt import risk_models
 from pypfopt import expected_returns
 import indicators
 import lib
-import importlib
-importlib.reload(indicators)
 import xgboost as xgb
-from sklearn.metrics import classification_report
-from sklearn.utils.class_weight import compute_class_weight
-from collections import OrderedDict
 
 #TODO: Use argparse to make a better CLI
 
@@ -88,33 +80,20 @@ model_filename = "model.pkl"
 model = xgb.XGBClassifier()
 model.load_model(model_filename)
 
-importance = model.get_booster().get_score(importance_type='weight')  # or 'gain', 'cover'
-importance2 = model.get_booster().get_score(importance_type='gain')  # or 'gain', 'cover'
-importance3 = model.get_booster().get_score(importance_type='cover')  # or 'gain', 'cover'
-
+importance2 = model.get_booster().get_score(importance_type='gain')
 print(importance2)
 
 if len(sys.argv) < 3:
     print("Usage: ./model.sh <path/to/tickers.txt> <path/to/stock_data.csv>")
     sys.exit(1)
 
-with open("data/tickers_k.txt") as f:
+tickers_file = sys.argv[1]
+stock_data_file = sys.argv[2]
+
+with open(tickers_file) as f:
     tickers = [line.rstrip() for line in f]
 
-tickers = [
-    "AAPL", "ABNB", "ACN", "ALAB", "AMD", "AMZN", "ANET", "AOSL", "APP",
-    "ASAN", "ASML", "AVGO", "BAH", "BITO", "BWXT", "CLS", "COHR", "COIN", "COST",
-    "COWG", "CPRX", "CRDO", "CRM", "CRWV", "DAVE", "DELL", "DKNG", "DOCS",
-    "DXPE", "EPD", "FBTC", "FVRR", "GOOG", "GRNY", "HOOD", "IHAK", "INTA", "IONQ",
-    "JPM", "LITE", "LQDT", "LUNR", "META", "MRVL", "MSFT", "MU", "NBIS", "NEE",
-    "NFLX", "NLR", "NNE", "NUTX", "NVDA", "NVDY", "NVO", "OUST", "OXY", "PANW",
-    "PEP", "PLD", "PLTR", "PYPL", "QCOM", "QTUM", "RBRK", "RDDT", "RDNT", "REAL",
-    "RGTI", "S", "SAIC", "SCHD", "SEZL", "SKYW", "SMCI", "SMTC", "SNOW", "SOXL",
-    "SYM", "TEAM", "TEM", "TOST", "TSM", "U", "UBER", "UPST", "URA", "VIST",
-    "VRT", "WMT", "WRD", "XYZ", "HIMS", "OSCR"
-]
-
-(recommendations, weights) = run_model(tickers, "stocks.csv")
+(recommendations, weights) = run_model(tickers, stock_data_file)
 
 recommendations.to_csv("recommendations.csv")
 print("Saved trade recommendations to recommendations.csv")

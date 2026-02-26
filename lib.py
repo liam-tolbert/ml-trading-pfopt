@@ -4,19 +4,13 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import matplotlib.pyplot as plt
-from pandas.core.interchange.dataframe_protocol import DataFrame
 from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt import risk_models
 from pypfopt import expected_returns
 import indicators
-import importlib
-importlib.reload(indicators)
-import xgboost as xgb
 from sklearn.metrics import classification_report
 from sklearn.utils.class_weight import compute_class_weight
-from collections import OrderedDict
 
 features = ["SMA_5v20", "RSI", "MACD", "Bollinger_Bands", "ATR", "Stochastic", "OBV", "ADX", "Aroon", "Bull_Probability", "Returns-3wk-1wklag", "Returns-1wk-0wklag"]
 
@@ -120,14 +114,6 @@ def classify_regimes(sp500):
     smoothed_probs = result.smoothed_marginal_probabilities
     sp500['Regime'] = smoothed_probs.idxmax(axis=1)
     sp500['Bull_Prob'] = smoothed_probs[0]
-
-    """if show_regimes:
-        plt.plot(sp500.index, smoothed_probs[0], label="Probability of Bull Market")
-        plt.fill_between(sp500.index, 0, 1, where=sp500['Bull_Prob'] > 0.5, color='green', alpha=0.3)
-        plt.fill_between(sp500.index, 0, 1, where=sp500['Bull_Prob'] <= 0.5, color='red', alpha=0.3)
-        plt.legend()
-        plt.title("Bull vs. Bear Market Probability")
-        plt.show()"""
 
     return sp500["Bull_Prob"].to_frame()
     # 0 -> Bull, 1 -> Bear
