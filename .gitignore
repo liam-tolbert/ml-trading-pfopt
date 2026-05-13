@@ -4,3 +4,5 @@
 *.xlsx
 /__pycache__/
 .env
+*.json
+*.md

@@ -35,8 +35,8 @@ sys.stdout.reconfigure(encoding="utf-8")  # Fix Windows console encoding
 
 SHEET_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/e/"
-    "2PACX-1vQT7uecuE4ONP7z6L71E1y9F0mWp-Wbs6MrXpBtJ20toZwZhUuo0MVI36ahr1jpEqJJi1hXMKTnseRI"
-    "/pub?gid=1391383294&single=true&output=csv"
+    "2PACX-1vQ7Ak67UaBtm9DXMRbekiI3Asu8eBg8z8FAXmZ-cGSWRoBkbGk6atDRWYeoJF1UasbTgrP_aTJPlpa6"
+    "/pub?output=csv"
 )
 
 SNAPSHOT_DIR = Path(__file__).parent / "data" / "portfolio_snapshots"
@@ -414,7 +414,7 @@ def print_holdings(positions: dict):
 
     w = HOLDINGS_WIDTH
     print("\n" + "=" * w)
-    print(f"  ALL-WEATHER PORTFOLIO - Q1 2026  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  ALL-WEATHER PORTFOLIO - Q2 2026  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * w)
     print(
         f"  {'Ticker':<8} {'Company':<22} {'Shares':>10} {'Price':>10} "
@@ -570,7 +570,7 @@ def print_change_report(changes: dict, positions: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Track All-Weather Portfolio changes (Q1 2026)"
+        description="Track All-Weather Portfolio changes (Q2 2026)"
     )
     parser.add_argument("--holdings", action="store_true", help="Print current holdings only")
     parser.add_argument("--history",  action="store_true", help="List saved snapshots")
@@ -582,7 +582,7 @@ def main():
         return
 
     # Fetch and parse
-    print("Fetching Q1 2026 portfolio data...")
+    print("Fetching Q2 2026 portfolio data...")
     df = fetch_sheet()
     records = clean_data(df)
     positions = aggregate_positions(records)
