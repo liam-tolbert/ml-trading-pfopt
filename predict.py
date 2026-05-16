@@ -26,7 +26,7 @@ def run_model(stock_portfolio, stock_data):
     # Making recommendations per stock
     recommendations = stock_col.join(pred_col)
     recommendations.columns = ["Stock", "Recommendation"]
-    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Sell', 1: 'Buy', 2: 'Hold'})
+    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Sell', 1: 'Buy'})
 
     # Part 2: Getting the Markowitz mean-variance portfolio
 
@@ -45,7 +45,7 @@ def run_model(stock_portfolio, stock_data):
         return adjusted_mu
 
     probs = model.predict_proba(today_stocks_features[lib.features])
-    probs_db = pd.DataFrame(probs, columns=["Hold", "Buy", "Sell"], index=today_stocks_features["Stock"].values)
+    probs_db = pd.DataFrame(probs, columns=["Sell", "Buy"], index=today_stocks_features["Stock"].values)
     buy_probs = probs_db["Buy"]
 
     baseline_mu = expected_returns.mean_historical_return(buy_stocks_history)

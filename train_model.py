@@ -8,7 +8,6 @@ import indicators
 import lib
 import xgboost as xgb
 from sklearn.metrics import classification_report
-from sklearn.utils.class_weight import compute_class_weight
 
 # 1. Data download + prep
 
@@ -38,18 +37,19 @@ sp500 = lib.get_sp500('2000-01-01') # it's also needed in predict.py, so I put i
 df = lib.create_stock_features(stocks, "data/50stocks.csv", sp500)
 
 def label_signal(row):
-    r1 = row['Returns-1wk-0wklag']
-    r2 = row['Returns-2wk']
-    if r1 < -0.01 and r2 < -0.015:
-        return 0  # Sell
-    elif r1 > 0.01 and r2 > 0.015:
-        return 1  # Buy
+    r1 = row['Returns-future-1wk']
+    if r1 > 0.01:
+        return 1   # Buy
+    elif r1 < -0.01:
+        return 0   # Sell
     else:
-        return 2  # Hold
+        return np.nan  # drop — ambiguous
 
 df['Signal'] = df.apply(label_signal, axis=1)
+df = df.dropna(subset=['Returns-future-1wk', 'Returns-future-2wk', 'Signal'])
+df['Signal'] = df['Signal'].astype(int)
 
-# Sort by date?
+# Sort by date
 df = df.sort_values(by='Date')
 
 # 70% train, 15% val, 15% test
@@ -65,10 +65,10 @@ y_train = train['Signal']
 X_val = val[lib.features]
 y_val = val['Signal']
 
-# tuning class weights b/c the val set has underrepresented sell orders
-classes = np.unique(y_train)
-class_weights = compute_class_weight(class_weight='balanced', classes=classes, y=y_train)
-class_weight_dict = dict(zip(classes, class_weights))
+# balanced class weights — direct calculation to avoid numpy 2.x / sklearn 1.7.x bug
+classes, counts = np.unique(y_train, return_counts=True)
+n_samples = len(y_train)
+class_weight_dict = {c: n_samples / (len(classes) * cnt) for c, cnt in zip(classes, counts)}
 print("Class Weights:", class_weight_dict)
 
 # Map class weights to each sample in training set
@@ -79,9 +79,8 @@ sample_weights = sample_weights * bull_prob_multiplier
 
 # Train the model
 model = xgb.XGBClassifier(
-    objective='multi:softprob',  # for multi-class
-    num_class=len(classes),
-    eval_metric='mlogloss',
+    objective='binary:logistic',
+    eval_metric='logloss',
     tree_method='hist',
     subsample=0.6,
     colsample_bytree=0.9,

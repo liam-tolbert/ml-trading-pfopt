@@ -212,6 +212,10 @@ def create_stock_features(stocks, stock_data_filename, sp500):
         # rolling return (2 week window)
         features["Returns-2wk"] = prices["Returns-2wk"]
 
+        # Forward returns (labels, not features — excluded from `features` list above)
+        features["Returns-future-1wk"] = prices["Close"].pct_change(periods=1).shift(-1)
+        features["Returns-future-2wk"] = prices["Close"].pct_change(periods=2).shift(-2)
+
         features["Bull_Probability"] = regime_df["Bull_Prob"]
 
         features["Stock"] = stock
