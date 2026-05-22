@@ -65,38 +65,24 @@ y_train = train['Signal']
 X_val = val[lib.features]
 y_val = val['Signal']
 
-# balanced class weights — direct calculation to avoid numpy 2.x / sklearn 1.7.x bug
-classes, counts = np.unique(y_train, return_counts=True)
-n_samples = len(y_train)
-class_weight_dict = {c: n_samples / (len(classes) * cnt) for c, cnt in zip(classes, counts)}
-print("Class Weights:", class_weight_dict)
-
-# Map class weights to each sample in training set
-sample_weights = y_train.map(class_weight_dict)
-# Increase sample weights when Bull_Probability is extreme (close to 0 or 1)
-bull_prob_multiplier = X_train['Bull_Probability'].apply(lambda p: 2.0 if p < 0.2 or p > 0.8 else 1.0)
-sample_weights = sample_weights * bull_prob_multiplier
-
 # Train the model
 model = xgb.XGBClassifier(
     objective='binary:logistic',
     eval_metric='logloss',
     tree_method='hist',
-    subsample=0.6,
-    colsample_bytree=0.9,
-    reg_lambda=5,
-    reg_alpha=5,
-    booster='gbtree',
-    learning_rate=0.01,
-    gamma=0.5,
-    min_child_weight=5,
-    n_estimators=200,
+    max_depth=4,
+    n_estimators=150,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_lambda=2,
+    reg_alpha=1,
+    min_child_weight=20,
     use_label_encoder=False,
     random_state=42,
-    max_depth = 12,
 )
 
-model.fit(X_train, y_train, sample_weight=sample_weights)
+model.fit(X_train, y_train)
 
 X_test = test[lib.features]
 y_test = test['Signal']

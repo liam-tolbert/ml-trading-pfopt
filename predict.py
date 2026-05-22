@@ -12,6 +12,10 @@ import xgboost as xgb
 
 #TODO: Use argparse to make a better CLI
 
+BUY_THRESHOLD = 0.55  # P(Buy) must exceed this to enter the portfolio
+TOP_N = 10            # cap portfolio inclusion at top N by P_Buy (after threshold filter)
+ALPHA = 0.5           # P(Buy) influence on expected returns in compute_adjusted_mu
+
 def run_model(stock_portfolio, stock_data):
     # Part 1: Getting recommendations
     #download_and_fix_yfinance_data(stock_portfolio)
@@ -19,20 +23,28 @@ def run_model(stock_portfolio, stock_data):
 
     real_df = real_df.sort_values(by='Date')
     today_stocks_features = real_df.loc[[real_df.index.max()]]
-    todays_pred = model.predict(today_stocks_features[lib.features])
-    stock_col = today_stocks_features["Stock"].reset_index().drop(columns="Date")
-    pred_col = pd.DataFrame(todays_pred)
+    todays_probs = model.predict_proba(today_stocks_features[lib.features])[:, 1]
+    tickers = today_stocks_features["Stock"].values
 
-    # Making recommendations per stock
-    recommendations = stock_col.join(pred_col)
-    recommendations.columns = ["Stock", "Recommendation"]
-    recommendations["Recommendation"] = recommendations["Recommendation"].map({0: 'Sell', 1: 'Buy'})
+    recommendations = pd.DataFrame({
+        "Stock": tickers,
+        "P_Buy": todays_probs,
+        "Recommendation": np.where(todays_probs > BUY_THRESHOLD, "Buy", "Sell"),
+    })
 
     # Part 2: Getting the Markowitz mean-variance portfolio
 
-    # Isolating buys
-    buy_recommendations = recommendations[recommendations.Recommendation == "Buy"].drop(columns="Recommendation")
-    rec_array = buy_recommendations.to_numpy().flatten().tolist()
+    buy_candidates = (
+        recommendations.loc[recommendations.Recommendation == "Buy"]
+        .nlargest(TOP_N, "P_Buy")
+    )
+    rec_array = buy_candidates["Stock"].tolist()
+    n_above_threshold = int((recommendations["Recommendation"] == "Buy").sum())
+    print(f"{n_above_threshold} candidates cleared P(Buy) > {BUY_THRESHOLD}; taking top {len(rec_array)} by P_Buy")
+    if len(rec_array) < 2:
+        print("Fewer than 2 candidates — skipping optimizer")
+        return recommendations, OrderedDict()
+
     buy_stocks_history = lib.extract_ticker_dataframe(stock_data, rec_array[0])["Close"]
     for i in range(1, len(rec_array)):
         a = lib.extract_ticker_dataframe(stock_data, rec_array[i])["Close"]
@@ -40,18 +52,15 @@ def run_model(stock_portfolio, stock_data):
     buy_stocks_history.columns = rec_array
 
     def compute_adjusted_mu(buy_probs, baseline_mu, alpha=0.01):
-        tickers = baseline_mu.index.intersection(buy_probs.index)
-        adjusted_mu = baseline_mu.loc[tickers] * (1 + alpha * (buy_probs.loc[tickers] - 0.5))
-        return adjusted_mu
+        common = baseline_mu.index.intersection(buy_probs.index)
+        return baseline_mu.loc[common] * (1 + alpha * (buy_probs.loc[common] - 0.5))
 
-    probs = model.predict_proba(today_stocks_features[lib.features])
-    probs_db = pd.DataFrame(probs, columns=["Sell", "Buy"], index=today_stocks_features["Stock"].values)
-    buy_probs = probs_db["Buy"]
+    buy_probs = pd.Series(todays_probs, index=tickers).loc[rec_array]
 
     baseline_mu = expected_returns.mean_historical_return(buy_stocks_history)
 
     # Alpha is a strength parameter for the adjustment. Larger values will make the adjustment more aggressive.
-    adjusted_mu = compute_adjusted_mu(buy_probs, baseline_mu, alpha=0.05)
+    adjusted_mu = compute_adjusted_mu(buy_probs, baseline_mu, alpha=ALPHA)
 
     S = risk_models.sample_cov(buy_stocks_history)
 
