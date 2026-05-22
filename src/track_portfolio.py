@@ -14,6 +14,8 @@ Usage:
     python track_portfolio.py --holdings   # just print current holdings
     python track_portfolio.py --history    # list all saved snapshots
     python track_portfolio.py --no-save    # run without saving a snapshot
+    python track_portfolio.py --trade      # also reconcile via Alpaca (paper)
+    python track_portfolio.py --trade --dry-run   # build plan, never submit
 """
 
 import argparse
@@ -575,6 +577,10 @@ def main():
     parser.add_argument("--holdings", action="store_true", help="Print current holdings only")
     parser.add_argument("--history",  action="store_true", help="List saved snapshots")
     parser.add_argument("--no-save",  action="store_true", help="Don't save snapshot")
+    parser.add_argument("--trade",    action="store_true",
+                        help="After reporting, reconcile via Alpaca paper account")
+    parser.add_argument("--dry-run",  action="store_true",
+                        help="With --trade: print order plan, never submit")
     args = parser.parse_args()
 
     if args.history:
@@ -603,6 +609,11 @@ def main():
 
     if not args.no_save:
         save_snapshot(records, positions)
+
+    if args.trade:
+        # Lazy import: alpaca-py is only required when --trade is used.
+        from alpaca_trader import run_reconcile
+        run_reconcile(positions, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
