@@ -34,13 +34,10 @@ def run_model(stock_portfolio, stock_data):
 
     # Part 2: Getting the Markowitz mean-variance portfolio
 
-    buy_candidates = (
-        recommendations.loc[recommendations.Recommendation == "Buy"]
-        .nlargest(TOP_N, "P_Buy")
-    )
+    buy_candidates = recommendations.nlargest(TOP_N, "P_Buy")
     rec_array = buy_candidates["Stock"].tolist()
     n_above_threshold = int((recommendations["Recommendation"] == "Buy").sum())
-    print(f"{n_above_threshold} candidates cleared P(Buy) > {BUY_THRESHOLD}; taking top {len(rec_array)} by P_Buy")
+    print(f"{n_above_threshold} candidates above P(Buy) > {BUY_THRESHOLD}; taking top {len(rec_array)} by P_Buy rank (rank-only)")
     if len(rec_array) < 2:
         print("Fewer than 2 candidates — skipping optimizer")
         return recommendations, OrderedDict()
@@ -84,7 +81,7 @@ def run_model(stock_portfolio, stock_data):
 
     return recommendations, weights
 
-model_filename = "model.pkl"
+model_filename = "data/model.pkl"
 
 model = xgb.XGBClassifier()
 model.load_model(model_filename)

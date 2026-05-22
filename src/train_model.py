@@ -90,7 +90,7 @@ y_test = test['Signal']
 y_pred = model.predict(X_val)
 print(classification_report(y_val, y_pred))
 
-filename = "model.pkl"
+filename = "data/model.pkl"
 try:
     model.save_model(filename)
 except Exception as e:

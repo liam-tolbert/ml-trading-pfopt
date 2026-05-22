@@ -39,7 +39,7 @@ SHEET_CSV_URL = (
     "/pub?output=csv"
 )
 
-SNAPSHOT_DIR = Path(__file__).parent / "data" / "portfolio_snapshots"
+SNAPSHOT_DIR = Path(__file__).parent.parent / "data" / "portfolio_snapshots"
 
 # Column names mapped to the published CSV (order matters)
 CSV_COLUMNS = [

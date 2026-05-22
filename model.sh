@@ -4,4 +4,4 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pass all arguments ($@) to the Python script
-python "$DIR/predict.py" "$@"
+python "$DIR/src/predict.py" "$@"
