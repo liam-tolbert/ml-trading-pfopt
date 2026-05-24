@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from pathlib import Path
 
 # imports
 import numpy as np
@@ -107,16 +108,67 @@ def extract_ticker_dataframe(csv_filepath: str, ticker: str) -> pd.DataFrame:
 
     return df_ticker.dropna()
 
-def classify_regimes(sp500):
-    model = MarkovRegression(sp500['Log_Returns'], k_regimes=2, trend='c', switching_variance=True)
-    result = model.fit()
-    #print(result.summary())
-    smoothed_probs = result.smoothed_marginal_probabilities
-    sp500['Regime'] = smoothed_probs.idxmax(axis=1)
-    sp500['Bull_Prob'] = smoothed_probs[0]
+def classify_regimes(sp500, cache_path='data/bull_prob_causal.csv',
+                     min_train=104, force_refresh=False, verbose=False):
+    """Walking-forward causal Markov regime probabilities.
 
-    return sp500["Bull_Prob"].to_frame()
-    # 0 -> Bull, 1 -> Bear
+    At each weekly date t (i >= min_train), refits MarkovRegression on
+    Log_Returns[:t+1] and takes filtered_marginal_probabilities at t — the
+    regime probability conditional only on info <= t. The bull regime is
+    identified per fit as the one with the larger intercept, since regime
+    labels are not stable across fits.
+
+    Caches per-date to cache_path; only refits for dates not already cached.
+    Pass force_refresh=True to rebuild from scratch.
+    """
+    log_returns = sp500['Log_Returns']
+
+    cache = None
+    if cache_path and Path(cache_path).exists() and not force_refresh:
+        cache = pd.read_csv(cache_path, index_col=0, parse_dates=True)
+
+    cached_dates = set(cache.index) if cache is not None else set()
+    new_rows = {}
+
+    for i, t in enumerate(sp500.index):
+        if i < min_train:
+            continue
+        if t in cached_dates:
+            continue
+        window = log_returns.iloc[:i + 1].dropna()
+        if len(window) < min_train:
+            continue
+        try:
+            model = MarkovRegression(window, k_regimes=2, trend='c',
+                                     switching_variance=True)
+            result = model.fit(disp=False)
+            intercepts = [result.params[f'const[{k}]'] for k in range(2)]
+            bull_regime = int(np.argmax(intercepts))
+            filt = result.filtered_marginal_probabilities
+            new_rows[t] = float(filt.iloc[-1, bull_regime])
+        except Exception as exc:
+            if verbose:
+                print(f"[classify_regimes] fit failed at {t}: {exc}")
+            new_rows[t] = float('nan')
+        if verbose and i % 50 == 0:
+            print(f"[classify_regimes] {i}/{len(sp500.index)} fit at {t.date()}")
+
+    if cache is not None:
+        new_series = pd.Series(new_rows, name='Bull_Prob') if new_rows else None
+        if new_series is not None and len(new_series) > 0:
+            full = pd.concat([cache['Bull_Prob'], new_series]).sort_index()
+            full = full[~full.index.duplicated(keep='last')]
+        else:
+            full = cache['Bull_Prob']
+    else:
+        full = pd.Series(new_rows, name='Bull_Prob').sort_index()
+
+    result_df = full.to_frame('Bull_Prob')
+    if cache_path:
+        Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+        result_df.to_csv(cache_path)
+
+    return result_df.reindex(sp500.index)
 
 # Compute rolling portfolio weights using a lookback period (e.g., 52 weeks)
 def compute_rolling_portfolio_weights(data, lookback_window=52):
