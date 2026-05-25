@@ -187,6 +187,58 @@ def test_rebalance_frequency_reduces_turnover():
           f"total cost weekly={cost_w:.4f} > monthly={cost_m:.4f}")
 
 
+def test_price_dependent_spread_cost():
+    """With spread_per_share set, per-rebalance cost is computed per ticker from
+    the weekly close — (spread/2)/price * |Δw| — so a cheap stock costs more bps
+    than an expensive one. Built with flat prices (gross == 0) so the entire
+    first-week net is -cost and the closed form is exact."""
+    p_cheap, p_exp = 10.0, 1000.0
+    spread = 0.02
+    dates = pd.date_range("2015-01-02", periods=N_WEEKS, freq="W-FRI")
+
+    # Two tickers, constant prices -> zero realized return every week.
+    closes = pd.DataFrame({"CHEAP": p_cheap, "EXP": p_exp},
+                          index=dates, dtype=float)
+    rows = []
+    for tk in ["CHEAP", "EXP"]:
+        for d in dates:
+            rows.append({
+                "Date": d,
+                "Stock": tk,
+                # 'score' picks both (top_n=2); CHEAP ranks higher (irrelevant)
+                "score": 1.0 if tk == "CHEAP" else 0.0,
+                "noise": 0.0,
+                "Signal": 1,
+                "Returns-future-1wk": 0.0,
+            })
+    panel = pd.DataFrame(rows).set_index("Date").sort_index()
+
+    res = bl.walk_forward_backtest(
+        panel, closes, FEATURES, make_fit_fn({"models": []}),
+        schemes={"equal": bl.equal_weights},
+        top_n=2, refit_every=13, label_buffer=2, min_train_rows=10,
+        backtest_start=panel.index.unique()[20], rebalance_every=10_000,
+        spread_per_share=spread, tc_one_way=0.0,
+    )
+    wk = res["weekly"]
+    first = wk.iloc[0]
+    # both bought at w=0.5 from cash -> |Δw| = 0.5 each
+    assert abs(first["equal_turnover"] - 1.0) < 1e-9, first["equal_turnover"]
+    cost_cheap = (spread / 2.0) * 0.5 / p_cheap
+    cost_exp = (spread / 2.0) * 0.5 / p_exp
+    expected_cost = cost_cheap + cost_exp
+    realized_cost = first["equal_gross"] - first["equal_net"]
+    assert abs(first["equal_gross"]) < 1e-12, "flat prices -> zero gross"
+    assert abs(realized_cost - expected_cost) < 1e-12, \
+        f"cost {realized_cost} != closed form {expected_cost}"
+    # the point: same |Δw|, cheaper name costs more
+    assert cost_cheap > cost_exp
+    assert abs(cost_cheap / cost_exp - p_exp / p_cheap) < 1e-9, \
+        "bps ratio should equal the inverse price ratio (100x here)"
+    print(f"test_price_dependent_spread_cost OK — cheap {cost_cheap:.6f} > "
+          f"exp {cost_exp:.6f} (={p_exp/p_cheap:.0f}x), total matches closed form")
+
+
 def test_backtest_end_truncates():
     panel, closes = build_world()
     end = panel.index.unique()[-15]
@@ -206,5 +258,6 @@ if __name__ == "__main__":
     test_equal_weight_matches_hand_calc()
     test_hold_and_drift_no_cost()
     test_rebalance_frequency_reduces_turnover()
+    test_price_dependent_spread_cost()
     test_backtest_end_truncates()
     print("\nAll backtest_lib synthetic tests passed.")

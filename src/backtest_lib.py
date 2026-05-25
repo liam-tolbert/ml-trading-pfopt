@@ -165,6 +165,7 @@ def walk_forward_backtest(
     backtest_start=None,
     backtest_end=None,
     tc_one_way: float = 0.0005,
+    spread_per_share: float = 0.02,
     signal_col: str = "Signal",
     stock_col: str = "Stock",
     fwd_ret_col: str = "Returns-future-1wk",
@@ -179,6 +180,14 @@ def walk_forward_backtest(
     rebalance_every : weeks between portfolio reforms. 1 = reform every week
         (full turnover); larger = hold the book and let it drift, paying cost
         only on rebalance weeks.
+    tc_one_way : flat one-way transaction cost as a fraction of traded notional
+        (cost = tc_one_way * Σ|Δw|). Used when `spread_per_share` is None.
+    spread_per_share : if set (e.g. 0.02 for a $0.02 bid-ask spread), cost is
+        computed PER TICKER from that week's close: (spread/2)/price_i × |Δw_i|,
+        summed over names. This makes cheap stocks cost more bps than expensive
+        ones (the real spread effect; commission = $0). Names with a missing or
+        non-positive price fall back to the flat `tc_one_way` rate. When None,
+        the flat `tc_one_way` model applies and behavior is unchanged.
     backtest_start / backtest_end : restrict the live simulation window
         (e.g. backtest_end='2025-08-15' to match a benchmark that ends there).
 
@@ -260,7 +269,22 @@ def walk_forward_backtest(
                 keys = set(target) | set(cur_weights[scheme_name])
                 turnover = sum(abs(target.get(k, 0.0) - cur_weights[scheme_name].get(k, 0.0))
                                for k in keys)
-                cost = tc_one_way * turnover
+                if spread_per_share is None:
+                    cost = tc_one_way * turnover
+                else:
+                    # price-dependent: (spread/2)/price_i × |Δw_i| per name.
+                    # close_window's last row is the most recent close <= t.
+                    price_row = close_window.iloc[-1]
+                    cost = 0.0
+                    for k in keys:
+                        dw = abs(target.get(k, 0.0) - cur_weights[scheme_name].get(k, 0.0))
+                        if dw == 0.0:
+                            continue
+                        price = price_row.get(k, np.nan)
+                        if pd.isna(price) or price <= 0:
+                            cost += tc_one_way * dw        # fallback: flat rate
+                        else:
+                            cost += (spread_per_share / 2.0) / float(price) * dw
                 cur_weights[scheme_name] = dict(target)
             else:
                 turnover = 0.0
