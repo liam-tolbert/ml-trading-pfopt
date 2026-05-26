@@ -299,9 +299,4 @@ def run_reconcile(positions: dict, dry_run: bool = False) -> None:
         print("\n--dry-run set; no orders submitted.")
         return
 
-    resp = input("\nProceed? [y/N]: ").strip().lower()
-    if resp != "y":
-        print("Aborted. No orders submitted.")
-        return
-
     submit_orders(client, plan, equity)

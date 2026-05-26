@@ -239,6 +239,40 @@ def test_price_dependent_spread_cost():
           f"exp {cost_exp:.6f} (={p_exp/p_cheap:.0f}x), total matches closed form")
 
 
+def test_buy_threshold_selection():
+    """buy_threshold selects EVERY name with P_Buy > threshold (variable count),
+    overriding top_n. The stub's P_Buy = sigmoid(score - 2.5), so only scores
+    3,4,5 clear 0.5 -> T3,T4,T5; equal-weight gross == mean of their next-week
+    returns and the book size is 3 regardless of top_n."""
+    panel, closes = build_world()
+    res = bl.walk_forward_backtest(
+        panel, closes, FEATURES, make_fit_fn({"models": []}),
+        schemes={"equal": bl.equal_weights},
+        top_n=1,                      # deliberately tiny -> threshold must override it
+        buy_threshold=0.5, refit_every=13, label_buffer=2, min_train_rows=10,
+        backtest_start=panel.index.unique()[20], tc_one_way=0.0,
+        spread_per_share=None,
+    )
+    expected_buys = ["T3", "T4", "T5"]
+    for t in res["weekly"].index:
+        wk = panel.loc[[t]].set_index("Stock")["Returns-future-1wk"]
+        expected = wk.loc[expected_buys].mean()
+        assert abs(res["weekly"].loc[t, "equal_gross"] - expected) < 1e-9
+        assert res["weekly"].loc[t, "equal_n"] == len(expected_buys)
+
+    # threshold above every name's P_Buy (max ~0.924) -> empty book -> cash
+    res_cash = bl.walk_forward_backtest(
+        panel, closes, FEATURES, make_fit_fn({"models": []}),
+        schemes={"equal": bl.equal_weights},
+        buy_threshold=0.95, refit_every=13, label_buffer=2, min_train_rows=10,
+        backtest_start=panel.index.unique()[20], spread_per_share=None,
+    )
+    assert (res_cash["weekly"]["equal_n"] == 0).all(), "no name should clear 0.95"
+    assert (res_cash["weekly"]["equal_gross"].abs() < 1e-12).all(), "cash earns 0"
+    print("test_buy_threshold_selection OK -- held all P_Buy>0.5 names (T3,T4,T5) "
+          "over top_n=1; and went to cash at threshold 0.95")
+
+
 def test_backtest_end_truncates():
     panel, closes = build_world()
     end = panel.index.unique()[-15]
@@ -259,5 +293,6 @@ if __name__ == "__main__":
     test_hold_and_drift_no_cost()
     test_rebalance_frequency_reduces_turnover()
     test_price_dependent_spread_cost()
+    test_buy_threshold_selection()
     test_backtest_end_truncates()
     print("\nAll backtest_lib synthetic tests passed.")

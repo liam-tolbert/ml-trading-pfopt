@@ -37,7 +37,7 @@ sys.stdout.reconfigure(encoding="utf-8")  # Fix Windows console encoding
 
 SHEET_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/e/"
-    "2PACX-1vQ7Ak67UaBtm9DXMRbekiI3Asu8eBg8z8FAXmZ-cGSWRoBkbGk6atDRWYeoJF1UasbTgrP_aTJPlpa6"
+    "2PACX-1vQT7uecuE4ONP7z6L71E1y9F0mWp-Wbs6MrXpBtJ20toZwZhUuo0MVI36ahr1jpEqJJi1hXMKTnseRI"
     "/pub?output=csv"
 )
 

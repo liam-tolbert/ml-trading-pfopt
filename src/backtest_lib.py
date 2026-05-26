@@ -156,6 +156,7 @@ def walk_forward_backtest(
     spy_fwd_returns: pd.Series | None = None,
     schemes=None,
     top_n: int = 10,
+    buy_threshold: float | None = None,
     alpha: float = 0.5,
     cov_lookback: int = 52,
     refit_every: int = 13,
@@ -177,6 +178,12 @@ def walk_forward_backtest(
     Parameters of note
     -------------------
     refit_every : weeks between model retrains (independent of rebalancing).
+    top_n : number of names to hold, selected by highest P_Buy (rank-based).
+        Ignored when `buy_threshold` is set.
+    buy_threshold : if set (e.g. 0.5), select EVERY name with P_Buy > threshold
+        instead of a fixed top_n -- a variable-size "all buy signals" book. In
+        weeks where no name clears the threshold the book goes flat (cash, zero
+        return that week). When None, the fixed `top_n`-by-rank rule applies.
     rebalance_every : weeks between portfolio reforms. 1 = reform every week
         (full turnover); larger = hold the book and let it drift, paying cost
         only on rebalance weeks.
@@ -258,8 +265,12 @@ def walk_forward_backtest(
             probs = model.predict_proba(week_rows[feature_cols])[:, 1]
             tickers = week_rows[stock_col].to_numpy()
             probs_series = pd.Series(probs, index=tickers)
-            buy_tickers = list(
-                probs_series.nlargest(min(top_n, len(probs_series))).index)
+            if buy_threshold is not None:
+                # every name the model rates a "buy" -> variable-size book
+                buy_tickers = list(probs_series[probs_series > buy_threshold].index)
+            else:
+                buy_tickers = list(
+                    probs_series.nlargest(min(top_n, len(probs_series))).index)
             close_window = closes.loc[:t].tail(cov_lookback)
 
         row = {"Date": t, "rebalanced": int(do_rebalance)}
