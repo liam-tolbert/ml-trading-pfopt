@@ -14,7 +14,8 @@ Usage:
     python track_portfolio.py --holdings   # just print current holdings
     python track_portfolio.py --history    # list all saved snapshots
     python track_portfolio.py --no-save    # run without saving a snapshot
-    python track_portfolio.py --trade      # also reconcile via Alpaca (paper)
+    python track_portfolio.py --trade      # trade only NEW activity since last snapshot
+    python track_portfolio.py --trade --init      # bootstrap: reconcile whole sheet
     python track_portfolio.py --trade --dry-run   # build plan, never submit
 """
 
@@ -578,7 +579,11 @@ def main():
     parser.add_argument("--history",  action="store_true", help="List saved snapshots")
     parser.add_argument("--no-save",  action="store_true", help="Don't save snapshot")
     parser.add_argument("--trade",    action="store_true",
-                        help="After reporting, reconcile via Alpaca paper account")
+                        help="After reporting, trade via Alpaca paper account. By default "
+                             "only acts on new activity since the last snapshot")
+    parser.add_argument("--init",     action="store_true",
+                        help="With --trade: full reconciliation — initialize the Alpaca "
+                             "account to match the entire sheet (bootstrap a fresh account)")
     parser.add_argument("--dry-run",  action="store_true",
                         help="With --trade: print order plan, never submit")
     args = parser.parse_args()
@@ -601,8 +606,8 @@ def main():
 
     # Diff against previous snapshot
     previous = load_latest_snapshot()
-    if previous:
-        changes = compare_snapshots(previous["positions"], positions)
+    changes = compare_snapshots(previous["positions"], positions) if previous else None
+    if changes is not None:
         print_change_report(changes, positions)
     else:
         print("\nFirst run — saving baseline snapshot. Run again after the sheet updates to see changes.")
@@ -613,7 +618,38 @@ def main():
     if args.trade:
         # Lazy import: alpaca-py is only required when --trade is used.
         from alpaca_trader import run_reconcile
-        run_reconcile(positions, dry_run=args.dry_run)
+
+        if args.init:
+            # Full reconciliation — bring the whole sheet into the account.
+            run_reconcile(positions, dry_run=args.dry_run)
+        else:
+            # Trade only tickers with genuine new activity since the last snapshot.
+            new_activity: set[str] = set()
+            full_exits: set[str] = set()
+            if changes is not None:
+                new_activity = (
+                    {c["ticker"] for c in changes["new_positions"]}
+                    | {c["ticker"] for c in changes["new_lots"]}
+                    | {c["ticker"] for c in changes["new_sales"]}
+                )
+                sold = {c["ticker"] for c in changes["new_sales"]}
+                full_exits = {
+                    t for t in sold
+                    if t in positions and positions[t]["total_shares"] <= 0
+                }
+
+            if not new_activity and not full_exits:
+                print(
+                    "\nNo new activity since last snapshot — nothing to trade. "
+                    "Use --trade --init to initialize the account to the full sheet."
+                )
+            else:
+                run_reconcile(
+                    positions, dry_run=args.dry_run,
+                    only_tickers=new_activity, full_exit_tickers=full_exits,
+                )
+    elif args.init:
+        print("Note: --init has no effect without --trade.")
 
 
 if __name__ == "__main__":
