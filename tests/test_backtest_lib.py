@@ -273,6 +273,83 @@ def test_buy_threshold_selection():
           "over top_n=1; and went to cash at threshold 0.95")
 
 
+def test_listing_seasoning():
+    """apply_listing_seasoning drops the first N rows of each ticker, removes
+    tickers with < N rows entirely, preserves index/columns/sort, is pure, has
+    an n=0 no-op, and counts ROWS (gap-robust) not calendar weeks."""
+    dates = pd.date_range("2015-01-02", periods=60, freq="W-FRI")
+    rows = [{"Date": d, "Stock": "LONG", "Signal": 1, "x": 1.0} for d in dates]
+    rows += [{"Date": d, "Stock": "SHORT", "Signal": 0, "x": 2.0}
+             for d in dates[20:]]                       # 40 rows
+    rows += [{"Date": d, "Stock": "TINY", "Signal": 1, "x": 3.0}
+             for d in dates[:5]]                        # 5 rows
+    panel = pd.DataFrame(rows).set_index("Date").sort_index()
+    before = panel.copy(deep=True)
+
+    out = bl.apply_listing_seasoning(panel, n_weeks=52)
+    assert (out["Stock"] == "LONG").sum() == 8          # 60 - 52
+    assert (out["Stock"] == "SHORT").sum() == 0         # 40 < 52 -> gone
+    assert "TINY" not in set(out["Stock"])              # 5 < 52 -> gone
+    # the surviving LONG rows are exactly the LAST 8 dates, in order
+    assert list(out.index[out["Stock"] == "LONG"]) == list(dates[52:])
+    assert out.index.name == panel.index.name
+    assert list(out.columns) == list(panel.columns)
+    assert out.index.is_monotonic_increasing
+    pd.testing.assert_frame_equal(panel, before)        # purity: input untouched
+
+    # n_weeks <= 0 is a no-op (sorted copy)
+    assert len(bl.apply_listing_seasoning(panel, n_weeks=0)) == len(panel)
+
+    # gap robustness: count rows, not calendar span. 50 rows after a 10-week hole.
+    gap_dates = dates.delete(range(25, 35))
+    gp = pd.DataFrame([{"Date": d, "Stock": "GAP", "Signal": 1, "x": 9.0}
+                       for d in gap_dates]).set_index("Date").sort_index()
+    assert (bl.apply_listing_seasoning(gp, n_weeks=52)["Stock"] == "GAP").sum() == 0
+    assert (bl.apply_listing_seasoning(gp, n_weeks=40)["Stock"] == "GAP").sum() == 10
+    print("test_listing_seasoning OK — per-ticker drop, short-ticker exclusion, "
+          "purity, n=0 no-op, gap-robust row counting")
+
+
+def test_long_short_beta_hedge():
+    """Beta-neutral L/S: when high-score names have higher alpha AND lower beta,
+    the dollar-neutral spread carries negative net beta (long low-beta, short
+    high-beta), the ex-ante hedge removes the market component exactly, and the
+    hedged series collapses to the pure alpha differential (market-neutral)."""
+    rng = np.random.default_rng(3)
+    dates = pd.date_range("2015-01-02", periods=N_WEEKS, freq="W-FRI")
+    m = rng.normal(0.002, 0.03, size=N_WEEKS)               # market return path
+    alpha = {f"T{i}": 0.001 * (i - 2.5) for i in range(6)}  # higher score -> higher alpha
+    beta = {f"T{i}": 1.3 - 0.1 * i for i in range(6)}       # higher score -> lower beta
+    rows = []
+    for i in range(6):
+        tk = f"T{i}"
+        for j, d in enumerate(dates):
+            rows.append({"Date": d, "Stock": tk, "score": float(i), "noise": 0.0,
+                         "Signal": 1, "Returns-future-1wk": alpha[tk] + beta[tk] * m[j],
+                         "Beta_26wk": beta[tk]})
+    panel = pd.DataFrame(rows).set_index("Date").sort_index()
+    spy = pd.Series(m, index=dates)
+
+    res = bl.walk_forward_long_short(
+        panel, ["score", "noise"], make_fit_fn({"models": []}),
+        spy_fwd_returns=spy, beta_col="Beta_26wk", quantile=0.34,
+        refit_every=13, label_buffer=2, min_train_rows=10,
+        backtest_start=dates[20], tc_one_way=0.0,
+    )
+    wk = res["weekly"]
+    # long = T5,T4 (beta .8,.9 -> .85); short = T1,T0 (beta 1.2,1.3 -> 1.25)
+    assert np.allclose(wk["long_beta"], 0.85)
+    assert np.allclose(wk["short_beta"], 1.25)
+    assert np.allclose(wk["net_beta"], -0.40)
+    # hedged collapses to the alpha differential: (a5+a4)/2 - (a1+a0)/2 = 0.004, constant
+    assert np.allclose(wk["hedged_gross"], 0.004, atol=1e-9)
+    # the raw spread still swings with the market; the hedged series does not
+    assert wk["spread_gross"].std() > 1e-3
+    assert wk["hedged_gross"].std() < 1e-9
+    assert wk["spread_gross"].mean() > 0
+    print("test_long_short_beta_hedge OK — net_beta=-0.40, hedge isolates alpha=0.004")
+
+
 def test_backtest_end_truncates():
     panel, closes = build_world()
     end = panel.index.unique()[-15]
@@ -294,5 +371,7 @@ if __name__ == "__main__":
     test_rebalance_frequency_reduces_turnover()
     test_price_dependent_spread_cost()
     test_buy_threshold_selection()
+    test_listing_seasoning()
+    test_long_short_beta_hedge()
     test_backtest_end_truncates()
     print("\nAll backtest_lib synthetic tests passed.")

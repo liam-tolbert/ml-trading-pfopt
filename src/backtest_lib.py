@@ -98,6 +98,34 @@ DEFAULT_SCHEMES = {
 
 
 # --------------------------------------------------------------------------- #
+# Universe eligibility
+# --------------------------------------------------------------------------- #
+def apply_listing_seasoning(panel, *, n_weeks=52, stock_col="Stock"):
+    """Drop the first ``n_weeks`` observations of EACH ticker's history.
+
+    Reduces late-entrant survivorship / IPO-pop bias: a ticker only becomes
+    eligible once it has accumulated ``n_weeks`` weekly rows. Tickers with fewer
+    than ``n_weeks`` total rows are removed entirely.
+
+    Counts ROWS PER TICKER (not calendar weeks), so it is robust to gaps in a
+    ticker's history — it guarantees at least ``n_weeks`` real weekly
+    observations before eligibility regardless of missing weeks. Because the
+    backtest panel is already post-dropna (feature warmup rows removed upstream),
+    a positional cumcount over panel rows is exactly "the first ``n_weeks``
+    usable weeks."
+
+    Pure: the input is not mutated. Preserves the Date index, all columns, and
+    returns sorted by Date. ``n_weeks <= 0`` is a no-op (returns a sorted copy),
+    so the call can be wired in unconditionally behind a disable knob.
+    """
+    if n_weeks <= 0:
+        return panel.sort_index()
+    p = panel.sort_index()
+    keep = p.groupby(p[stock_col], sort=False).cumcount() >= n_weeks
+    return p[keep].sort_index()
+
+
+# --------------------------------------------------------------------------- #
 # Metrics
 # --------------------------------------------------------------------------- #
 def _max_drawdown(equity: pd.Series) -> float:
@@ -345,5 +373,163 @@ def walk_forward_backtest(
         "weekly": weekly,
         "equity": equity,
         "metrics": metrics_df,
+        "refit_dates": refit_dates,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Beta-neutral long-short (market-neutral alpha test)
+# --------------------------------------------------------------------------- #
+def walk_forward_long_short(
+    panel,
+    feature_cols,
+    fit_fn,
+    *,
+    spy_fwd_returns,
+    beta_col="Beta_26wk",
+    quantile=0.2,
+    n_per_leg=None,
+    refit_every=13,
+    label_buffer=2,
+    min_train_rows=500,
+    backtest_start=None,
+    backtest_end=None,
+    tc_one_way=0.0005,
+    signal_col="Signal",
+    stock_col="Stock",
+    fwd_ret_col="Returns-future-1wk",
+    risk_free_rate=0.0,
+    verbose=False,
+):
+    """Weekly-reformed, dollar-neutral, ex-ante beta-hedged long/short.
+
+    Each week the model scores the universe; the top `quantile` (or `n_per_leg`)
+    names by P_Buy form the long leg (equal weight, sums to +1) and the bottom
+    form the short leg (equal weight, sums to -1). The dollar-neutral spread is
+    long_ret - short_ret.
+
+    Because the model tilts long toward LOW-beta names and short toward HIGH-beta
+    names, the spread carries negative net market beta (this is why a *naive* L/S
+    loses in a bull tape). We strip the market EX-ANTE using each name's trailing
+    `beta_col` (point-in-time, known at t):
+
+        net_beta_t = mean(beta[long]) - mean(beta[short])
+        hedged_t   = spread_t - net_beta_t * spy_fwd_t
+
+    The hedged series is the (ex-ante) market-neutral return. It isolates whether
+    the P_Buy ranking has ANY cross-sectional alpha once the market is removed --
+    i.e. the skill the long-only book cannot capture because it lives partly in
+    the short (low-P_Buy) leg.
+
+    Reforms EVERY week (no drift accounting): the realized return is the next-week
+    return of the freshly chosen legs. This is the cheapest correct alpha test; a
+    lower-turnover (quarterly, drifted) version is only worth building if the gross
+    hedged series shows alpha. Cost = tc_one_way * (turnover of both legs + hedge).
+    Leak controls mirror walk_forward_backtest (past-only labels, label_buffer).
+
+    Returns dict with 'weekly' (long/short/spread/hedged gross+net, leg betas,
+    net_beta, spy, turnover, cost), 'metrics' (spread & hedged, gross & net), and
+    'refit_dates'.
+    """
+    feature_cols = list(feature_cols)
+    panel = panel.sort_index()
+    all_dates = panel.index.unique().sort_values()
+    date_pos = {d: i for i, d in enumerate(all_dates)}
+
+    live_dates = list(all_dates)
+    if backtest_start is not None:
+        bs = pd.Timestamp(backtest_start)
+        live_dates = [d for d in live_dates if d >= bs]
+    if backtest_end is not None:
+        be = pd.Timestamp(backtest_end)
+        live_dates = [d for d in live_dates if d <= be]
+
+    labeled = panel[panel[signal_col].notna()]
+
+    records = []
+    model = None
+    refit_dates = []
+    weeks_since_refit = refit_every
+    prev_w = {}            # signed target weights from last reform (turnover)
+    prev_hedge = 0.0       # SPY hedge notional from last reform
+
+    for t in live_dates:
+        if weeks_since_refit >= refit_every or model is None:
+            cutoff_pos = date_pos[t] - label_buffer
+            if cutoff_pos < 0:
+                weeks_since_refit += 1
+                continue
+            cutoff_date = all_dates[cutoff_pos]
+            train_rows = labeled[labeled.index <= cutoff_date]
+            if len(train_rows) < min_train_rows:
+                weeks_since_refit += 1
+                continue
+            model = fit_fn(train_rows[feature_cols], train_rows[signal_col].astype(int))
+            refit_dates.append(t)
+            weeks_since_refit = 0
+            if verbose:
+                print(f"[refit] {t.date()} on {len(train_rows)} rows")
+
+        if model is None or t not in panel.index:
+            weeks_since_refit += 1
+            continue
+
+        week_rows = panel.loc[[t]]
+        if len(week_rows) < 4:        # need enough names to form two legs
+            weeks_since_refit += 1
+            continue
+
+        probs = model.predict_proba(week_rows[feature_cols])[:, 1]
+        tickers = week_rows[stock_col].to_numpy()
+        probs_s = pd.Series(probs, index=tickers)
+        fwd = pd.Series(week_rows[fwd_ret_col].to_numpy(), index=tickers)
+        beta = pd.Series(week_rows[beta_col].to_numpy(), index=tickers)
+
+        n = len(probs_s)
+        k = min(n_per_leg, n // 2) if n_per_leg is not None else max(1, int(n * quantile))
+        ranked = probs_s.sort_values(ascending=False)
+        long_names = list(ranked.index[:k])
+        short_names = list(ranked.index[-k:])
+
+        long_ret = float(fwd.loc[long_names].mean())
+        short_ret = float(fwd.loc[short_names].mean())
+        spread = long_ret - short_ret
+
+        long_beta = float(beta.loc[long_names].mean())
+        short_beta = float(beta.loc[short_names].mean())
+        net_beta = long_beta - short_beta
+        spy_t = float(spy_fwd_returns.get(t, np.nan))
+        hedged = spread - net_beta * spy_t if pd.notna(spy_t) else np.nan
+
+        # turnover vs last reform: both legs (equal weight 1/k) + the SPY hedge
+        target = {nm: 1.0 / k for nm in long_names}
+        for nm in short_names:
+            target[nm] = target.get(nm, 0.0) - 1.0 / k
+        keys = set(target) | set(prev_w)
+        turnover = sum(abs(target.get(kk, 0.0) - prev_w.get(kk, 0.0)) for kk in keys)
+        turnover += abs((-net_beta) - prev_hedge)
+        cost = tc_one_way * turnover
+        prev_w = target
+        prev_hedge = -net_beta
+
+        records.append({
+            "Date": t,
+            "long_ret": long_ret, "short_ret": short_ret,
+            "spread_gross": spread, "spread_net": spread - cost,
+            "hedged_gross": hedged,
+            "hedged_net": (hedged - cost) if pd.notna(hedged) else np.nan,
+            "long_beta": long_beta, "short_beta": short_beta, "net_beta": net_beta,
+            "spy": spy_t, "turnover": turnover, "cost": cost, "k_per_leg": k,
+        })
+        weeks_since_refit += 1
+
+    weekly = pd.DataFrame(records).set_index("Date").sort_index()
+
+    metrics = {col: compute_metrics(weekly[col], risk_free_rate=risk_free_rate)
+               for col in ["spread_gross", "spread_net", "hedged_gross", "hedged_net"]}
+
+    return {
+        "weekly": weekly,
+        "metrics": pd.DataFrame(metrics).T,
         "refit_dates": refit_dates,
     }
