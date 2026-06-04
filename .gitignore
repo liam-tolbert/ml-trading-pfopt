@@ -3,6 +3,7 @@
 *.pkl
 *.xlsx
 __pycache__/
+.ipynb_checkpoints/
 .env
 *.json
 *.md
