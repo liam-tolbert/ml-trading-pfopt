@@ -350,6 +350,47 @@ def test_long_short_beta_hedge():
     print("test_long_short_beta_hedge OK — net_beta=-0.40, hedge isolates alpha=0.004")
 
 
+def test_relative_residual_label():
+    """Residual cross-sectional label backs out beta, ranks idiosyncratic forward
+    returns into top/bottom terciles per week, NaNs the middle, NaNs NaN-beta rows
+    and too-thin weeks, is market-neutral (highest RAW return can be labeled SELL
+    if it's pure beta), and is pure."""
+    d0 = pd.Timestamp("2020-01-03")
+    d1 = pd.Timestamp("2020-01-10")
+    mkt = pd.Series({d0: 0.02, d1: -0.01})        # market fwd return per week
+    betas = [1.3, 0.7, 1.0, 0.9, 1.1, 0.8]
+    resids = [0, 1, 2, 3, 4, 5]                   # A0 lowest alpha ... A5 highest
+    rows = []
+    for i in range(6):
+        rows.append({"Date": d0, "Stock": f"A{i}", "Beta_26wk": betas[i],
+                     "Returns-future-1wk": betas[i] * 0.02 + resids[i] * 0.001, "x": 1.0})
+    rows.append({"Date": d0, "Stock": "NANBETA", "Beta_26wk": np.nan,
+                 "Returns-future-1wk": 0.05, "x": 3.0})          # NaN beta -> NaN label
+    for i in range(3):                                            # thin week (<min_names)
+        rows.append({"Date": d1, "Stock": f"B{i}", "Beta_26wk": 1.0,
+                     "Returns-future-1wk": 0.01, "x": 2.0})
+    panel = pd.DataFrame(rows).set_index("Date").sort_index()
+    before = panel.copy(deep=True)
+
+    out = bl.relative_residual_label(panel, market_fwd=mkt, beta_col="Beta_26wk",
+                                     top_q=1 / 3, min_names=6)
+    a = out[out["Stock"].str.startswith("A")]
+    sig = dict(zip(a["Stock"], a["Signal"]))
+    raw = dict(zip(a["Stock"], a["Returns-future-1wk"]))
+    assert sig["A0"] == 0.0 and sig["A1"] == 0.0           # lowest residuals -> sell
+    assert sig["A4"] == 1.0 and sig["A5"] == 1.0           # highest residuals -> buy
+    assert np.isnan(sig["A2"]) and np.isnan(sig["A3"])     # middle tercile dropped
+    # market-neutrality: A0 has the HIGHEST raw fwd return (pure beta) yet is SELL,
+    # while A5 (lower raw return, high alpha) is BUY -> label tracks alpha, not beta
+    assert raw["A0"] > raw["A5"] and sig["A0"] == 0.0 and sig["A5"] == 1.0
+    assert np.isnan(out[out["Stock"] == "NANBETA"]["Signal"].iloc[0])
+    assert out[out["Stock"].str.startswith("B")]["Signal"].isna().all()  # thin week
+    pd.testing.assert_frame_equal(panel, before)           # purity
+    assert out.index.name == "Date"
+    print("test_relative_residual_label OK — residual terciles, NaN guards, "
+          "market-neutral (high-beta high-return labeled SELL), purity")
+
+
 def test_backtest_end_truncates():
     panel, closes = build_world()
     end = panel.index.unique()[-15]
@@ -373,5 +414,6 @@ if __name__ == "__main__":
     test_buy_threshold_selection()
     test_listing_seasoning()
     test_long_short_beta_hedge()
+    test_relative_residual_label()
     test_backtest_end_truncates()
     print("\nAll backtest_lib synthetic tests passed.")

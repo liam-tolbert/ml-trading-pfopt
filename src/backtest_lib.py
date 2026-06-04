@@ -126,6 +126,62 @@ def apply_listing_seasoning(panel, *, n_weeks=52, stock_col="Stock"):
 
 
 # --------------------------------------------------------------------------- #
+# Labeling
+# --------------------------------------------------------------------------- #
+def relative_residual_label(panel, *, market_fwd, beta_col="Beta_26wk",
+                            fwd_col="Returns-future-1wk", top_q=1.0 / 3.0,
+                            signal_col="Signal", min_names=6):
+    """Market/beta-neutral cross-sectional label.
+
+    For each week, each stock's idiosyncratic forward return is
+
+        resid_i = fwd_i - beta_i * market_fwd_t
+
+    i.e. the part of the forward return NOT explained by market exposure. Within
+    that week's cross-section, the top `top_q` fraction by residual is labeled 1
+    (out-performer), the bottom `top_q` is labeled 0, and the middle is NaN
+    (dropped as ambiguous). A model trained on this learns RELATIVE, risk-matched
+    outperformance rather than absolute up-moves -- removing the market/beta
+    contamination that drives the absolute vol-scaled label's defensive tilt.
+
+    Returns a COPY of `panel` with `signal_col` (re)written; the input is not
+    mutated and the Date index / all other columns are preserved.
+
+    Leak-safe: `resid` uses only the realized forward window (the label outcome)
+    and the trailing `beta_col` known at t; the cross-sectional ranking uses only
+    that week's names. (Forward returns are the label, never a feature.)
+
+    Parameters
+    ----------
+    market_fwd : Series indexed by Date -- realized t -> t+1 market return (same
+        forward window as `fwd_col`).
+    top_q : tercile fraction (default 1/3 -> balanced top/bottom thirds).
+    min_names : weeks with fewer than this many usable names are left unlabeled
+        (a cross-sectional tercile is meaningless on a handful of names).
+    """
+    out = panel.sort_index().copy()
+    mkt = np.asarray(out.index.map(market_fwd), dtype=float)
+    resid = out[fwd_col].to_numpy(dtype=float) - out[beta_col].to_numpy(dtype=float) * mkt
+
+    # reset_index so Date is a column with a unique RangeIndex -- avoids ambiguous
+    # alignment on the duplicated Date index (one row per stock per date).
+    tmp = out.reset_index()
+    tmp["_resid"] = resid
+
+    def _tercile(s):
+        lo, hi = s.quantile(top_q), s.quantile(1.0 - top_q)
+        return np.where(s >= hi, 1.0, np.where(s <= lo, 0.0, np.nan))
+
+    sig = tmp.groupby("Date")["_resid"].transform(_tercile).to_numpy(dtype=float)
+    counts = tmp.groupby("Date")["_resid"].transform("count").to_numpy()
+    sig[counts < min_names] = np.nan        # too few names -> unlabeled
+    sig[np.isnan(resid)] = np.nan           # NaN residual (e.g. NaN beta) -> unlabeled
+
+    out[signal_col] = sig
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Metrics
 # --------------------------------------------------------------------------- #
 def _max_drawdown(equity: pd.Series) -> float:
