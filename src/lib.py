@@ -1,4 +1,3 @@
-from collections import OrderedDict
 from pathlib import Path
 
 # imports
@@ -9,9 +8,7 @@ from statsmodels.tsa.regime_switching.markov_regression import MarkovRegression
 from pypfopt.efficient_frontier import EfficientFrontier
 from pypfopt import risk_models
 from pypfopt import expected_returns
-import indicators
-from sklearn.metrics import classification_report
-from sklearn.utils.class_weight import compute_class_weight
+from src.ml_stock_prediction import indicators
 
 features = ["SMA_5v20", "RSI", "MACD", "Bollinger_Bands", "ATR", "Stochastic", "OBV", "ADX", "Aroon", "Bull_Probability", "Returns-3wk-1wklag", "Returns-1wk-0wklag"]
 

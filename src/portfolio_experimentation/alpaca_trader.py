@@ -78,15 +78,16 @@ def connect() -> TradingClient:
     return TradingClient(api_key, api_secret, paper=True)
 
 
-def get_account_state(client: TradingClient) -> tuple[float, dict[str, int]]:
-    """Return (equity_usd, {ticker: current_shares}) from Alpaca."""
+def get_account_state(client: TradingClient) -> tuple[float, float, dict[str, int]]:
+    """Return (equity_usd, cash_usd, {ticker: current_shares}) from Alpaca."""
     account = client.get_account()
     equity = float(account.equity)
+    cash = float(account.cash)
 
     current: dict[str, int] = {}
     for pos in client.get_all_positions():
         current[pos.symbol] = int(float(pos.qty))
-    return equity, current
+    return equity, cash, current
 
 
 def validate_tradable(client: TradingClient, tickers: list[str]) -> set[str]:
@@ -327,8 +328,11 @@ def run_reconcile(
     print("\nConnecting to Alpaca paper...")
     client = connect()
 
-    equity, current_positions = get_account_state(client)
-    print(f"Connected. Equity: ${equity:,.2f}  Positions: {len(current_positions)}")
+    equity, cash, current_positions = get_account_state(client)
+    print(
+        f"Connected. Equity: ${equity:,.2f}  Cash: ${cash:,.2f}  "
+        f"Positions: {len(current_positions)}"
+    )
 
     if only_tickers is None:
         print("Mode: INIT (full reconciliation to match sheet)")
