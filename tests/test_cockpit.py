@@ -76,12 +76,14 @@ def test_screen_universe_finds_winners_rejects_losers():
 
 def test_strict_gate_and_fundamental_filter():
     prices, spy, _ = _synthetic_slice()
-    base = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    base = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))  # default 8/8
 
-    # 8/8 is a superset-restriction of 7/8 -> never more candidates
-    strict = screen_universe(list(prices), prices, spy,
-                             cfg=ScanConfig(min_rs=0.0, min_criteria=8))
-    assert len(strict.candidates) <= len(base.candidates)
+    # the default 8/8 gate is a subset of a looser 7/8 gate -> never more candidates
+    loose = screen_universe(list(prices), prices, spy,
+                            cfg=ScanConfig(min_rs=0.0, min_criteria=7))
+    assert len(base.candidates) <= len(loose.candidates)
+    if len(base.candidates):
+        assert (base.candidates["criteria"] >= 8).all()
 
     # a fundamentals callable that passes everything raises fund_score; requiring
     # >=3 checks must not increase the candidate set vs no requirement

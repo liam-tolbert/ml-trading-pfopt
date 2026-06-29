@@ -35,7 +35,7 @@ from src.stock_screener.minervini_screener.screening import calculate_stop_loss
 
 @dataclass
 class ScanConfig:
-    min_criteria: int = 7          # Step-1 gate: criteria_passed >= this (7/8 or 8/8)
+    min_criteria: int = 8          # Step-1 gate: require all 8 trend-template criteria
     min_history_rows: int = 200    # classify_phase needs >= 200 rows
     rs_period: int = 126           # ~6 months, for the RS rating percentile
     min_rs: float = 0.0            # 0 = off; else require RS rating >= this (1-99)

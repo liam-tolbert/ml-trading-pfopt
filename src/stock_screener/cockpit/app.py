@@ -38,14 +38,14 @@ Don't force trades when few names qualify — the market is telling you somethin
 """
 
 INFO_STEP1 = """
-**Step 1 — Trend Template (automated gate).** Every row passes Minervini's 8-point
-template: price above stacked **50 > 150 > 200-day SMAs**, 200-day rising ≥1 month,
-**≥30% above the 52-wk low**, **within 25% of the 52-wk high**. This is *eligibility,
-not a buy signal.*
+**Step 1 — Trend Template (automated gate).** Every row passes **all 8** of Minervini's
+trend-template criteria: price above stacked **50 > 150 > 200-day SMAs**, 200-day rising
+≥1 month, **≥30% above the 52-wk low**, **within 25% of the 52-wk high**, confirmed Stage 2.
+This is *eligibility, not a buy signal.*
 
 - **RS** = relative-strength rating (percentile of 6-mo return vs the scanned set);
   Minervini wants **70+**.
-- Tighten in the sidebar: **7/8 → 8/8**, raise **min RS**, or require a VCP.
+- Tighten further in the sidebar: raise **min RS** or require a VCP.
 - Sort by `fund_score` / `rs`, then **click a row** to study the chart.
 """
 
@@ -120,8 +120,8 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
         "Each section has its own **ℹ️** button. Full details on the **SEPA Guide** page.")
 universe = st.sidebar.selectbox("Universe", ["sp500", "tickers"], index=0,
                                 help="sp500 = S&P 500 constituents; tickers = data/tickers.txt")
-min_criteria = st.sidebar.radio("Trend template gate", [7, 8], index=0,
-                                format_func=lambda x: f"{x}/8 criteria")
+min_criteria = 8  # full Minervini trend template — all 8 criteria required (no 7/8)
+st.sidebar.caption("Gate: full **8/8** trend template")
 min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,
                            help="IBD-style percentile of trailing 6-mo return vs the scanned universe")
 require_vcp = st.sidebar.checkbox("VCP only (hint filter)", value=False)
