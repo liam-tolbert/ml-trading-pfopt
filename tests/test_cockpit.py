@@ -150,6 +150,21 @@ def test_streamlit_app_renders_offline():
     assert not at.exception, f"app raised: {at.exception}"
 
 
+def test_sepa_guide_page_renders():
+    """The SEPA Guide page must load and render the method markdown without error."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_sepa_guide_page_renders (AppTest unavailable: {e})")
+        return
+    page = ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "1_SEPA_Guide.py"
+    at = AppTest.from_file(str(page), default_timeout=30)
+    at.run()
+    assert not at.exception, f"guide page raised: {at.exception}"
+    assert any("SEPA" in str(getattr(m, "value", "")) for m in at.markdown), \
+        "guide page rendered no SEPA markdown"
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

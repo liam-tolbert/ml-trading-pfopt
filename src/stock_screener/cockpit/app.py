@@ -24,6 +24,74 @@ from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
+# --------------------------------------------------------------------------- #
+# Contextual help — shown via ℹ️ popovers next to each step. The full method
+# reference lives on the "SEPA Guide" page (pages/1_SEPA_Guide.py).
+# --------------------------------------------------------------------------- #
+INFO_REGIME = """
+**Market environment — check this first.** SEPA is market-aware: most breakouts
+fail in a weak tape. **Phase-2 breadth** = % of scanned names in confirmed uptrends.
+- **BUY OK / Risk-On** → trade actively.
+- **CAUTION / weak breadth / Risk-Off** → preserve capital, wait.
+
+Don't force trades when few names qualify — the market is telling you something.
+"""
+
+INFO_STEP1 = """
+**Step 1 — Trend Template (automated gate).** Every row passes Minervini's 8-point
+template: price above stacked **50 > 150 > 200-day SMAs**, 200-day rising ≥1 month,
+**≥30% above the 52-wk low**, **within 25% of the 52-wk high**. This is *eligibility,
+not a buy signal.*
+
+- **RS** = relative-strength rating (percentile of 6-mo return vs the scanned set);
+  Minervini wants **70+**.
+- Tighten in the sidebar: **7/8 → 8/8**, raise **min RS**, or require a VCP.
+- Sort by `fund_score` / `rs`, then **click a row** to study the chart.
+"""
+
+INFO_STEP2 = """
+**Step 2 — Fundamentals (the fuel).** A great chart with weak earnings is a trap.
+Look for:
+- **EPS & revenue YoY ≥ ~20%** and **accelerating** (this quarter ≥ last),
+- **stable or expanding margins** (positive *margin trend*).
+
+`fund_score` (0–4) counts how many checks pass. yfinance often exposes only ~4
+quarters, so **YoY may read n/a** — QoQ is the fallback. Use this to rank the
+Step-1 list, not as a hard cutoff unless you set "min fundamental checks".
+"""
+
+INFO_STEP3 = """
+**Step 3 — Read the VCP yourself (this is the discretionary part).** On the chart,
+look for a **Volatility Contraction Pattern**:
+- 2–6 pullbacks, each **tighter** than the last (e.g. 18% → 12% → 6%),
+- **higher lows**, **volume drying up** into the tightest part,
+- price holding above the **50-day SMA**, total base depth ~10–35%.
+
+Shaded bands mark *detected* contractions (a hint — you decide). Use **Weekly** for
+base structure, **Daily** for the exact pivot. **No clean VCP → no trade.**
+"""
+
+INFO_STEP4 = """
+**Step 4 — Entry (you pull the trigger).** Buy only when price **closes above the
+pivot** on volume **≥ 40–50% above average** (the "breakout today" flag).
+- **Don't chase** more than ~5% above the pivot (the buy zone).
+- Set the **7–8% stop immediately** and never lower it.
+- First target ~**20–25%**; trail with the 50-day SMA once well in profit.
+- **Size** so a stop-out costs ~1% of the account (set Account $ / Risk %).
+
+These levels are advisory — place the order in your broker.
+"""
+
+
+def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
+    """A small clickable info popover (falls back to an expander on older Streamlit)."""
+    try:
+        with st.popover(label):
+            st.markdown(body)
+    except Exception:
+        with st.expander(label):
+            st.markdown(body)
+
 
 @st.cache_data(show_spinner=False)
 def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
@@ -37,6 +105,18 @@ def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
 # --------------------------------------------------------------------------- #
 st.sidebar.title("SEPA Cockpit")
 st.sidebar.caption("Mechanical Steps 1-2; you judge Steps 3-4.")
+try:                                                  # full method reference page
+    st.sidebar.page_link("pages/1_SEPA_Guide.py", label="📖 Full SEPA method guide")
+except Exception:
+    st.sidebar.caption("📖 Open the **SEPA Guide** page from the menu (top-left).")
+with st.sidebar.popover("ℹ️ How to use this tool"):
+    st.markdown(
+        "1. **Check the market environment** banner — only push in a healthy tape.\n"
+        "2. **Step 1:** the table lists trend-template passers (eligibility).\n"
+        "3. **Step 2:** rank by fundamental quality (the 'fuel').\n"
+        "4. **Step 3:** click a row and *judge the VCP yourself* on the chart.\n"
+        "5. **Step 4:** if it breaks out on volume, use the advisory entry/stop/size.\n\n"
+        "Each section has its own **ℹ️** button. Full details on the **SEPA Guide** page.")
 universe = st.sidebar.selectbox("Universe", ["sp500", "tickers"], index=0,
                                 help="sp500 = S&P 500 constituents; tickers = data/tickers.txt")
 min_criteria = st.sidebar.radio("Trend template gate", [7, 8], index=0,
@@ -61,13 +141,20 @@ with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"
 # --------------------------------------------------------------------------- #
 reg = res.regime
 buy_ok = reg.get("should_generate_buys")
+hcol, icol = st.columns([0.8, 0.2])
+hcol.markdown("#### Market environment")
+with icol:
+    info_btn(INFO_REGIME)
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Market regime", str(reg.get("regime")))
-c2.metric("SPY trend", str(reg.get("spy_trend")))
+c1.metric("Market regime", str(reg.get("regime")),
+          help="Risk-On/Off from SPY phase + breadth. Trade actively only when Risk-On.")
+c2.metric("SPY trend", str(reg.get("spy_trend")),
+          help="SPY's own Stage 1-4 phase. Stage 2 = bullish backdrop for breakouts.")
 c3.metric("Phase-2 breadth", f"{reg.get('phase2_pct', 0):.0f}%",
-          help=f"breadth quality: {reg.get('breadth_quality')}")
-c4.metric("Environment", "BUY OK" if buy_ok else "CAUTION",
-          delta=None, delta_color="off")
+          help=f"% of scanned names in confirmed uptrends (quality: "
+               f"{reg.get('breadth_quality')}). Higher = healthier tape.")
+c4.metric("Environment", "BUY OK" if buy_ok else "CAUTION", delta=None, delta_color="off",
+          help="Whether SEPA says it's worth taking new breakouts right now.")
 if not buy_ok:
     st.warning("SEPA discipline: the tape is weak — most breakouts fail here. "
                + "; ".join(reg.get("reasons", [])))
@@ -85,7 +172,10 @@ if cand is None or len(cand) == 0:
             "Loosen the RS / fundamental filters, or wait for a better tape.")
     st.stop()
 
-st.subheader(f"Candidates ({len(cand)})")
+h1, i1 = st.columns([0.8, 0.2])
+h1.subheader(f"Step 1 — Candidates ({len(cand)})")
+with i1:
+    info_btn(INFO_STEP1)
 query = st.text_input("🔎 Filter by ticker", "", placeholder="e.g. NVDA").strip().upper()
 if query:
     view = cand[cand["ticker"].str.upper().str.contains(query, na=False, regex=False)]
@@ -110,6 +200,8 @@ pick = view.iloc[row_pos]["ticker"]
 colA, colB = st.columns([3, 1])
 with colB:
     st.markdown(f"### {pick}")
+    st.caption("Step 3 — judge the VCP")
+    info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
     weekly = st.checkbox("Weekly view", value=False)
     show_overlays = st.checkbox("VCP + entry overlays", value=True)
 
@@ -124,6 +216,7 @@ with colA:
 p2, p4 = st.columns(2)
 with p2:
     st.markdown("**Step 2 — Fundamentals**")
+    info_btn(INFO_STEP2)
     f = payload.get("fundamentals")
     s2 = payload.get("step2", {})
     if not f:
@@ -142,6 +235,7 @@ with p2:
 with p4:
     lv = payload.get("levels", {})
     st.markdown("**Step 4 — Entry (advisory)**")
+    info_btn(INFO_STEP4)
     bz = lv.get("buy_zone", (None, None))
     st.write(f"- Pivot: ${lv.get('pivot', 0):.2f}")
     st.write(f"- Buy zone (no chase): ${bz[0]:.2f} – ${bz[1]:.2f}")
