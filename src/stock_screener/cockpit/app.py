@@ -67,7 +67,8 @@ look for a **Volatility Contraction Pattern**:
 - **higher lows**, **volume drying up** into the tightest part,
 - price holding above the **50-day SMA**, total base depth ~10–35%.
 
-Shaded bands mark *detected* contractions (a hint — you decide). Use **Weekly** for
+Shaded bands mark *detected* contractions (a hint — you decide). Use the **Time range**
+buttons to zoom into the base (a tight VCP is invisible over 2 years), **Weekly** for
 base structure, **Daily** for the exact pivot. **No clean VCP → no trade.**
 """
 
@@ -207,9 +208,12 @@ with colB:
 
 payload = res.payloads[pick]
 with colA:
+    _ranges = {"3M": 90, "6M": 180, "9M": 270, "1Y": 365, "2Y / All": None}
+    rsel = st.radio("Time range", list(_ranges), index=1, horizontal=True,
+                    help="Zoom in to see the VCP base; a tight base is hard to read over 2 years.")
     fig = build_chart(pick, payload["df"], vcp=payload.get("vcp"),
                       levels=payload.get("levels"), show_overlays=show_overlays,
-                      weekly=weekly)
+                      weekly=weekly, lookback_days=_ranges[rsel])
     st.plotly_chart(fig, width="stretch")
 
 # Step 2 + Step 4 panels

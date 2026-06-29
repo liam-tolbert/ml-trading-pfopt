@@ -113,6 +113,15 @@ def test_build_chart_returns_figure_with_expected_traces():
     # weekly view should also build
     assert isinstance(build_chart(ticker, df, weekly=True), go.Figure)
 
+    # lookback_days zooms the VIEW: fewer candles than the full series, but SMAs intact
+    def _candle_len(f):
+        return len(next(tr for tr in f.data if isinstance(tr, go.Candlestick)).x)
+    full_n = _candle_len(build_chart(ticker, df))
+    zoom_n = _candle_len(build_chart(ticker, df, lookback_days=90))
+    assert zoom_n < full_n, f"lookback did not slice the view ({zoom_n} vs {full_n})"
+    assert sum(isinstance(tr, go.Scatter) for tr in
+               build_chart(ticker, df, lookback_days=90).data) >= 3
+
 
 def test_step2_summary_logic():
     s = scan_mod._step2_summary(None)

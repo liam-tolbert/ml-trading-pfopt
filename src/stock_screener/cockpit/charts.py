@@ -27,9 +27,24 @@ def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                 levels: Optional[dict] = None, show_overlays: bool = True,
-                weekly: bool = False) -> go.Figure:
-    """Return a 2-row Plotly figure: candlestick + SMAs (top), volume (bottom)."""
-    d = to_weekly(df) if weekly else df
+                weekly: bool = False, lookback_days: Optional[int] = None) -> go.Figure:
+    """Return a 2-row Plotly figure: candlestick + SMAs (top), volume (bottom).
+
+    ``lookback_days`` zooms the VIEW to the last N calendar days so a multi-week VCP
+    base is actually visible; SMAs are still computed on the full history (so the
+    50/150/200 lines stay correct) and the price y-axis is fit to the window.
+    """
+    d_full = to_weekly(df) if weekly else df
+
+    # SMAs on FULL history, so they're correct even when the view is short.
+    smas = [(period, color, calculate_sma(d_full["Close"], period))
+            for period, color in _SMA_STYLE if len(d_full) >= period]
+
+    if lookback_days and len(d_full):
+        cutoff = d_full.index[-1] - pd.Timedelta(days=int(lookback_days))
+        d = d_full.loc[d_full.index >= cutoff]
+    else:
+        d = d_full
 
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
                         row_heights=[0.76, 0.24], vertical_spacing=0.03)
@@ -38,12 +53,10 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
         name=ticker, showlegend=False), row=1, col=1)
 
-    for period, color in _SMA_STYLE:
-        if len(d) >= period:
-            sma = calculate_sma(d["Close"], period)
-            fig.add_trace(go.Scatter(
-                x=d.index, y=sma, name=f"SMA{period}",
-                line=dict(width=1.2, color=color)), row=1, col=1)
+    for period, color, sma in smas:
+        fig.add_trace(go.Scatter(
+            x=d.index, y=sma.reindex(d.index), name=f"SMA{period}",
+            line=dict(width=1.2, color=color)), row=1, col=1)
 
     if "Volume" in d.columns:
         fig.add_trace(go.Bar(x=d.index, y=d["Volume"], name="Volume",
@@ -85,4 +98,11 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
         hovermode="x unified")
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Vol", row=2, col=1)
+    # Fit the price pane to the VISIBLE candles so a zoomed-in base fills the chart
+    # (SMA lines that fall outside the window simply clip — VCP candles stay large).
+    if len(d):
+        ylo, yhi = float(d["Low"].min()), float(d["High"].max())
+        if yhi > ylo:
+            pad = (yhi - ylo) * 0.06
+            fig.update_yaxes(range=[ylo - pad, yhi + pad], row=1, col=1)
     return fig
