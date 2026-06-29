@@ -26,8 +26,12 @@ class BacktestConfig:
     spread_per_share: float = 0.02            # cost = (spread/2) * shares, per side
     stop_trigger: str = "low"                 # "low" (intraday) | "close"
     min_history_rows: int = 200               # classify_phase needs >= 200 rows
+    min_price: float = 5.0                     # Minervini floor on the UNADJUSTED share price ($)
     candidate_cap: Optional[int] = None       # cap candidates/scan (None = unbounded)
     buy_score_min: float = 60.0               # mirror vendored is_buy gate (informational)
+    min_free_cash_frac: float = 0.02          # skip the entry scan when free cash < this * equity
+    regime_confirm_days: int = 0              # require the regime to allow buys N consecutive days before re-entry
+    progress_every: int = 0                   # if >0, print loop progress every N live days
     seed: int = 0
 
     def __post_init__(self):

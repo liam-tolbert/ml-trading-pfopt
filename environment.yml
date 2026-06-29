@@ -14,6 +14,7 @@ dependencies:
   - numba=0.61.2
   - llvmlite=0.44.0
   - bottleneck=1.4.2
+  - pyarrow
   - py-xgboost=2.0.3
   - xgboost=2.0.3
   - joblib=1.5.1
@@ -55,3 +56,5 @@ dependencies:
       - urllib3==2.5.0
       - websockets==15.0.1
       - yfinance==0.2.65
+      - wrds
+      - streamlit==1.58.0

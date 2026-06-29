@@ -20,7 +20,7 @@ import pandas as pd
 
 class IndicatorsCache:
     def __init__(self, calendar, pos, frames, close_arr, open_arr, low_arr,
-                 cand_arr, phase_arr, spy):
+                 cand_arr, phase_arr, raw_arr, spy):
         self.calendar = calendar
         self.pos = pos
         self.frames = frames
@@ -29,6 +29,7 @@ class IndicatorsCache:
         self.low_arr = low_arr
         self.cand_arr = cand_arr
         self.phase_arr = phase_arr
+        self.raw_arr = raw_arr          # UNADJUSTED close, for the price floor
         self.spy = spy
 
     # ---- build ----------------------------------------------------------- #
@@ -53,7 +54,9 @@ class IndicatorsCache:
         pos = {ts: i for i, ts in enumerate(cal)}
         spy = price_provider.spy().sort_index()
 
-        frames, close_arr, open_arr, low_arr, cand_arr, phase_arr = {}, {}, {}, {}, {}, {}
+        min_price = getattr(cfg, "min_price", 0.0) or 0.0
+        frames, close_arr, open_arr, low_arr, cand_arr, phase_arr, raw_arr = \
+            {}, {}, {}, {}, {}, {}, {}
         for permno in price_provider.permnos():
             f = price_provider.prices(permno).sort_index()
             frames[int(permno)] = f
@@ -61,6 +64,8 @@ class IndicatorsCache:
             high = f["High"].astype(float)
             low = f["Low"].astype(float)
             openp = f["Open"].astype(float)
+            # UNADJUSTED close for the price floor; fall back to Close when absent
+            raw = (f["RawClose"].astype(float) if "RawClose" in f.columns else close)
 
             sma50 = close.rolling(50, min_periods=50).mean()
             sma200 = close.rolling(200, min_periods=200).mean()
@@ -71,16 +76,19 @@ class IndicatorsCache:
             cand = (sma200.notna()
                     & (close > sma50 * 0.98)
                     & (sma50 > sma200 * 0.98)
-                    & (close >= hi52 * 0.73))               # within ~27% of 52w high
+                    & (close >= hi52 * 0.73)                # within ~27% of 52w high
+                    & (raw >= min_price))                   # Minervini price floor
             cand = cand.fillna(False)
 
             close_arr[int(permno)] = close.reindex(cal).to_numpy(dtype=float)
             open_arr[int(permno)] = openp.reindex(cal).to_numpy(dtype=float)
             low_arr[int(permno)] = low.reindex(cal).to_numpy(dtype=float)
+            raw_arr[int(permno)] = raw.reindex(cal).to_numpy(dtype=float)
             cand_arr[int(permno)] = cand.reindex(cal, fill_value=False).to_numpy(dtype=bool)
             phase_arr[int(permno)] = phase.reindex(cal).fillna(0).to_numpy(dtype=int)
 
-        return cls(cal, pos, frames, close_arr, open_arr, low_arr, cand_arr, phase_arr, spy)
+        return cls(cal, pos, frames, close_arr, open_arr, low_arr, cand_arr, phase_arr,
+                   raw_arr, spy)
 
     # ---- access ---------------------------------------------------------- #
     def ohlcv_upto(self, permno, t):
@@ -108,6 +116,9 @@ class IndicatorsCache:
 
     def low(self, permno, t):
         return self._scalar(self.low_arr, permno, t)
+
+    def raw_price(self, permno, t):
+        return self._scalar(self.raw_arr, permno, t)
 
     def buy_candidate_mask(self, permno, t):
         a = self.cand_arr.get(int(permno))

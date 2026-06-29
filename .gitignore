@@ -2,9 +2,11 @@
 *.txt
 *.pkl
 *.xlsx
+*.parquet
 __pycache__/
 .ipynb_checkpoints/
 .env
 *.json
 *.md
 scripts/
+data/wrds/

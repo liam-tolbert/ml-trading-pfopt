@@ -1,9 +1,11 @@
-"""Run the daily Minervini backtest on synthetic data and print a report.
+"""Run the daily Minervini backtest and print a report.
 
-    python src/stock_screener/backtest_daily/run_backtest.py
+    python src/stock_screener/backtest_daily/run_backtest.py            # synthetic fixture
+    python src/stock_screener/backtest_daily/run_backtest.py --wrds     # real WRDS cache (data/wrds)
 """
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -16,15 +18,33 @@ from src.stock_screener.backtest_daily.synthetic_provider import make_synthetic 
 
 
 def main():
-    data = make_synthetic(seed=7)
-    cfg = BacktestConfig(max_positions=10, risk_per_trade_pct=0.0125, scan_every_days=5)
-    res = BacktestEngine(data.price, data.universe, data.fundamentals, config=cfg).run()
+    ap = argparse.ArgumentParser(description="Run the daily Minervini backtest.")
+    ap.add_argument("--wrds", action="store_true",
+                    help="use the real WRDS parquet cache instead of synthetic data")
+    ap.add_argument("--cache-dir", default=str(ROOT / "data" / "wrds"))
+    ap.add_argument("--max-positions", type=int, default=10)
+    ap.add_argument("--start", default=None)
+    ap.add_argument("--end", default=None)
+    args = ap.parse_args()
+
+    if args.wrds:
+        from src.stock_screener.backtest_daily.wrds_provider import load_wrds_providers
+        price, universe, fundamentals = load_wrds_providers(args.cache_dir)
+        source = f"WRDS cache ({args.cache_dir})"
+    else:
+        data = make_synthetic(seed=7)
+        price, universe, fundamentals = data.price, data.universe, data.fundamentals
+        source = "synthetic data"
+
+    cfg = BacktestConfig(max_positions=args.max_positions, risk_per_trade_pct=0.0125,
+                         scan_every_days=5, start=args.start, end=args.end)
+    res = BacktestEngine(price, universe, fundamentals, config=cfg).run()
 
     daily, rep = res["daily"], res["report"]
     s, spy, capm, tr = rep["strategy"], rep["spy_buyhold"], rep["capm"], rep["trades"]
 
     print("=" * 64)
-    print("DAILY MINERVINI SCREENER BACKTEST  (synthetic data)")
+    print(f"DAILY MINERVINI SCREENER BACKTEST  ({source})")
     print("=" * 64)
     print(f"window   : {daily.index.min().date()} -> {daily.index.max().date()}  "
           f"({len(daily)} trading days)")

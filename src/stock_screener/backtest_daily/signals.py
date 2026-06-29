@@ -25,6 +25,8 @@ def evaluate_buy(permno, t, cache, spy_slice, fundamentals, cfg):
     cp = float(df["Close"].iloc[-1])
     if pd.isna(cp):
         return None
+    if cfg.min_price and cache.raw_price(permno, t) < cfg.min_price:   # Minervini price floor
+        return None
     phase_info = classify_phase(df, cp)
     if phase_info.get("phase") != 2:                 # cheap early-out (scorer re-checks)
         return None

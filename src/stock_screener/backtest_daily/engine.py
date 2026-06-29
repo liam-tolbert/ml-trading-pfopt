@@ -7,6 +7,8 @@ rule calls go through cache.ohlcv_upto(<=t); delisting is realized only on its d
 """
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 
@@ -26,10 +28,11 @@ class BacktestEngine:
         self.cfg = config or BacktestConfig()
         self.sizer = sizer or make_sizer(self.cfg)
 
-    def run(self):
+    def run(self, cache=None):
         cfg = self.cfg
         spread = cfg.spread_per_share
-        cache = IndicatorsCache.build(self.price, cfg)
+        if cache is None:                       # allow a prebuilt cache to be reused across configs
+            cache = IndicatorsCache.build(self.price, cfg)
         live = [t for t in cache.calendar
                 if (cfg.start is None or t >= cfg.start)
                 and (cfg.end is None or t <= cfg.end)]
@@ -39,8 +42,14 @@ class BacktestEngine:
         prev_equity = cfg.initial_equity
         prev_spy = None
         days_since_scan = cfg.scan_every_days        # force a scan on the first eligible day
+        regime_on_streak = 0                          # consecutive days the regime has allowed buys
+        start_time = time.time()
 
-        for t in live:
+        for i, t in enumerate(live):
+            if cfg.progress_every and i and i % cfg.progress_every == 0:
+                el = (time.time() - start_time) / 60.0
+                print(f"  [{t.date()}] day {i}/{len(live)}  {el:.1f}min  "
+                      f"pos={len(pf.positions)}  equity={pf.equity():,.0f}", flush=True)
             members_t = self.universe.members_asof(t)
             spy_slice = cache.spy_upto(t)
             spy_close = float(spy_slice["Close"].iloc[-1]) if len(spy_slice) else np.nan
@@ -51,6 +60,7 @@ class BacktestEngine:
 
             # (2) regime gate
             gate, _spy_an, _breadth = regime.assess(t, cache, members_t, spy_slice, cfg)
+            regime_on_streak = regime_on_streak + 1 if gate.get("should_generate_buys") else 0
 
             # (3) EXITS before entries (held names only -> cheap)
             for permno in list(pf.positions):
@@ -89,13 +99,15 @@ class BacktestEngine:
                 if sell is not None and sell.get("phase") is not None:
                     pos.last_phase = sell["phase"]
 
-            # (4) ENTRIES (scan cadence + regime + capacity)
+            # (4) ENTRIES (scan cadence + regime + capacity + free cash)
             days_since_scan += 1
+            equity_now = pf.equity()
             if (days_since_scan >= cfg.scan_every_days
                     and gate.get("should_generate_buys")
-                    and len(pf.positions) < cfg.max_positions):
+                    and regime_on_streak >= cfg.regime_confirm_days       # whipsaw guard (re-entry lag)
+                    and len(pf.positions) < cfg.max_positions
+                    and pf.cash > cfg.min_free_cash_frac * equity_now):   # skip when ~fully invested
                 days_since_scan = 0
-                equity_now = pf.equity()
                 cands = [p for p in members_t
                          if p not in pf.positions and cache.buy_candidate_mask(p, t)]
                 if cfg.candidate_cap is not None and len(cands) > cfg.candidate_cap:
