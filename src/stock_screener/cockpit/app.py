@@ -113,6 +113,7 @@ READABLE_COLS = {
     "num_contractions": "# Contractions",
     "vcp_quality": "VCP quality (0-100)",
     "breakout_today": "Breakout today",
+    "vol_confirmed": "Vol confirmed",
     "pct_to_pivot": "Distance to pivot (%)",
     "pivot": "Pivot ($)",
     "stop": "Stop ($)",
@@ -137,7 +138,10 @@ COL_HELP = {
                         "range is 2–6.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
                    "+ near-high 20 + base length 10). Shown even when VCP is False.",
-    "breakout_today": "Price is clearing the pivot on expanded volume right now.",
+    "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
+                      "confirmed' for the volume side).",
+    "vol_confirmed": "True when the latest-day volume is ≥ 1.5× its 20-day average — the "
+                     "breakout confirmation threshold. A price breakout without this is suspect.",
     "pct_to_pivot": "Distance from price to the pivot. Positive = below pivot (needs to rise); "
                     "negative = already above/extended.",
     "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
@@ -153,7 +157,8 @@ COL_GROUPS = [
     ("Identify", ["ticker", "price"]),
     ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
     ("Base — the VCP setup", ["vcp", "num_contractions", "vcp_quality"]),
-    ("Entry — timing & risk", ["breakout_today", "pct_to_pivot", "pivot", "stop", "target"]),
+    ("Entry — timing & risk", ["breakout_today", "vol_confirmed", "pct_to_pivot",
+                               "pivot", "stop", "target"]),
 ]
 DISPLAY_ORDER = [c for _, cols in COL_GROUPS for c in cols]
 
@@ -258,10 +263,12 @@ def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
 # --------------------------------------------------------------------------- #
 st.sidebar.title("SEPA Cockpit")
 st.sidebar.caption("Mechanical Steps 1-2; you judge Steps 3-4.")
-try:                                                  # full method reference page
-    st.sidebar.page_link("pages/1_SEPA_Guide.py", label="📖 Full SEPA method guide")
-except Exception:
-    st.sidebar.caption("📖 Open the **SEPA Guide** page from the menu (top-left).")
+# Full method reference page, opened in a NEW TAB. st.page_link navigates in-tab only
+# (no target option), so use a plain anchor to the page's URL slug (from the filename
+# `1_SEPA_Guide.py` -> `SEPA_Guide`); relative href stays correct behind a proxy.
+st.sidebar.markdown(
+    '<a href="SEPA_Guide" target="_blank">📖 Full SEPA method guide ↗</a>',
+    unsafe_allow_html=True)
 with st.sidebar.popover("ℹ️ How to use this tool"):
     st.markdown(
         "1. **Check the market environment** banner — only push in a healthy tape.\n"
@@ -428,13 +435,16 @@ with st.container(border=True):
         return "n/a" if x is None else f"${x:,.2f}"
 
     bz_lo, bz_hi = (bz[0], bz[1]) if bz else (None, None)
+    # Only ONE '$' here: two '$' in a single st.metric value get parsed as a LaTeX math
+    # span ($...$), which renders that portion in a different (serif) font.
     buy_zone = ("n/a" if (bz_lo is None or bz_hi is None)
-                else f"{_usd(bz_lo)}–{_usd(bz_hi)}")
+                else f"${bz_lo:,.2f} – {bz_hi:,.2f}")
     pct = lv.get("pct_to_pivot")
     pct_s = "n/a" if pct is None else f"{pct:+.1f}%"
     vol = lv.get("volume_ratio", 1)
-    vol_s = f"{vol:.1f}× vol" if isinstance(vol, (int, float)) else ""
-    breakout_s = ("✅ " if lv.get("breakout_today") else "— ") + vol_s
+    vol_metric = f"{vol:.1f}×" if isinstance(vol, (int, float)) else "n/a"
+    price_ok = bool(lv.get("breakout_today"))       # price cleared the pivot
+    vol_ok = bool(lv.get("volume_confirmed"))        # latest volume >= 1.5x the 20-day avg
 
     r1 = st.columns(3)
     r2 = st.columns(3)
@@ -443,8 +453,15 @@ with st.container(border=True):
     r1[2].metric("Stop", _usd(lv.get("stop")), border=True)
     r2[0].metric("Target", _usd(lv.get("target")), border=True)
     r2[1].metric("To pivot", pct_s, border=True)
-    r2[2].metric("Breakout", breakout_s, border=True)
+    r2[2].metric("Volume", vol_metric, border=True,
+                 help="Latest-day volume ÷ its own 20-day average. A confirmed breakout "
+                      "needs ≥ 1.5× (50%+ above that average).")
 
+    # A tradeable breakout needs BOTH: price above the pivot AND volume confirmation.
+    st.markdown(
+        f"**Breakout:** price {'✅ above pivot' if price_ok else '— below pivot'} · "
+        f"volume {'✅ confirmed' if vol_ok else '— not confirmed'}"
+        + (f" ({vol:.1f}× vs 1.5×+ needed)" if isinstance(vol, (int, float)) else ""))
     st.markdown("---")
     # Explicit keys pin these widgets' identity so their values persist across reruns.
     # Without a key, a keyless input's identity depends on the (variable) element count

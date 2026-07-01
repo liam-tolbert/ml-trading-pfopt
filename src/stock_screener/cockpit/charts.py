@@ -61,6 +61,19 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     if "Volume" in d.columns:
         fig.add_trace(go.Bar(x=d.index, y=d["Volume"], name="Volume",
                              marker_color="#9aa0a6", showlegend=False), row=2, col=1)
+        # Volume baseline (20-period SMA) + the 1.5× breakout threshold. In the DAILY view
+        # this SMA is exactly the engine's 20-day average and the dashed line is the
+        # 50%-above level a confirmed breakout must clear (see detect_breakout). Bars below
+        # the SMA line into a tight base = volume drying up; a bar poking above the dashed
+        # line = confirmed thrust. Computed on full history so it stays correct when zoomed.
+        if "Volume" in d_full.columns and len(d_full) >= 20:
+            unit = "w" if weekly else "d"
+            vsma = calculate_sma(d_full["Volume"], 20).reindex(d.index)
+            fig.add_trace(go.Scatter(x=d.index, y=vsma, name=f"Vol SMA20{unit}",
+                                     line=dict(width=1.1, color="#5f6368")), row=2, col=1)
+            fig.add_trace(go.Scatter(x=d.index, y=vsma * 1.5, name="1.5× (breakout)",
+                                     line=dict(width=1.1, color="#d93025", dash="dash")),
+                          row=2, col=1)
 
     if show_overlays and vcp:
         # Shade each detected contraction (peak -> trough): a VCP *hint*.

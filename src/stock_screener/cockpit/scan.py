@@ -104,6 +104,7 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
         "target": float(pivot) * 1.225,                     # ~20-25% objective
         "breakout_today": bool(breakout.get("is_breakout")),
         "volume_ratio": float(breakout.get("volume_ratio", 1.0) or 1.0),
+        "volume_confirmed": bool(breakout.get("volume_confirmed", False)),  # vol >= 1.5x avg
         "pct_to_pivot": pct_to_pivot,
     }
 
@@ -173,6 +174,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "num_contractions": int(vcp.get("contraction_count", 0) or 0),
                 "vcp_quality": round(float(vcp.get("vcp_quality", 0) or 0), 0),
                 "breakout_today": levels["breakout_today"],
+                "vol_confirmed": levels["volume_confirmed"],
                 "pct_to_pivot": _fmt(levels["pct_to_pivot"]),
                 "pivot": round(levels["pivot"], 2),
                 "stop": round(levels["stop"], 2),
