@@ -106,6 +106,50 @@ READABLE_COLS = {
     "target": "Target ($)",
 }
 
+# One-line meaning per column — shown as a header hover tooltip and in the guide.
+COL_HELP = {
+    "ticker": "Stock symbol. Click a row to chart it.",
+    "price": "Latest close price.",
+    "rs": "Relative-strength rating 1–99: percentile of the trailing ~6-mo return vs the "
+          "scanned universe. Minervini wants 70+.",
+    "fund_score": "Step-2 fundamental checks passed (0–4): revenue ≥20%, EPS ≥20%, EPS "
+                  "accelerating, margins expanding.",
+    "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
+               "(unknown, not zero).",
+    "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",
+    "op_margin": "Current operating margin. Look for stable or expanding.",
+    "vcp": "A valid Volatility Contraction Pattern was detected (2–6 tightening pullbacks, "
+           "quality ≥50).",
+    "num_contractions": "Number of peak→trough pullbacks in the current base. Minervini's "
+                        "range is 2–6.",
+    "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
+                   "+ near-high 20 + base length 10). Shown even when VCP is False.",
+    "breakout_today": "Price is clearing the pivot on expanded volume right now.",
+    "pct_to_pivot": "Distance from price to the pivot. Positive = below pivot (needs to rise); "
+                    "negative = already above/extended.",
+    "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
+    "stop": "Advisory stop-loss, ~7–8% below the pivot.",
+    "target": "First objective, ~+22.5% above the pivot (the 20–25% zone).",
+}
+
+# The table's four decision groups, in display order. This drives BOTH the column
+# order/visibility in the table and the "Column guide" popover. `criteria` is left out
+# on purpose — it's a constant 8 on this table (the 8/8 gate), so it adds no signal
+# (it still lives in the underlying scan frame for tests / analysis).
+COL_GROUPS = [
+    ("Identify", ["ticker", "price"]),
+    ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
+    ("Base — the VCP setup", ["vcp", "num_contractions", "vcp_quality"]),
+    ("Entry — timing & risk", ["breakout_today", "pct_to_pivot", "pivot", "stop", "target"]),
+]
+DISPLAY_ORDER = [c for _, cols in COL_GROUPS for c in cols]
+
+INFO_COLUMNS = ("**What each table column means** (hover any header for the same tip).\n\n"
+                + "\n\n".join(
+                    f"**{group}**\n"
+                    + "\n".join(f"- **{READABLE_COLS.get(c, c)}** — {COL_HELP[c]}" for c in cols)
+                    for group, cols in COL_GROUPS))
+
 
 def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
     """A small clickable info popover (falls back to an expander on older Streamlit)."""
@@ -130,9 +174,10 @@ def filter_table(df, key_prefix: str = "flt"):
 
     out = df
     with st.expander("🔎 Filter by column values", expanded=False):
-        columns_to_filter = df.loc[:, ~df.columns.str.contains('ticker')].columns
+        # Same columns (minus ticker) and order as the displayed table.
+        columns_to_filter = [c for c in DISPLAY_ORDER if c in df.columns and c != "ticker"]
         cols = st.multiselect(
-            "Columns to filter on", list(columns_to_filter), key=f"{key_prefix}_cols",
+            "Columns to filter on", columns_to_filter, key=f"{key_prefix}_cols",
             format_func=lambda c: readable.get(c, c),
             help="Pick one or more columns; a matching control appears for each.")
         for col in cols:
@@ -255,6 +300,7 @@ h1, i1 = st.columns([0.8, 0.2])
 h1.subheader(f"Step 1 — Candidates ({len(cand)})")
 with i1:
     info_btn(INFO_STEP1)
+    info_btn(INFO_COLUMNS, label="ℹ️ Column guide")
 query = st.text_input("🔎 Search by ticker", "", placeholder="e.g. NVDA").strip().upper()
 if query:
     view = cand[cand["ticker"].str.upper().str.contains(query, na=False, regex=False)]
@@ -268,11 +314,14 @@ if len(view) == 0:
     st.stop()
 
 st.caption(f"Showing {len(view)} of {len(cand)}. Click a row to chart it.")
-# Relabel headers for display only (underlying column names stay raw, so the
-# selection + filter logic that references e.g. "ticker" keeps working).
-col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c)) for c in view.columns}
+# Relabel headers + attach a hover tooltip per column (display only — underlying column
+# names stay raw, so the selection + filter logic that references e.g. "ticker" keeps
+# working). column_order groups the columns and hides any not listed (e.g. `criteria`).
+col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c), help=COL_HELP.get(c))
+              for c in view.columns}
 event = st.dataframe(view, width="stretch", hide_index=True, column_config=col_config,
-                     on_select="rerun", selection_mode="single-row", key="cand_table")
+                     column_order=DISPLAY_ORDER, on_select="rerun",
+                     selection_mode="single-row", key="cand_table")
 
 # selection.rows are positional indices into the displayed (filtered) frame
 _sel = getattr(event, "selection", None)
@@ -334,8 +383,14 @@ with p4:
              f"(vol {lv.get('volume_ratio', 1):.1f}× avg)")
 
     st.markdown("---")
-    acct = st.number_input("Account $", min_value=0.0, value=100_000.0, step=1000.0)
-    risk_pct = st.number_input("Risk % per trade", min_value=0.0, value=1.0, step=0.25)
+    # Explicit keys pin these widgets' identity so their values persist across reruns.
+    # Without a key, a keyless input's identity depends on the (variable) element count
+    # above it, so a rerun could reset it to the default and the size would go stale
+    # until a full page reload.
+    acct = st.number_input("Account $", min_value=0.0, value=100_000.0, step=1000.0,
+                           key="size_acct")
+    risk_pct = st.number_input("Risk % per trade", min_value=0.0, value=1.0, step=0.25,
+                               key="size_risk_pct")
     entry, stop = bz[0], lv.get("stop")
     if entry and stop and entry > stop:
         shares = (acct * risk_pct / 100.0) / (entry - stop)
