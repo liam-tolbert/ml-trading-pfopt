@@ -24,6 +24,19 @@ from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
+# Reclaim vertical space so the candidate table is visible on load: trim Streamlit's
+# large default top padding and tighten the gap between stacked elements. Conservative,
+# stable selectors — if a future version ignores one, the page still renders fine.
+st.markdown(
+    "<style>"
+    # padding-top must stay >= Streamlit's fixed header height (~3.75rem) or the top row
+    # slides under it; 4rem clears the header while still reclaiming ~2rem vs the default.
+    ".block-container{padding-top:4rem;padding-bottom:2rem;}"
+    'div[data-testid="stVerticalBlock"]{gap:0.6rem;}'
+    "</style>",
+    unsafe_allow_html=True,
+)
+
 # --------------------------------------------------------------------------- #
 # Contextual help — shown via ℹ️ popovers next to each step. The full method
 # reference lives on the "SEPA Guide" page (pages/1_SEPA_Guide.py).
@@ -161,6 +174,22 @@ def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
             st.markdown(body)
 
 
+def _tag(text, color: str = "blue") -> str:
+    """A colored-background inline chip via Streamlit markdown; None -> 'n/a'."""
+    return f":{color}-background[{'n/a' if text is None else text}]"
+
+
+def _regime_color(regime) -> str:
+    """Risk-On -> green, Risk-Off -> red, anything else/unknown -> orange."""
+    r = str(regime or "").lower()
+    return "green" if "on" in r else "red" if "off" in r else "orange"
+
+
+def step_badge(step: str, title: str) -> str:
+    """A consistent blue step chip + title, e.g. ':blue-background[Step 3]  Judge the VCP'."""
+    return f":blue-background[{step}]  {title}"
+
+
 def filter_table(df, key_prefix: str = "flt"):
     """Interactive value filter — pick one or more columns and narrow by their values.
 
@@ -265,22 +294,23 @@ with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"
 # --------------------------------------------------------------------------- #
 reg = res.regime
 buy_ok = reg.get("should_generate_buys")
-hcol, icol = st.columns([0.8, 0.2])
-hcol.markdown("#### Market environment")
+# Compact one-line status strip (replaces four tall metric cards) — same underlying
+# values, a fraction of the vertical space, pinned at the top of the page.
+p2 = reg.get("phase2_pct", 0)
+p2 = p2 if isinstance(p2, (int, float)) else 0
+env = ":green-background[BUY OK]" if buy_ok else ":orange-background[CAUTION]"
+strip = " · ".join([
+    "**Market** " + _tag(reg.get("regime"), _regime_color(reg.get("regime"))),
+    f"SPY {reg.get('spy_trend') or 'n/a'}",
+    f"Breadth {p2:.0f}% ({reg.get('breadth_quality') or '?'})",
+    env,
+])
+scol, icol = st.columns([0.92, 0.08], vertical_alignment="center")
+scol.markdown(strip)
 with icol:
-    info_btn(INFO_REGIME)
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Market regime", str(reg.get("regime")),
-          help="Risk-On/Off from SPY phase + breadth. Trade actively only when Risk-On.")
-c2.metric("SPY trend", str(reg.get("spy_trend")),
-          help="SPY's own Stage 1-4 phase. Stage 2 = bullish backdrop for breakouts.")
-c3.metric("Phase-2 breadth", f"{reg.get('phase2_pct', 0):.0f}%",
-          help=f"% of scanned names in confirmed uptrends (quality: "
-               f"{reg.get('breadth_quality')}). Higher = healthier tape.")
-c4.metric("Environment", "BUY OK" if buy_ok else "CAUTION", delta=None, delta_color="off",
-          help="Whether SEPA says it's worth taking new breakouts right now.")
+    info_btn(INFO_REGIME, label="ℹ️")
 if not buy_ok:
-    st.warning("SEPA discipline: the tape is weak — most breakouts fail here. "
+    st.caption("⚠︎ Weak tape — most breakouts fail here. "
                + "; ".join(reg.get("reasons", [])))
 
 st.caption(f"Scanned {res.n_scanned} names · {res.n_passed} pass the "
@@ -296,32 +326,39 @@ if cand is None or len(cand) == 0:
             "Loosen the RS / fundamental filters, or wait for a better tape.")
     st.stop()
 
-h1, i1 = st.columns([0.8, 0.2])
-h1.subheader(f"Step 1 — Candidates ({len(cand)})")
-with i1:
+# Compact header row: step badge · inline ticker search · info popovers — one line.
+hcol, scol, icol = st.columns([0.5, 0.32, 0.18], vertical_alignment="center")
+hcol.markdown(step_badge("Step 1", f"Candidates ({len(cand)})"))
+query = scol.text_input("ticker", "", label_visibility="collapsed",
+                        placeholder="🔎 ticker e.g. NVDA").strip().upper()
+with icol:
     info_btn(INFO_STEP1)
-    info_btn(INFO_COLUMNS, label="ℹ️ Column guide")
-query = st.text_input("🔎 Search by ticker", "", placeholder="e.g. NVDA").strip().upper()
+    info_btn(INFO_COLUMNS, label="ℹ️ Columns")
 if query:
     view = cand[cand["ticker"].str.upper().str.contains(query, na=False, regex=False)]
 else:
     view = cand
 
+# Reserve the table's slot ABOVE the filter: a container renders where it is created,
+# not where it is written to. So we draw the (filtered) table into `table_box`, while the
+# filter UI below runs first — filtered results still apply on the SAME run, no lag.
+table_box = st.container()
 view = filter_table(view)
 
 if len(view) == 0:
     st.info("No candidates match the current filters. Clear a filter to see more.")
     st.stop()
 
-st.caption(f"Showing {len(view)} of {len(cand)}. Click a row to chart it.")
+table_box.caption(f"Showing {len(view)} of {len(cand)} — click a row to chart it.")
 # Relabel headers + attach a hover tooltip per column (display only — underlying column
 # names stay raw, so the selection + filter logic that references e.g. "ticker" keeps
 # working). column_order groups the columns and hides any not listed (e.g. `criteria`).
-col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c), help=COL_HELP.get(c))
-              for c in view.columns}
-event = st.dataframe(view, width="stretch", hide_index=True, column_config=col_config,
-                     column_order=DISPLAY_ORDER, on_select="rerun",
-                     selection_mode="single-row", key="cand_table")
+with table_box:
+    col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c), help=COL_HELP.get(c))
+                  for c in view.columns}
+    event = st.dataframe(view, width="stretch", hide_index=True, height=380,
+                         column_config=col_config, column_order=DISPLAY_ORDER,
+                         on_select="rerun", selection_mode="single-row", key="cand_table")
 
 # selection.rows are positional indices into the displayed (filtered) frame
 _sel = getattr(event, "selection", None)
@@ -330,57 +367,83 @@ _rows = (_sel.get("rows", []) if isinstance(_sel, dict)
 row_pos = _rows[0] if _rows and _rows[0] < len(view) else 0
 pick = view.iloc[row_pos]["ticker"]
 
-colA, colB = st.columns([3, 1])
-with colB:
-    st.markdown(f"### {pick}")
-    st.caption("Step 3 — judge the VCP")
-    info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
-    weekly = st.checkbox("Weekly view", value=False)
-    show_overlays = st.checkbox("VCP + entry overlays", value=True)
-
 payload = res.payloads[pick]
-with colA:
-    _ranges = {"3M": 90, "6M": 180, "9M": 270, "1Y": 365, "2Y / All": None}
-    rsel = st.radio("Time range", list(_ranges), index=1, horizontal=True,
-                    help="Zoom in to see the VCP base; a tight base is hard to read over 2 years.")
-    fig = build_chart(pick, payload["df"], vcp=payload.get("vcp"),
-                      levels=payload.get("levels"), show_overlays=show_overlays,
-                      weekly=weekly, lookback_days=_ranges[rsel])
-    st.plotly_chart(fig, width="stretch")
 
-# Step 2 + Step 4 panels
-p2, p4 = st.columns(2)
-with p2:
-    st.markdown("**Step 2 — Fundamentals**")
+# Step 2 — Fundamentals: sits directly ABOVE the Step 3 chart (read the fuel, then the base).
+with st.container(border=True):
+    st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
     info_btn(INFO_STEP2)
     f = payload.get("fundamentals")
     s2 = payload.get("step2", {})
     if not f:
         st.caption("No fundamental data available (yfinance).")
     else:
-        for label, key in [("Revenue YoY", "revenue_yoy"), ("Revenue QoQ", "revenue_qoq"),
-                           ("EPS YoY", "eps_yoy"), ("EPS QoQ", "eps_qoq"),
-                           ("Operating margin", "operating_margin"),
-                           ("Margin trend (pp)", "margin_trend"),
-                           ("Inventory QoQ", "inventory_qoq")]:
-            v = f.get(key)
-            st.write(f"- {label}: " + ("n/a" if v is None else f"{v:+.1f}%"))
-        st.write("Checks passed: "
-                 + ", ".join(k for k, ok in s2.get("checks", {}).items() if ok) or "—")
+        fields = [("Revenue YoY", "revenue_yoy"), ("Revenue QoQ", "revenue_qoq"),
+                  ("EPS YoY", "eps_yoy"), ("EPS QoQ", "eps_qoq"),
+                  ("Operating margin", "operating_margin"),
+                  ("Margin trend (pp)", "margin_trend"),
+                  ("Inventory QoQ", "inventory_qoq")]
+        lines = [f"**{label}:** "
+                 + ("n/a" if f.get(key) is None else f"{f.get(key):+.1f}%")
+                 for label, key in fields]
+        g1, g2 = st.columns(2)
+        half = (len(lines) + 1) // 2
+        g1.markdown("\n\n".join(lines[:half]))
+        g2.markdown("\n\n".join(lines[half:]))
+        checks = s2.get("checks", {})
+        st.markdown(" ".join(
+            f"{'✅' if checks.get(k) else '—'} {lbl}"
+            for k, lbl in [("revenue_growth", "Rev ≥20%"), ("eps_growth", "EPS ≥20%"),
+                           ("eps_accelerating", "EPS accel"),
+                           ("margin_expanding", "Margin ↑")]))
+        st.caption(f"Score {s2.get('score', 0)}/4")
 
-with p4:
+# Step 3 — the chart (judge the VCP) + its controls.
+colA, colB = st.columns([3, 1])
+with colB:
+    with st.container(border=True):
+        st.markdown(f"### {pick}")
+        st.markdown(step_badge("Step 3", "Judge the VCP"))
+        info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
+        weekly = st.checkbox("Weekly view", value=False)
+        show_overlays = st.checkbox("VCP + entry overlays", value=True)
+with colA:
+    with st.container(border=True):
+        _ranges = {"3M": 90, "6M": 180, "9M": 270, "1Y": 365, "2Y / All": None}
+        rsel = st.radio("Time range", list(_ranges), index=1, horizontal=True,
+                        help="Zoom in to see the VCP base; a tight base is hard to read over 2 years.")
+        fig = build_chart(pick, payload["df"], vcp=payload.get("vcp"),
+                          levels=payload.get("levels"), show_overlays=show_overlays,
+                          weekly=weekly, lookback_days=_ranges[rsel])
+        st.plotly_chart(fig, width="stretch")
+
+# Step 4 — Entry (advisory) + position sizer.
+with st.container(border=True):
     lv = payload.get("levels", {})
-    st.markdown("**Step 4 — Entry (advisory)**")
+    st.markdown(step_badge("Step 4", "Entry — advisory"))
     info_btn(INFO_STEP4)
     bz = lv.get("buy_zone", (None, None))
-    st.write(f"- Pivot: ${lv.get('pivot', 0):.2f}")
-    st.write(f"- Buy zone (no chase): ${bz[0]:.2f} – ${bz[1]:.2f}")
-    st.write(f"- Stop (~7-8%): ${lv.get('stop', 0):.2f}")
-    st.write(f"- Target (~20-25%): ${lv.get('target', 0):.2f}")
+
+    def _usd(x):
+        return "n/a" if x is None else f"${x:,.2f}"
+
+    bz_lo, bz_hi = (bz[0], bz[1]) if bz else (None, None)
+    buy_zone = ("n/a" if (bz_lo is None or bz_hi is None)
+                else f"{_usd(bz_lo)}–{_usd(bz_hi)}")
     pct = lv.get("pct_to_pivot")
-    st.write(f"- Distance to pivot: " + ("n/a" if pct is None else f"{pct:+.1f}%"))
-    st.write(f"- Breakout today: {'✅' if lv.get('breakout_today') else '—'} "
-             f"(vol {lv.get('volume_ratio', 1):.1f}× avg)")
+    pct_s = "n/a" if pct is None else f"{pct:+.1f}%"
+    vol = lv.get("volume_ratio", 1)
+    vol_s = f"{vol:.1f}× vol" if isinstance(vol, (int, float)) else ""
+    breakout_s = ("✅ " if lv.get("breakout_today") else "— ") + vol_s
+
+    r1 = st.columns(3)
+    r2 = st.columns(3)
+    r1[0].metric("Pivot", _usd(lv.get("pivot")), border=True)
+    r1[1].metric("Buy zone", buy_zone, border=True)
+    r1[2].metric("Stop", _usd(lv.get("stop")), border=True)
+    r2[0].metric("Target", _usd(lv.get("target")), border=True)
+    r2[1].metric("To pivot", pct_s, border=True)
+    r2[2].metric("Breakout", breakout_s, border=True)
 
     st.markdown("---")
     # Explicit keys pin these widgets' identity so their values persist across reruns.
