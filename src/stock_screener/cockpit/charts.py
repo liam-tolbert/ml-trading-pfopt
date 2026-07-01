@@ -78,22 +78,24 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
         if bz:
             fig.add_hrect(y0=bz[0], y1=bz[1], fillcolor="green", opacity=0.07,
                           line_width=0, row=1, col=1)
+        # "top right" anchors the label INSIDE the plot (text runs leftward from the
+        # right edge) so it never clips off the side the way "right" (outside) does.
         if piv:
             fig.add_hline(y=piv, line=dict(color="green", dash="dash"),
-                          annotation_text="pivot", annotation_position="right",
-                          row=1, col=1)
+                          annotation_text="pivot", annotation_position="top right",
+                          annotation_bgcolor="rgba(255,255,255,0.6)", row=1, col=1)
         if stp:
             fig.add_hline(y=stp, line=dict(color="red", dash="dot"),
-                          annotation_text="stop", annotation_position="right",
-                          row=1, col=1)
+                          annotation_text="stop", annotation_position="bottom right",
+                          annotation_bgcolor="rgba(255,255,255,0.6)", row=1, col=1)
         if tgt:
             fig.add_hline(y=tgt, line=dict(color="royalblue", dash="dot"),
-                          annotation_text="target", annotation_position="right",
-                          row=1, col=1)
+                          annotation_text="target", annotation_position="top right",
+                          annotation_bgcolor="rgba(255,255,255,0.6)", row=1, col=1)
 
     title = f"{ticker} — {'weekly' if weekly else 'daily'}"
     fig.update_layout(
-        title=title, height=660, margin=dict(l=10, r=10, t=40, b=10),
+        title=title, height=660, margin=dict(l=10, r=24, t=40, b=10),
         xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.02),
         hovermode="x unified")
     fig.update_yaxes(title_text="Price", row=1, col=1)

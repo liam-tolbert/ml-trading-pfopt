@@ -84,6 +84,29 @@ These levels are advisory — place the order in your broker.
 """
 
 
+# Raw candidate-frame column name -> human-readable label. Used both to relabel the
+# rendered table headers (via st.dataframe column_config) and the filter picker/row
+# headers. Keys stay the raw column names so selection & filtering logic is unchanged.
+READABLE_COLS = {
+    "ticker": "Ticker",
+    "price": "Price ($)",
+    "rs": "RS rating",
+    "criteria": "Trend criteria (/8)",
+    "fund_score": "Fundamental score (0-4)",
+    "rev_yoy": "Revenue YoY (%)",
+    "eps_yoy": "EPS YoY (%)",
+    "op_margin": "Operating margin (%)",
+    "vcp": "VCP detected",
+    "num_contractions": "# Contractions",
+    "vcp_quality": "VCP quality (0-100)",
+    "breakout_today": "Breakout today",
+    "pct_to_pivot": "Distance to pivot (%)",
+    "pivot": "Pivot ($)",
+    "stop": "Stop ($)",
+    "target": "Target ($)",
+}
+
+
 def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
     """A small clickable info popover (falls back to an expander on older Streamlit)."""
     try:
@@ -103,16 +126,19 @@ def filter_table(df, key_prefix: str = "flt"):
     """
     import pandas as pd
 
+    readable = READABLE_COLS  # display labels; keys are the raw column names
+
     out = df
     with st.expander("🔎 Filter by column values", expanded=False):
         columns_to_filter = df.loc[:, ~df.columns.str.contains('ticker')].columns
         cols = st.multiselect(
             "Columns to filter on", list(columns_to_filter), key=f"{key_prefix}_cols",
+            format_func=lambda c: readable.get(c, c),
             help="Pick one or more columns; a matching control appears for each.")
         for col in cols:
             s = df[col]
             lc, rc = st.columns([0.28, 0.72])
-            lc.markdown(f"**{col}**")
+            lc.markdown(f"**{readable.get(col, col)}**")
             with rc:
                 if pd.api.types.is_bool_dtype(s):
                     choice = st.selectbox(
@@ -242,7 +268,10 @@ if len(view) == 0:
     st.stop()
 
 st.caption(f"Showing {len(view)} of {len(cand)}. Click a row to chart it.")
-event = st.dataframe(view, width="stretch", hide_index=True,
+# Relabel headers for display only (underlying column names stay raw, so the
+# selection + filter logic that references e.g. "ticker" keeps working).
+col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c)) for c in view.columns}
+event = st.dataframe(view, width="stretch", hide_index=True, column_config=col_config,
                      on_select="rerun", selection_mode="single-row", key="cand_table")
 
 # selection.rows are positional indices into the displayed (filtered) frame
