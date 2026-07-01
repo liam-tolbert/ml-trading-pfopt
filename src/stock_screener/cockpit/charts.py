@@ -98,6 +98,18 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
         hovermode="x unified")
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Vol", row=2, col=1)
+    # Collapse non-trading spans (weekends, holidays, any no-data day) so candles sit
+    # flush. Plotly's date axis spaces points by CALENDAR time, so it leaves blank gaps
+    # over days with no data point, visually distorting the spacing of a VCP base. This
+    # is purely cosmetic — the VCP math runs on trading-day ROWS and never sees the gaps.
+    # Computed generically from the data's own dates (no hardcoded market calendar), so
+    # it works for both daily and weekly views.
+    if len(d) > 1:
+        idx = pd.DatetimeIndex(d.index).normalize()
+        missing = pd.date_range(idx.min(), idx.max(), freq="D").difference(idx)
+        if len(missing):
+            fig.update_xaxes(rangebreaks=[
+                dict(values=missing.strftime("%Y-%m-%d").tolist())])
     # Fit the price pane to the VISIBLE candles so a zoomed-in base fills the chart
     # (SMA lines that fall outside the window simply clip — VCP candles stay large).
     if len(d):
