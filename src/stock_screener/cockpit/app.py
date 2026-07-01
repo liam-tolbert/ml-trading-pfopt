@@ -94,6 +94,58 @@ def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
             st.markdown(body)
 
 
+def filter_table(df, key_prefix: str = "flt"):
+    """Interactive value filter — pick one or more columns and narrow by their values.
+
+    Renders a control matched to each column's type: a range slider for numbers
+    (n/a rows drop out only once you narrow the range), a True/False/All picker for
+    booleans, and a multi-select of distinct values for text. Filters combine (AND).
+    """
+    import pandas as pd
+
+    out = df
+    with st.expander("🔎 Filter by column values", expanded=False):
+        columns_to_filter = df.loc[:, ~df.columns.str.contains('ticker')].columns
+        cols = st.multiselect(
+            "Columns to filter on", list(columns_to_filter), key=f"{key_prefix}_cols",
+            help="Pick one or more columns; a matching control appears for each.")
+        for col in cols:
+            s = df[col]
+            lc, rc = st.columns([0.28, 0.72])
+            lc.markdown(f"**{col}**")
+            with rc:
+                if pd.api.types.is_bool_dtype(s):
+                    choice = st.selectbox(
+                        "value", ["All", "True", "False"], key=f"{key_prefix}_{col}",
+                        label_visibility="collapsed")
+                    if choice != "All":
+                        out = out[out[col] == (choice == "True")]
+                elif pd.api.types.is_numeric_dtype(s):
+                    nn = s.dropna()
+                    if nn.empty:
+                        st.caption("no numeric values")
+                        continue
+                    cmin, cmax = float(nn.min()), float(nn.max())
+                    if cmin == cmax:
+                        st.caption(f"all rows = {cmin:g}")
+                        continue
+                    is_int = pd.api.types.is_integer_dtype(s) or bool((nn % 1 == 0).all())
+                    step = 1.0 if is_int else max((cmax - cmin) / 100.0, 0.01)
+                    lo, hi = st.slider(
+                        "range", cmin, cmax, (cmin, cmax), step=step,
+                        key=f"{key_prefix}_{col}", label_visibility="collapsed")
+                    if (lo, hi) != (cmin, cmax):        # only filter once narrowed
+                        out = out[out[col].between(lo, hi)]
+                else:                                    # text / categorical
+                    opts = sorted(s.dropna().astype(str).unique().tolist())
+                    chosen = st.multiselect(
+                        "values", opts, key=f"{key_prefix}_{col}",
+                        label_visibility="collapsed")
+                    if chosen:
+                        out = out[out[col].astype(str).isin(chosen)]
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
     cfg = ScanConfig(min_criteria=min_criteria, min_rs=float(min_rs),
@@ -177,17 +229,19 @@ h1, i1 = st.columns([0.8, 0.2])
 h1.subheader(f"Step 1 — Candidates ({len(cand)})")
 with i1:
     info_btn(INFO_STEP1)
-query = st.text_input("🔎 Filter by ticker", "", placeholder="e.g. NVDA").strip().upper()
+query = st.text_input("🔎 Search by ticker", "", placeholder="e.g. NVDA").strip().upper()
 if query:
     view = cand[cand["ticker"].str.upper().str.contains(query, na=False, regex=False)]
 else:
     view = cand
 
+view = filter_table(view)
+
 if len(view) == 0:
-    st.info(f"No candidates match '{query}'.")
+    st.info("No candidates match the current filters. Clear a filter to see more.")
     st.stop()
 
-st.caption("Click a row to chart it.")
+st.caption(f"Showing {len(view)} of {len(cand)}. Click a row to chart it.")
 event = st.dataframe(view, width="stretch", hide_index=True,
                      on_select="rerun", selection_mode="single-row", key="cand_table")
 
