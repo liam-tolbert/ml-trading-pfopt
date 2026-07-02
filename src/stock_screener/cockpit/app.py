@@ -462,6 +462,27 @@ with st.container(border=True):
         f"**Breakout:** price {'✅ above pivot' if price_ok else '— below pivot'} · "
         f"volume {'✅ confirmed' if vol_ok else '— not confirmed'}"
         + (f" ({vol:.1f}× vs 1.5×+ needed)" if isinstance(vol, (int, float)) else ""))
+
+    # RMV (Relative Measured Volatility): advisory base-tightness read. Low = a quiet,
+    # coiled base (the VCP sweet spot). Purely a hint — it does NOT move the levels above.
+    rmv = lv.get("rmv")
+    if rmv is None:
+        rmv_disp, rmv_flag, rmv_label, rmv_note = "n/a", "", "n/a", "not enough history."
+    elif rmv < 25:
+        rmv_disp, rmv_flag, rmv_label = f"{rmv:.0f}", "✅", "tight"
+        rmv_note = "low volatility, a classic VCP contraction — tight stop, high-quality base."
+    elif rmv < 50:
+        rmv_disp, rmv_flag, rmv_label = f"{rmv:.0f}", "", "normal"
+        rmv_note = "middling volatility — the base isn't fully coiled yet."
+    else:
+        rmv_disp, rmv_flag, rmv_label = f"{rmv:.0f}", "⚠️", "loose"
+        rmv_note = "still volatile — lower-quality base; consider waiting for it to tighten."
+    rc = st.columns([1, 2])
+    rc[0].metric("RMV", rmv_disp, border=True,
+                 help="Relative Measured Volatility (0–100): today's price volatility vs "
+                      "the stock's own recent range. Low = a tight, low-volatility base "
+                      "(the VCP contraction). Advisory only — it does not move the levels.")
+    rc[1].markdown(f"**Base tightness:** {rmv_flag} **{rmv_label}** — {rmv_note}")
     st.markdown("---")
     # Explicit keys pin these widgets' identity so their values persist across reruns.
     # Without a key, a keyless input's identity depends on the (variable) element count

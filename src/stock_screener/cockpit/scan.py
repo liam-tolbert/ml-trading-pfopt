@@ -31,6 +31,7 @@ from src.stock_screener.minervini_screener.screening import (
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
+from .indicators import relative_measured_volatility
 
 
 @dataclass
@@ -161,6 +162,11 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 continue
 
             levels = _entry_levels(cp, breakout, stop, phase_info)
+            # RMV (Relative Measured Volatility): advisory base-tightness read for Step 4.
+            # Does NOT feed the pivot/stop/target math — the cockpit shows hints, it doesn't
+            # move the levels for you.
+            rmv_series = relative_measured_volatility(df).dropna()
+            levels["rmv"] = float(rmv_series.iloc[-1]) if len(rmv_series) else None
             rows.append({
                 "ticker": t,
                 "price": round(cp, 2),

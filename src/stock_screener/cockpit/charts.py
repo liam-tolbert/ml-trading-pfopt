@@ -13,8 +13,31 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.stock_screener.minervini_screener.screening import calculate_sma
+from src.stock_screener.cockpit.indicators import relative_measured_volatility
 
 _SMA_STYLE = [(50, "#1f77b4"), (150, "#ff7f0e"), (200, "#2ca02c")]
+
+
+def _contraction_hover(c: dict) -> str:
+    """One-line summary of a VCP contraction for the chart tooltip.
+
+    Surfaces the numbers a user judges a VCP on: how deep the pullback was, the
+    peak->trough prices, how long it took, and whether volume dried up (< 1.0×).
+    """
+    parts = []
+    dd = c.get("drawdown_pct")
+    if dd is not None:
+        parts.append(f"{dd:.1f}% deep")
+    pk, tr = c.get("peak_price"), c.get("trough_price")
+    if pk is not None and tr is not None:
+        parts.append(f"${pk:,.2f} → ${tr:,.2f}")
+    dur = c.get("duration_days")
+    if dur:
+        parts.append(f"{dur}d")
+    vr = c.get("volume_ratio")
+    if vr is not None:
+        parts.append(f"vol {vr:.2f}×")
+    return " · ".join(parts)
 
 
 def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
@@ -46,8 +69,10 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     else:
         d = d_full
 
-    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        row_heights=[0.76, 0.24], vertical_spacing=0.03)
+    # 3 rows: price (top), a compressed volume pane, and RMV (bottom). Volume shrinks
+    # from its old 0.24 share to make room for the RMV oscillator.
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                        row_heights=[0.62, 0.19, 0.19], vertical_spacing=0.03)
 
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
@@ -75,6 +100,18 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                                      line=dict(width=1.1, color="#d93025", dash="dash")),
                           row=2, col=1)
 
+    # Row 3: RMV (Relative Measured Volatility) — normalized 0-100, low = tight base.
+    # Computed on FULL history (like the SMAs) so the min-max normalization window stays
+    # stable when the view is zoomed, then shown over the visible window. The shaded band
+    # marks the < 25 "tight" zone: a low-volatility contraction is the VCP sweet spot, so
+    # watching RMV fall into the band as the base forms is the signal to look for.
+    if len(d_full) >= 15:
+        rmv = relative_measured_volatility(d_full).reindex(d.index)
+        fig.add_hrect(y0=0, y1=25, fillcolor="green", opacity=0.08, line_width=0,
+                      row=3, col=1)
+        fig.add_trace(go.Scatter(x=d.index, y=rmv, name="RMV",
+                                 line=dict(width=1.3, color="#8e44ad")), row=3, col=1)
+
     if show_overlays and vcp:
         # Shade each detected contraction (peak -> trough): a VCP *hint*.
         for c in (vcp.get("contractions") or [])[-6:]:
@@ -82,6 +119,20 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                 fig.add_vrect(x0=c["peak_date"], x1=c["trough_date"],
                               fillcolor="LightSalmon", opacity=0.15, line_width=0,
                               row=1, col=1)
+                # add_vrect is a layout shape and can't carry a tooltip, so overlay an
+                # invisible hoverable scatter across the same span. Under hovermode
+                # "x unified" it adds a "Contraction N" row (depth / prices / volume) to
+                # the readout whenever the cursor is over the shaded column. Restrict x to
+                # the visible candles so the points land on real plotted (rangebreak-safe)
+                # positions and never nudge the y-axis (range is pinned below anyway).
+                hx = d.index[(d.index >= c["peak_date"]) & (d.index <= c["trough_date"])]
+                if len(hx):
+                    fig.add_trace(go.Scatter(
+                        x=hx, y=[c["peak_price"]] * len(hx), mode="markers",
+                        marker=dict(size=6, opacity=0, color="LightSalmon"),
+                        name=f"Contraction {c.get('number', '')}".strip(),
+                        hoverinfo="text", hovertext=_contraction_hover(c),
+                        showlegend=False), row=1, col=1)
             except Exception:
                 pass
 
@@ -108,11 +159,12 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
 
     title = f"{ticker} — {'weekly' if weekly else 'daily'}"
     fig.update_layout(
-        title=title, height=660, margin=dict(l=10, r=24, t=40, b=10),
+        title=title, height=720, margin=dict(l=10, r=24, t=40, b=10),
         xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.02),
         hovermode="x unified")
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Vol", row=2, col=1)
+    fig.update_yaxes(title_text="RMV", range=[0, 100], row=3, col=1)
     # Collapse non-trading spans (weekends, holidays, any no-data day) so candles sit
     # flush. Plotly's date axis spaces points by CALENDAR time, so it leaves blank gaps
     # over days with no data point, visually distorting the spacing of a VCP base. This
