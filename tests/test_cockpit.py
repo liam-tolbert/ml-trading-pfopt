@@ -274,6 +274,74 @@ def test_incremental_price_cache_appends_delta():
             assert len(got2) == 20 and got2["Close"].iloc[0] == 50.0
 
 
+def _lin_series(segments, start=100.0):
+    """Build an OHLCV frame whose Close walks piecewise-linearly through `segments`
+    (list of (n_days, end_price)); High=Low=Open=Close so swings are exact/deterministic."""
+    import pandas as pd
+    closes = [start]
+    for days, end in segments:
+        s = closes[-1]
+        closes += [s + (end - s) * k / days for k in range(1, days + 1)]
+    idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=len(closes))
+    c = pd.Series(closes, index=idx)
+    return pd.DataFrame({"Open": c, "High": c, "Low": c, "Close": c,
+                         "Volume": 1_000_000}, index=idx)
+
+
+def test_vcp_detects_tightening_bases():
+    """The cockpit detector flags genuine widest-first tightening bases — including the
+    shallow ones the vendored detector missed (cc=0)."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    # Textbook VCP: rise, then pullbacks ~16→11→7→5% into a tight base near the high.
+    df = _lin_series([(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
+                      (10, 135.8), (8, 144), (10, 136.8), (8, 143)])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    assert v["is_vcp"] is True, v["pattern_details"]
+    assert v["contraction_count"] == 4, v["contraction_count"]
+    depths = [c["drawdown_pct"] for c in v["contractions"]]
+    assert depths == sorted(depths, reverse=True) and depths[0] > 12 and depths[-1] < 8, depths
+    assert v["contractions"][-1]["trough_date"] == max(c["trough_date"] for c in v["contractions"])
+
+    # Shallow tight base (~8→5%) that the vendored detector reported as cc=0.
+    df2 = _lin_series([(120, 130), (10, 119.6), (8, 128), (10, 121.6), (8, 127)])
+    v2 = detect_vcp(df2, float(df2["Close"].iloc[-1]), {})
+    assert v2["is_vcp"] is True and v2["contraction_count"] >= 2, v2["pattern_details"]
+
+
+def test_vcp_rejects_noise_and_nobase():
+    """Choppy names far from their high and straight-up no-base movers are NOT VCPs, and
+    the contraction count stays bounded (no 22-swing noise tail)."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    # Chop that fades ~30% off its high -> not near the high -> not a VCP.
+    choppy = _lin_series([(40, 150), (8, 138), (6, 146), (8, 128), (6, 138),
+                          (8, 118), (6, 128), (8, 108), (6, 116), (8, 105)])
+    v = detect_vcp(choppy, float(choppy["Close"].iloc[-1]), {})
+    assert v["is_vcp"] is False and v["contraction_count"] <= 6, v["contraction_count"]
+
+    # Straight-up, no pullback -> no completed peak->trough -> cc 0, not a VCP.
+    up = _lin_series([(150, 250)])
+    v2 = detect_vcp(up, float(up["Close"].iloc[-1]), {})
+    assert v2["is_vcp"] is False and v2["contraction_count"] <= 1, v2["contraction_count"]
+
+
+def test_vcp_base_does_not_span_a_breakout():
+    """The base must be a single consolidation under a flat top: contractions from an OLD
+    base (before a big advance) must not be stitched into the current one (the DVA bug)."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    # Base A near ~100 (8%, 5.6%), a +22% advance to ~120, then base B near ~120 (8%, 5%).
+    df = _lin_series([(40, 100), (8, 92), (8, 99), (8, 93.5), (8, 98),
+                      (10, 120), (8, 110.4), (8, 118), (8, 112), (8, 117)])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    # Only base B is the current base — base A's ~100 peaks are excluded by the flat-top rule.
+    assert v["contraction_count"] == 2, v["contraction_count"]
+    assert all(c["peak_price"] > 108 for c in v["contractions"]), \
+        [round(c["peak_price"]) for c in v["contractions"]]
+    assert v["is_vcp"] is True, v["pattern_details"]
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

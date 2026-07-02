@@ -8,7 +8,7 @@ Funnel:
   Step 1  validate_minervini_trend_template   -> HARD gate (the candidate list)
   +       trailing-return percentile           -> RS rating (display / optional filter)
   Step 2  fundamentals summary                 -> highlight (badges + pass-count)
-  Step 3  detect_vcp_pattern                   -> hint for the chart (not a gate by default)
+  Step 3  detect_vcp (cockpit ZigZag detector) -> hint for the chart (not a gate by default)
   Step 4  detect_breakout + calculate_stop_loss-> advisory entry levels
   Regime  analyze_spy_trend + market_breadth   -> environment banner
 """
@@ -26,12 +26,14 @@ from src.stock_screener.minervini_screener.screening import (
     calculate_sma,
     classify_phase,
     detect_breakout,
-    detect_vcp_pattern,
     should_generate_signals,
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
 from .indicators import relative_measured_volatility
+# Cockpit VCP detector replaces the vendored detect_vcp_pattern (which starves strong
+# uptrends → cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
+from .vcp import detect_vcp
 
 
 @dataclass
@@ -149,7 +151,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             if cfg.min_rs and (rsr is None or rsr < cfg.min_rs):
                 continue
 
-            vcp = detect_vcp_pattern(df, cp, phase_info)
+            vcp = detect_vcp(df, cp, phase_info)
             if cfg.require_vcp and not vcp.get("is_vcp"):
                 continue
 

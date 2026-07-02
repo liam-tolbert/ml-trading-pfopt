@@ -135,8 +135,8 @@ COL_HELP = {
                "(unknown, not zero).",
     "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",
     "op_margin": "Current operating margin. Look for stable or expanding.",
-    "vcp": "A valid Volatility Contraction Pattern was detected (2–6 tightening pullbacks, "
-           "quality ≥50).",
+    "vcp": "A valid Volatility Contraction Pattern was detected: 2–6 progressively tighter "
+           "pullbacks, the last one tight (≤12%), with price near its 52-week high.",
     "num_contractions": "Number of peak→trough pullbacks in the current base. Minervini's "
                         "range is 2–6.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
