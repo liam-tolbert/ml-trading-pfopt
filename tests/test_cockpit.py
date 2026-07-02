@@ -176,6 +176,104 @@ def test_sepa_guide_page_renders():
         "guide page rendered no SEPA markdown"
 
 
+def test_get_universe_full_us_offline():
+    """full_us branch: mocked nasdaqtrader payloads -> many normalized common-stock
+    symbols with ETFs / test issues / warrants / dotted class shares filtered out, and
+    NO NotImplementedError. Fully offline (mocked requests + temp CACHE_DIR)."""
+    import tempfile
+    from unittest.mock import patch, MagicMock
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    nasdaq = ("Symbol|Security Name|Market Category|Test Issue|Financial Status|"
+              "Round Lot Size|ETF|NextShares\n"
+              "AAPL|Apple Inc. - Common Stock|Q|N|N|100|N|N\n"
+              "MSFT|Microsoft Corp - Common Stock|Q|N|N|100|N|N\n"
+              "QQQ|Invesco QQQ Trust|Q|N|N|100|Y|N\n"            # ETF flag -> drop
+              "TSTZ|Test Issue Co|Q|Y|N|100|N|N\n"              # Test Issue -> drop
+              "XYZW|Some Warrant|Q|N|N|100|N|N\n"               # W suffix -> drop
+              "File Creation Time: 07/02/2026 05:30|||||||\n")   # footer -> drop
+    other = ("ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|"
+             "Test Issue|NASDAQ Symbol\n"
+             "IBM|International Business Machines|N|IBM|N|100|N|IBM\n"
+             "BRK.B|Berkshire Hathaway Class B|N|BRK.B|N|100|N|BRK.B\n"  # dot -> drop (known limit)
+             "SPY|SPDR S&P 500 ETF Trust|P|SPY|Y|100|N|SPY\n"           # ETF -> drop
+             "File Creation Time: 07/02/2026 05:30|||||||\n")
+
+    def fake_get(url, timeout=0):
+        r = MagicMock()
+        r.text = nasdaq if "nasdaqlisted" in url else other
+        r.raise_for_status.return_value = None
+        return r
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(dfeed, "CACHE_DIR", Path(tmp)), patch("requests.get", fake_get):
+            syms = dfeed.get_universe("full_us", force=True)
+
+    assert "AAPL" in syms and "MSFT" in syms and "IBM" in syms
+    assert all(s == s.upper() and "." not in s for s in syms), "symbols must be normalized"
+    assert "QQQ" not in syms and "SPY" not in syms, "ETFs must be dropped"
+    assert "TSTZ" not in syms and "XYZW" not in syms, "test/warrant must be dropped"
+    assert not any(s.startswith("BRK") for s in syms), "dotted class share must be dropped"
+
+
+def test_incremental_price_cache_appends_delta():
+    """Incremental cache: a recent parquet is topped up with only the bars since its last
+    date (start=, not period=); a split that re-adjusts the overlap forces a full
+    re-baseline instead. Offline (mocked yfinance.download + temp PRICES_DIR)."""
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    def _ohlcv(idx, close):
+        return pd.DataFrame({"Open": close, "High": [c + 1 for c in close],
+                             "Low": [c - 1 for c in close], "Close": close,
+                             "Volume": [1000] * len(idx)}, index=pd.DatetimeIndex(idx))
+
+    today = pd.Timestamp.today().normalize()
+    cidx = pd.bdate_range(end=today - pd.Timedelta(days=4), periods=15)
+    cached = _ohlcv(cidx, [100.0 + i for i in range(15)])
+    last = cidx[-1]
+    n1, n2 = last + pd.Timedelta(days=1), last + pd.Timedelta(days=2)
+    incr_idx = [last, n1, n2]                                   # 1-day overlap + 2 new bars
+    incr_a = _ohlcv(incr_idx, [cached.loc[last, "Close"], 200.0, 201.0])   # overlap matches
+    incr_b = _ohlcv(incr_idx, [cached.loc[last, "Close"] / 2, 200.0, 201.0])  # halved -> split
+    full = _ohlcv(pd.bdate_range(end=today, periods=20), [50.0 + i for i in range(20)])
+
+    calls = []
+
+    def fake_a(sym, **kw):
+        calls.append(kw)
+        return incr_a
+
+    def fake_b(sym, **kw):
+        calls.append(kw)
+        return incr_b if "start" in kw else full
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        with patch.object(dfeed, "PRICES_DIR", pdir):
+            # (a) small gap, overlap agrees -> delta append, no full refetch
+            cached.to_parquet(pdir / "AAPL.parquet")
+            calls.clear()
+            with patch("yfinance.download", fake_a):
+                got = dfeed.get_prices("AAPL", max_age_days=-1)      # -1 skips fresh short-circuit
+            assert any("start" in c for c in calls), "should delta-fetch with start="
+            assert not any("period" in c for c in calls), "should NOT full-refetch"
+            assert len(got) == 17 and n2 in got.index and got.loc[n2, "Close"] == 201.0
+
+            # (b) overlap diverged (split) -> re-baseline via a full period= fetch
+            cached.to_parquet(pdir / "AAPL.parquet")               # reset cache
+            calls.clear()
+            with patch("yfinance.download", fake_b):
+                got2 = dfeed.get_prices("AAPL", max_age_days=-1)
+            assert any("start" in c for c in calls), "must try incremental first"
+            assert any("period" in c for c in calls), "divergence must trigger a full refetch"
+            assert len(got2) == 20 and got2["Close"].iloc[0] == 50.0
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

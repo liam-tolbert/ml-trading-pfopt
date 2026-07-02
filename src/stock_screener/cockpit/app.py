@@ -80,9 +80,12 @@ look for a **Volatility Contraction Pattern**:
 - **higher lows**, **volume drying up** into the tightest part,
 - price holding above the **50-day SMA**, total base depth ~10–35%.
 
-Shaded bands mark *detected* contractions (a hint — you decide). Use the **Time range**
-buttons to zoom into the base (a tight VCP is invisible over 2 years), **Weekly** for
-base structure, **Daily** for the exact pivot. **No clean VCP → no trade.**
+Shaded bands mark *detected* contractions (a hint — you decide). The bottom **RMV** pane
+(Relative Measured Volatility, 0–100) tracks how tight the base is versus the stock's own
+recent range — falling **into the green < 25 band = a genuine volatility contraction**, the
+VCP sweet spot; a high RMV means the base is still loose. Use the **Time range** buttons to
+zoom into the base (a tight VCP is invisible over 2 years), **Weekly** for base structure,
+**Daily** for the exact pivot. **No clean VCP → no trade.**
 """
 
 INFO_STEP4 = """
@@ -277,8 +280,20 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
         "4. **Step 3:** click a row and *judge the VCP yourself* on the chart.\n"
         "5. **Step 4:** if it breaks out on volume, use the advisory entry/stop/size.\n\n"
         "Each section has its own **ℹ️** button. Full details on the **SEPA Guide** page.")
-universe = st.sidebar.selectbox("Universe", ["sp500", "tickers"], index=0,
-                                help="sp500 = S&P 500 constituents; tickers = data/tickers.txt")
+universe = st.sidebar.selectbox(
+    "Universe", ["sp500", "full_us", "tickers"], index=0,
+    format_func=lambda k: {
+        "sp500": "S&P 500 (fast)",
+        "full_us": "All US common stocks (~3–4k · slow first scan)",
+        "tickers": "My tickers.txt",
+    }[k],
+    help="sp500 = S&P 500 constituents (fast). full_us = broad US common-stock universe "
+         "from Nasdaq/NYSE listings (~3–4k names; the FIRST cold scan pulls thousands of "
+         "price histories and can take several minutes — later scans reuse the cache and "
+         "only fetch new days). tickers = data/tickers.txt")
+if universe == "full_us":
+    st.sidebar.caption("⏳ First full_us scan pulls ~3–4k price histories (several minutes). "
+                       "Later scans use the cache and fetch only new days.")
 min_criteria = 8  # full Minervini trend template — all 8 criteria required (no 7/8)
 st.sidebar.caption("Gate: full **8/8** trend template")
 min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,

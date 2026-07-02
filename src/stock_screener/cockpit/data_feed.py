@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import time
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
@@ -28,6 +29,20 @@ SP500_CSV_URL = (
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/"
     "data/constituents.csv"
 )
+# NASDAQ Trader symbol directories (HTTPS mirror of the upstream ftp:// endpoints, which
+# are commonly blocked). Together these list every NASDAQ + NYSE/AMEX security; we filter
+# them down to clean common stock — the ~3-4.5k "full US" universe. Re-implements
+# minervini_screener.data.universe_fetcher (which we can't import: its package __init__
+# eager-loads SQLAlchemy, absent from this env — see data_feed's module docstring).
+NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
+OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
+US_COMMON_CSV = "us_common_universe.csv"
+# Names that betray a fund/ETF/note rather than an operating company.
+_ETF_NAME_RE = r"ETF|FUND|TRUST|INDEX|PORTFOLIO|SHARES|NOTES|BOND|TREASURY"
+# Relative Close divergence over the overlap window that signals yfinance re-adjusted the
+# whole history (a split/dividend) — i.e. an incremental append would splice two different
+# adjustment bases, so we re-baseline with a full refetch instead.
+SPLIT_TOL = 0.005
 _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 
 
@@ -46,8 +61,7 @@ def get_universe(name: str = "sp500", force: bool = False,
     if name == "sp500":
         return _get_sp500(force=force, max_age_days=max_age_days)
     if name == "full_us":
-        raise NotImplementedError(
-            "full_us universe not wired yet; design point is get_universe()")
+        return _get_us_common(force=force, max_age_days=max_age_days)
     raise ValueError(f"unknown universe: {name!r}")
 
 
@@ -117,6 +131,77 @@ def _fetch_sp500_wikipedia() -> Optional[List[str]]:
         return None
 
 
+def _get_us_common(force: bool, max_age_days: float) -> List[str]:
+    """Broad US common-stock universe (~3-4.5k), cached like sp500. Listings churn, so the
+    cache is capped at 1 day (matching upstream). Fallbacks never trigger a hidden network
+    call: stale full_us cache -> the sp500 cache (offline read) -> tickers.txt."""
+    path = CACHE_DIR / US_COMMON_CSV
+    max_age_days = min(max_age_days, 1.0)
+    if not force and path.exists() and age_days(path) <= max_age_days:
+        cached = _syms_from_csv(path)
+        if cached:
+            return cached
+    syms = _fetch_us_common_nasdaqtrader()
+    if syms:
+        ensure_dirs()
+        pd.Series(sorted(set(syms)), name="Symbol").to_csv(path, index=False)
+        return [normalize(s) for s in sorted(set(syms))]
+    if path.exists():                              # stale-but-present beats nothing
+        cached = _syms_from_csv(path)
+        if cached:
+            return cached
+    sp = CACHE_DIR / "sp500_constituents.csv"      # narrower offline fallback (no network)
+    if sp.exists():
+        cached = _syms_from_csv(sp)
+        if cached:
+            return cached
+    return _read_tickers_txt()                      # last-ditch offline fallback
+
+
+def _fetch_us_common_nasdaqtrader() -> Optional[List[str]]:
+    """NASDAQ + NYSE/AMEX common stocks from the nasdaqtrader SymDir over HTTPS.
+    Returns raw (pre-normalize) symbols, or None if nothing could be fetched."""
+    try:
+        import requests
+        frames = []
+        for url, sym_col in ((NASDAQ_LISTED_URL, "Symbol"),
+                             (OTHER_LISTED_URL, "ACT Symbol")):
+            r = requests.get(url, timeout=30)
+            r.raise_for_status()
+            df = pd.read_csv(io.StringIO(r.text), sep="|")
+            # Test Issue == 'N' drops test issues AND the trailing "File Creation Time…"
+            # footer row (its Test Issue field is NaN).
+            df = df[df["Test Issue"] == "N"]
+            if "ETF" in df.columns:                 # exchange ETF flag: stronger than a name guess
+                df = df[df["ETF"] != "Y"]
+            df = df.rename(columns={sym_col: "symbol", "Security Name": "name"})
+            frames.append(df[["symbol", "name"]])
+        allsym = (pd.concat(frames, ignore_index=True)
+                    .dropna(subset=["symbol"])
+                    .drop_duplicates(subset=["symbol"]))
+        syms = sorted(_filter_us_symbols(allsym)["symbol"].astype(str).tolist())
+        return syms or None
+    except Exception:
+        return None
+
+
+def _filter_us_symbols(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only clean common-stock tickers. Faithful to the upstream Minervini filter (a
+    single pass avoids its boolean-alignment bug): drop symbols with $ ^ . - ; drop
+    warrant/right/unit suffixes; keep 1-5 uppercase letters; drop fund/ETF/note names.
+    Note this also omits dotted class shares (BRK.B) and 1-letter-suffix names (U) — the
+    same known limitation as upstream."""
+    if df.empty:
+        return df
+    sym = df["symbol"].astype(str)
+    df = df[~sym.str.contains(r"[\$\^\.\-]", regex=True, na=False)]
+    df = df[~df["symbol"].astype(str).str.contains(r"(?:WS|WT|W|R|U)$", regex=True, na=False)]
+    df = df[df["symbol"].astype(str).str.match(r"^[A-Z]{1,5}$", na=False)]
+    name_u = df["name"].astype(str).str.upper()
+    df = df[~name_u.str.contains(_ETF_NAME_RE, regex=True, na=False)]
+    return df
+
+
 # --------------------------------------------------------------------------- #
 # Prices
 # --------------------------------------------------------------------------- #
@@ -139,9 +224,67 @@ def _clean_prices(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     return df.dropna(subset=["Close"])
 
 
+def _download_batch(yf, part, retries: int, pause: float, **dl):
+    """yf.download with bounded retry + exponential backoff on an empty/failed result.
+    ``**dl`` carries either ``period=`` (full history) or ``start=/end=`` (incremental), so
+    the one helper serves both the cold and delta fetch paths."""
+    raw = None
+    for attempt in range(retries + 1):
+        try:
+            raw = yf.download(part, **dl)
+        except Exception:
+            raw = None
+        if raw is not None and len(raw):
+            return raw
+        if attempt < retries:
+            time.sleep(pause * (2 ** attempt))
+    return raw
+
+
+def _lookback_to_offset(lookback: str):
+    """'2y'/'18mo'/'90d' -> a pandas offset for trimming the incremental cache window."""
+    try:
+        if lookback.endswith("mo"):
+            return pd.DateOffset(months=int(lookback[:-2]))
+        if lookback.endswith("y"):
+            return pd.DateOffset(years=int(lookback[:-1]))
+        if lookback.endswith("wk"):
+            return pd.Timedelta(weeks=int(lookback[:-2]))
+        if lookback.endswith("d"):
+            return pd.Timedelta(days=int(lookback[:-1]))
+    except Exception:
+        pass
+    return pd.DateOffset(years=2)
+
+
+def _merge_incremental(cached: pd.DataFrame, new: Optional[pd.DataFrame],
+                       lookback: str) -> tuple:
+    """Append only genuinely-new bars to ``cached``. Returns ``(df, needs_full)``.
+
+    ``needs_full=True`` means the overlapping days diverged beyond ``SPLIT_TOL`` — yfinance
+    re-adjusted the history (split/dividend), so appending would splice two adjustment
+    bases; the caller should re-baseline with a full refetch. When ``new`` is empty/None
+    (nothing new, or a failed fetch) we return the cache untouched."""
+    if new is None or not len(new):
+        return cached, False
+    common = cached.index.intersection(new.index)
+    if len(common):
+        c = cached.loc[common, "Close"].astype(float)
+        n = new.loc[common, "Close"].astype(float)
+        rel = ((c - n).abs() / c.abs().replace(0, pd.NA)).dropna()
+        if len(rel) and float(rel.max()) > SPLIT_TOL:
+            return cached, True
+    merged = pd.concat([cached, new])
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    cutoff = merged.index[-1] - _lookback_to_offset(lookback)
+    return merged.loc[merged.index >= cutoff], False
+
+
 def get_prices(ticker: str, lookback: str = "2y", force: bool = False,
-               max_age_days: float = 1.0) -> Optional[pd.DataFrame]:
-    """Daily OHLCV (auto-adjusted) for one name, parquet-cached and age-refreshed."""
+               max_age_days: float = 1.0, incremental: bool = True,
+               overlap_days: int = 5, max_gap_days: int = 10) -> Optional[pd.DataFrame]:
+    """Daily OHLCV (auto-adjusted) for one name, parquet-cached and age-refreshed. When a
+    recent cache exists, only the bars since its last date are fetched and appended."""
     ensure_dirs()
     sym = normalize(ticker)
     path = PRICES_DIR / f"{sym}.parquet"
@@ -150,8 +293,36 @@ def get_prices(ticker: str, lookback: str = "2y", force: bool = False,
             return pd.read_parquet(path)
         except Exception:
             pass
+    import yfinance as yf
+
+    # Incremental: fetch only bars since the last cached date (small recent gap only).
+    if not force and incremental and path.exists():
+        try:
+            cached = pd.read_parquet(path)
+        except Exception:
+            cached = None
+        if cached is not None and len(cached):
+            last = pd.Timestamp(cached.index[-1]).normalize()
+            gap = (pd.Timestamp.today().normalize() - last).days
+            if 0 <= gap <= max_gap_days:
+                start = (last - pd.Timedelta(days=overlap_days)).strftime("%Y-%m-%d")
+                try:
+                    raw = yf.download(sym, start=start, interval="1d", auto_adjust=True,
+                                      progress=False, threads=False)
+                except Exception:
+                    raw = None
+                new = _clean_prices(raw)
+                merged, needs_full = _merge_incremental(cached, new, lookback)
+                if not needs_full:
+                    if new is not None and len(new):    # only persist when we got data
+                        try:
+                            merged.to_parquet(path)
+                        except Exception:
+                            pass
+                    return merged
+                # needs_full -> fall through to a full re-baseline fetch below
+
     try:
-        import yfinance as yf
         raw = yf.download(sym, period=lookback, interval="1d",
                           auto_adjust=True, progress=False, threads=False)
     except Exception:
@@ -186,17 +357,27 @@ def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
 
 def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = False,
                     chunk: int = 100, max_workers: int = 6,  # max_workers kept for API compat
+                    pause: float = 0.5, retries: int = 2, incremental: bool = True,
+                    overlap_days: int = 5, max_gap_days: int = 10,
                     progress: Optional[Callable[[int, int, str], None]] = None
                     ) -> Dict[str, pd.DataFrame]:
     """Fetch many tickers SAFELY. Concurrent single-ticker ``yf.download`` calls race on
     yfinance's shared global state (returning the wrong ticker's data), so we instead
     use yfinance's own batch download (``group_by='ticker'``, internal threading) in
-    chunks, splitting per ticker. Cache hits are read first; only misses are fetched.
+    chunks, with inter-batch pauses + retry/backoff so a large universe doesn't get
+    rate-limited into silently-dropped batches.
+
+    Caching is incremental: a fresh (<1d) parquet is used as-is; a cache with a small
+    recent gap is topped up with only the bars since its last date (one shared ``start``
+    across the batch); everything else (no cache, or a gap > ``max_gap_days``) gets a full
+    ``lookback`` refetch, which also re-baselines auto-adjusted history.
     """
     ensure_dirs()
     syms = [normalize(t) for t in tickers]
     out: Dict[str, pd.DataFrame] = {}
-    to_fetch: List[str] = []
+    full_fetch: List[str] = []                 # need full period=lookback (cold / re-baseline)
+    incr: Dict[str, tuple] = {}                # sym -> (cached_df, last_date)
+    today = pd.Timestamp.today().normalize()
     for sym in syms:
         path = PRICES_DIR / f"{sym}.parquet"
         if not force and age_days(path) <= 1.0:
@@ -205,34 +386,85 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 continue
             except Exception:
                 pass
-        to_fetch.append(sym)
+        cached = None
+        if not force and incremental and path.exists():
+            try:
+                cached = pd.read_parquet(path)
+            except Exception:
+                cached = None
+        if cached is not None and len(cached):
+            last = pd.Timestamp(cached.index[-1]).normalize()
+            gap = (today - last).days
+            if 0 <= gap <= max_gap_days:
+                incr[sym] = (cached, last)
+            else:
+                full_fetch.append(sym)         # too-stale -> full refetch (re-baseline)
+        else:
+            full_fetch.append(sym)
 
     total = len(syms)
     done = len(out)
-    if to_fetch:
+
+    def _emit(sym: str) -> None:
+        nonlocal done
+        done += 1
+        if progress:
+            progress(done, total, sym)
+
+    if full_fetch or incr:
         import yfinance as yf
-        for i in range(0, len(to_fetch), chunk):
-            part = to_fetch[i:i + chunk]
-            try:
-                raw = yf.download(part, period=lookback, interval="1d",
-                                  auto_adjust=True, group_by="ticker",
-                                  threads=True, progress=False)
-            except Exception:
-                raw = None
-            for sym in part:
-                df = None
-                if raw is not None and len(raw):
-                    sub = _extract_ticker(raw, sym)
-                    df = _clean_prices(sub) if sub is not None else None
-                if df is not None and len(df):
-                    out[sym] = df
-                    try:
-                        df.to_parquet(PRICES_DIR / f"{sym}.parquet")
-                    except Exception:
-                        pass
-                done += 1
-                if progress:
-                    progress(done, total, sym)
+
+        # ---- Incremental: only bars since each cache's last date (shared start) ----
+        if incr:
+            start = (min(last for _c, last in incr.values())
+                     - pd.Timedelta(days=overlap_days)).strftime("%Y-%m-%d")
+            incr_syms = list(incr)
+            for i in range(0, len(incr_syms), chunk):
+                part = incr_syms[i:i + chunk]
+                raw = _download_batch(yf, part, retries, pause, start=start,
+                                      interval="1d", auto_adjust=True,
+                                      group_by="ticker", threads=True, progress=False)
+                for sym in part:
+                    cached, _last = incr[sym]
+                    new = None
+                    if raw is not None and len(raw):
+                        sub = _extract_ticker(raw, sym)
+                        new = _clean_prices(sub) if sub is not None else None
+                    merged, needs_full = _merge_incremental(cached, new, lookback)
+                    if needs_full:
+                        full_fetch.append(sym)        # re-baseline in the full pass below
+                        continue
+                    out[sym] = merged
+                    if new is not None and len(new):  # only persist when we got new data
+                        try:
+                            merged.to_parquet(PRICES_DIR / f"{sym}.parquet")
+                        except Exception:
+                            pass
+                    _emit(sym)
+                if i + chunk < len(incr_syms):
+                    time.sleep(pause)
+
+        # ---- Full: cold caches + incremental re-baselines ----
+        if full_fetch:
+            for i in range(0, len(full_fetch), chunk):
+                part = full_fetch[i:i + chunk]
+                raw = _download_batch(yf, part, retries, pause, period=lookback,
+                                      interval="1d", auto_adjust=True,
+                                      group_by="ticker", threads=True, progress=False)
+                for sym in part:
+                    df = None
+                    if raw is not None and len(raw):
+                        sub = _extract_ticker(raw, sym)
+                        df = _clean_prices(sub) if sub is not None else None
+                    if df is not None and len(df):
+                        out[sym] = df
+                        try:
+                            df.to_parquet(PRICES_DIR / f"{sym}.parquet")
+                        except Exception:
+                            pass
+                    _emit(sym)
+                if i + chunk < len(full_fetch):
+                    time.sleep(pause)
     return out
 
 
