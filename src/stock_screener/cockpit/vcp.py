@@ -21,11 +21,18 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from .indicators import relative_measured_volatility
+
 # --- Tunables (calibrated against the live full_us funnel) ------------------ #
-ZZ_THRESHOLD = 0.04        # ZigZag reversal size; a swing high/low is confirmed on a move
-                           # this far (4%) against the running extreme. Small enough to see
-                           # a VCP's tight final pullback, large enough to ignore daily noise.
-TIGHTEN_MIN_PCT = 60.0     # ≥ this % of successive pullbacks must be smaller than the prior
+ZZ_THRESHOLD = 0.04        # fallback ZigZag reversal size (used when the adaptive estimate
+                           # can't be computed, and as the calibration anchor for ADAPT_K).
+ATR_PERIOD = 10            # smoothing for the true-range% used by the adaptive threshold
+ADAPT_K = 2.75             # adaptive ZigZag threshold = ADAPT_K × median(true-range%) over the
+                           # base, clipped to [THR_MIN, THR_MAX]. K is set so a typical mid-vol
+                           # name (~1.5%/day true range) lands near the old fixed 0.04.
+THR_MIN = 0.03             # floor: don't chase noise on ultra-quiet mega-caps
+THR_MAX = 0.10             # cap: don't blur a high-vol small-cap's swings into one leg
+TIGHTEN_MIN_PCT = 60.0     # is_vcp gate on the 0-100 tightening-quality score (below)
 MIN_CONTRACTIONS = 2
 MAX_CONTRACTIONS = 6
 MAX_BASE_WEEKS = 65        # a base older than this isn't the current setup
@@ -35,6 +42,8 @@ PEAK_FLAT_BAND = 1.15      # base peaks must sit within this ratio (a flat-ish t
 FINAL_TIGHT_PCT = 12.0     # the last contraction must be at least this tight
 NEAR_HIGH_PCT = 25.0       # price must be within this % of the 52-week high
 LOOKBACK_BARS = 325        # ~65 weeks of trading days
+RMV_TIGHT_MAX = 25.0       # strict gate: current RMV must be <= this (bottom quartile of the
+                           # base's own volatility range) — the volatility half of the VCP
 
 
 def _zigzag_pivots(high: np.ndarray, low: np.ndarray, thr: float) -> List[tuple]:
@@ -75,22 +84,44 @@ def _zigzag_pivots(high: np.ndarray, low: np.ndarray, thr: float) -> List[tuple]
     return piv
 
 
+def _adaptive_threshold(base: pd.DataFrame) -> float:
+    """Scale the ZigZag reversal size to the stock's *own* volatility.
+
+    A high-vol small-cap needs a wider swing filter (or one pullback fragments into three);
+    an ultra-quiet mega-cap needs a tighter one (or its tight final contraction is invisible).
+    We use median true-range% over the base — the same scale-free volatility RMV is built on —
+    so ``thr`` floats with the stock instead of being a magic 0.04. Clipped to [THR_MIN, THR_MAX].
+    """
+    high, low, close = base['High'], base['Low'], base['Close']
+    prev = close.shift()
+    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+    trp = (tr / close.replace(0, np.nan)).rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    med = float(np.nanmedian(trp.to_numpy())) if len(trp) else np.nan
+    if not np.isfinite(med) or med <= 0:
+        return ZZ_THRESHOLD
+    return float(np.clip(ADAPT_K * med, THR_MIN, THR_MAX))
+
+
 def _empty(reason: str) -> Dict[str, any]:
     return {
         'is_vcp': False, 'vcp_quality': 0.0, 'contractions': [], 'contraction_count': 0,
         'contraction_quality': 0.0, 'volume_quality': 0.0, 'base_length_weeks': 0.0,
         'breakout_volume_ratio': 1.0, 'near_52w_high': False,
-        'distance_from_52w_high_pct': 100.0, 'pattern_details': reason,
+        'distance_from_52w_high_pct': 100.0, 'rmv': 100.0, 'pattern_details': reason,
     }
 
 
 def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
-               thr: float = ZZ_THRESHOLD, min_contractions: int = MIN_CONTRACTIONS,
+               thr: Optional[float] = None, min_contractions: int = MIN_CONTRACTIONS,
                max_contractions: int = MAX_CONTRACTIONS) -> Dict[str, any]:
     """Detect a Volatility Contraction Pattern. Drop-in for the vendored
     ``detect_vcp_pattern`` — same return schema (``is_vcp``, ``vcp_quality``,
     ``contractions`` with number/peak_date/trough_date/peak_price/trough_price/
-    drawdown_pct/volume_ratio/duration_days, ``contraction_count`` …)."""
+    drawdown_pct/volume_ratio/duration_days, ``contraction_count`` …).
+
+    ``thr`` is the ZigZag reversal size. Leave it ``None`` (default) to scale it to the
+    stock's own volatility (see ``_adaptive_threshold``); pass an explicit value to pin it
+    (tests do this for deterministic pivot counts)."""
     if price_data is None or len(price_data) < 40:
         return _empty('Insufficient data')
 
@@ -101,6 +132,8 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
            else np.full(len(base), np.nan))
     idx = base.index
 
+    if thr is None:
+        thr = _adaptive_threshold(base)
     piv = _zigzag_pivots(high, low, thr)
 
     # Down-legs = consecutive High -> Low pivots (well-formed, depth >= 0 by construction).
@@ -163,10 +196,21 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     n = len(sel)
     depths = [c['drawdown_pct'] for c in sel]
 
-    # Tightening: how many successive pullbacks are smaller than the previous one.
-    if n >= 2:
-        decreasing = sum(1 for i in range(1, n) if depths[i] < depths[i - 1])
-        contraction_quality = decreasing / (n - 1) * 100.0
+    # Tightening quality (0-100): is each pullback shrinking? A slope on log-depths, so a
+    # single non-monotone leg (25→12→14→6) no longer tanks an obviously-tightening base the
+    # way the old strict-decrease count did. Blend the log-depth downtrend, the strict-
+    # monotone fraction, and the overall first→last shrink; n==2 keeps the simple check.
+    if n >= 3:
+        x = np.arange(n, dtype=float)
+        y = np.log(np.clip(np.asarray(depths, dtype=float), 1e-6, None))
+        slope = float(np.polyfit(x, y, 1)[0])                       # < 0 => tightening
+        trend = 1.0 if slope < 0 else 0.0
+        monotone = sum(1 for i in range(1, n) if depths[i] < depths[i - 1]) / (n - 1)
+        shrink = max(0.0, 1.0 - depths[-1] / depths[0]) if depths[0] > 0 else 0.0
+        contraction_quality = 100.0 * (0.4 * trend + 0.3 * monotone
+                                       + 0.3 * min(1.0, shrink / 0.5))
+    elif n == 2:
+        contraction_quality = 100.0 if depths[1] < depths[0] else 0.0
     else:
         contraction_quality = 0.0
 
@@ -185,13 +229,26 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     else:
         breakout_volume_ratio = 1.0
 
-    # A VCP: 2-6 progressively-tighter pullbacks, the last one tight, price near its high.
+    # Volatility confirmation (strict AND-gate): swing STRUCTURE tightening alone isn't enough
+    # — the base's own volatility must actually be compressed. RMV is min-max normalized 0-100
+    # over its lookback, so rmv_now <= RMV_TIGHT_MAX == "current volatility in the bottom
+    # quartile of the base's range" (i.e. it has contracted to the tight end). Structure is the
+    # pattern's other half; we require both to agree. (We gate on the tightness *level* rather
+    # than an RMV slope: at a completed base RMV has already bottomed and often ticks up as
+    # price recovers toward the pivot, so a "still-falling" rule would reject mature setups.)
+    rmv_series = relative_measured_volatility(base).dropna()
+    rmv_now = float(rmv_series.iloc[-1]) if len(rmv_series) else 100.0
+    vol_confirms = rmv_now <= RMV_TIGHT_MAX
+
+    # A VCP: 2-6 progressively-tighter pullbacks, the last one tight, price near its high, and
+    # volatility confirming the contraction (RMV in the bottom quartile of the base's range).
     is_vcp = bool(
         min_contractions <= n <= max_contractions
         and contraction_quality >= TIGHTEN_MIN_PCT
         and depths[-1] <= depths[0] * 0.8
         and depths[-1] <= FINAL_TIGHT_PCT
         and near_high
+        and vol_confirms
     )
 
     # Quality 0-100 (same weighting as the vendored detector, so the app help text holds).
@@ -222,5 +279,6 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
         'breakout_volume_ratio': round(breakout_volume_ratio, 2),
         'near_52w_high': near_high,
         'distance_from_52w_high_pct': round(dist_high, 1),
+        'rmv': round(rmv_now, 1),
         'pattern_details': pattern_details,
     }

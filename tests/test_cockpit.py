@@ -294,18 +294,20 @@ def test_vcp_detects_tightening_bases():
     from src.stock_screener.cockpit.vcp import detect_vcp
 
     # Textbook VCP: rise, then pullbacks ~16→11→7→5% into a tight base near the high.
+    # thr pinned to 0.04 so the adaptive default doesn't shift the deterministic pivot count.
     df = _lin_series([(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
                       (10, 135.8), (8, 144), (10, 136.8), (8, 143)])
-    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {}, thr=0.04)
     assert v["is_vcp"] is True, v["pattern_details"]
     assert v["contraction_count"] == 4, v["contraction_count"]
     depths = [c["drawdown_pct"] for c in v["contractions"]]
     assert depths == sorted(depths, reverse=True) and depths[0] > 12 and depths[-1] < 8, depths
     assert v["contractions"][-1]["trough_date"] == max(c["trough_date"] for c in v["contractions"])
 
-    # Shallow tight base (~8→5%) that the vendored detector reported as cc=0.
-    df2 = _lin_series([(120, 130), (10, 119.6), (8, 128), (10, 121.6), (8, 127)])
-    v2 = detect_vcp(df2, float(df2["Close"].iloc[-1]), {})
+    # Shallow tight base (~8→5%) that the vendored detector reported as cc=0. The final leg is
+    # longer/calmer than the advance into it, so RMV bottoms in the base (the strict vol gate).
+    df2 = _lin_series([(60, 130), (8, 119.6), (8, 128), (12, 121.6), (16, 127)])
+    v2 = detect_vcp(df2, float(df2["Close"].iloc[-1]), {}, thr=0.04)
     assert v2["is_vcp"] is True and v2["contraction_count"] >= 2, v2["pattern_details"]
 
 
@@ -334,12 +336,77 @@ def test_vcp_base_does_not_span_a_breakout():
     # Base A near ~100 (8%, 5.6%), a +22% advance to ~120, then base B near ~120 (8%, 5%).
     df = _lin_series([(40, 100), (8, 92), (8, 99), (8, 93.5), (8, 98),
                       (10, 120), (8, 110.4), (8, 118), (8, 112), (8, 117)])
-    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {}, thr=0.04)
     # Only base B is the current base — base A's ~100 peaks are excluded by the flat-top rule.
     assert v["contraction_count"] == 2, v["contraction_count"]
     assert all(c["peak_price"] > 108 for c in v["contractions"]), \
         [round(c["peak_price"]) for c in v["contractions"]]
     assert v["is_vcp"] is True, v["pattern_details"]
+
+
+def _range_frame(wide=150, tight=60):
+    """OHLCV with real intrabar range (unlike ``_lin_series`` where H=L=C): a volatile body
+    (closes oscillate ±2.5) then a near-flat tail (closes ±0.1) that still has intraday range.
+    Needed for the TTM squeeze, which fires only when close dispersion falls below the range."""
+    import pandas as pd
+    close, high, low = [], [], []
+    for i in range(wide):
+        c = 100.0 + (2.5 if i % 2 else -2.5)
+        close.append(c); high.append(c + 1.0); low.append(c - 1.0)
+    for i in range(tight):
+        c = 100.0 + (0.1 if i % 2 else -0.1)
+        close.append(c); high.append(c + 1.5); low.append(c - 1.5)
+    idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=len(close))
+    return pd.DataFrame({"Open": close, "High": high, "Low": low, "Close": close,
+                         "Volume": 1_000_000}, index=idx)
+
+
+def test_adaptive_threshold_scales_with_volatility():
+    """The ZigZag threshold floats with the stock's own volatility (clamped to
+    [THR_MIN, THR_MAX]) instead of a fixed 0.04 — a quiet name gets a tighter swing filter,
+    a wild one a wider one."""
+    from src.stock_screener.cockpit.vcp import _adaptive_threshold, THR_MIN, THR_MAX
+
+    quiet = _lin_series([(200, 108)])                       # ~0.04%/bar drift -> very quiet
+    wild = _lin_series([(10, 150), (10, 100), (10, 150), (10, 100),
+                        (10, 150), (10, 100), (10, 150), (10, 100)])   # ±40% whipsaws
+    t_quiet, t_wild = _adaptive_threshold(quiet), _adaptive_threshold(wild)
+    assert THR_MIN <= t_quiet <= THR_MAX, t_quiet
+    assert THR_MIN <= t_wild <= THR_MAX, t_wild
+    assert t_quiet < t_wild, (t_quiet, t_wild)
+
+
+def test_bbwp_and_squeeze_indicators():
+    """BBWP stays in 0-100 and reads low (a squeeze) as a wide base coils tight; TTM squeeze
+    returns a bool Series that is on in the tight tail."""
+    from src.stock_screener.cockpit.indicators import (
+        bollinger_bandwidth_percentile, ttm_squeeze)
+
+    df = _range_frame()
+    bbwp = bollinger_bandwidth_percentile(df).dropna()
+    assert len(bbwp), "BBWP produced no values"
+    assert float(bbwp.min()) >= 0.0 and float(bbwp.max()) <= 100.0, (bbwp.min(), bbwp.max())
+    assert float(bbwp.iloc[-1]) < 40.0, float(bbwp.iloc[-1])   # coiled tail = low percentile
+
+    sq = ttm_squeeze(df)
+    assert sq.dtype == bool and len(sq) == len(df)
+    assert bool(sq.iloc[-1]) is True, "coiled tail should register a TTM squeeze"
+
+
+def test_strict_gate_requires_volatility_confirmation():
+    """Strict AND-gate: identical swing STRUCTURE, but a calm tight ending is a VCP while a
+    volatile final thrust (RMV high) is rejected — the volatility half must confirm."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    calm = _lin_series([(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
+                        (10, 135.8), (8, 144), (10, 136.8), (8, 143)])
+    hot = _lin_series([(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
+                       (10, 135.8), (8, 144), (10, 136.8), (2, 150)])   # sharp final thrust
+    vc = detect_vcp(calm, float(calm["Close"].iloc[-1]), {}, thr=0.04)
+    vh = detect_vcp(hot, float(hot["Close"].iloc[-1]), {}, thr=0.04)
+    assert vc["is_vcp"] is True, vc["pattern_details"]
+    assert vh["is_vcp"] is False, (vh["rmv"], vh["pattern_details"])
+    assert vh["rmv"] > vc["rmv"], (vh["rmv"], vc["rmv"])
 
 
 def _run_all():

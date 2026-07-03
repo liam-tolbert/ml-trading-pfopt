@@ -39,3 +39,58 @@ def relative_measured_volatility(df: pd.DataFrame, atr_period: int = 10,
     hi = vol.rolling(lookback, min_periods=atr_period).max()
     span = hi - lo
     return (100.0 * (vol - lo) / span.where(span > 0)).clip(0, 100)
+
+
+def bollinger_bandwidth_percentile(df: pd.DataFrame, period: int = 20,
+                                   num_std: float = 2.0,
+                                   lookback: int = 126) -> pd.Series:
+    """Bollinger Band-Width Percentile (BBWP): today's band width vs its own recent range.
+
+    BandWidth = (upper - lower) / middle = ``2 * num_std * sigma / sma`` — the classic
+    Bollinger squeeze measure. We then percentile-rank the current width within the trailing
+    ``lookback`` bars, so the output is 0-100: **low = a squeeze** (bands as tight as they've
+    been all window), high = expanded. This is the *close-based* volatility read — it cross-
+    checks RMV (which uses true range, so it also sees gaps/wicks) from the Bollinger side;
+    the two agreeing is a stronger tight-base signal than either alone.
+
+    Returns a Series aligned to ``df`` (NaN until enough history exists).
+    """
+    close = df["Close"]
+    sma = close.rolling(period, min_periods=period).mean()
+    std = close.rolling(period, min_periods=period).std(ddof=0)
+    bandwidth = (2.0 * num_std * std) / sma.replace(0, np.nan)
+
+    def _pctrank(w: np.ndarray) -> float:
+        x = w[~np.isnan(w)]
+        if len(x) < period or np.isnan(w[-1]):
+            return np.nan
+        return float((x <= w[-1]).mean() * 100.0)
+
+    return bandwidth.rolling(lookback, min_periods=period).apply(_pctrank, raw=True)
+
+
+def ttm_squeeze(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.0,
+                kc_period: int = 20, kc_mult: float = 1.5) -> pd.Series:
+    """TTM Squeeze: True where the Bollinger Bands sit *inside* the Keltner Channel.
+
+    This is the clean combination of the two volatility proxies — Bollinger Bands are
+    ``sigma``-based (close dispersion) and the Keltner Channel is ATR-based (true range) —
+    so a squeeze means volatility is compressed on *both* measures at once (the coiled
+    spring). Bands = ``sma ± bb_std * sigma``; Keltner = ``ema ± kc_mult * ATR``.
+
+    Returns a boolean Series aligned to ``df`` (False during warm-up).
+    """
+    high, low, close = df["High"], df["Low"], df["Close"]
+    sma = close.rolling(bb_period, min_periods=bb_period).mean()
+    std = close.rolling(bb_period, min_periods=bb_period).std(ddof=0)
+    bb_upper, bb_lower = sma + bb_std * std, sma - bb_std * std
+
+    prev = close.shift()
+    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()],
+                   axis=1).max(axis=1)
+    atr = tr.rolling(kc_period, min_periods=kc_period).mean()
+    ema = close.ewm(span=kc_period, adjust=False, min_periods=kc_period).mean()
+    kc_upper, kc_lower = ema + kc_mult * atr, ema - kc_mult * atr
+
+    # NaN comparisons yield False, so the warm-up region is already un-squeezed.
+    return ((bb_lower > kc_lower) & (bb_upper < kc_upper)).fillna(False).astype(bool)

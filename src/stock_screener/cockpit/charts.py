@@ -13,7 +13,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.stock_screener.minervini_screener.screening import calculate_sma
-from src.stock_screener.cockpit.indicators import relative_measured_volatility
+from src.stock_screener.cockpit.indicators import (relative_measured_volatility,
+                                                   ttm_squeeze)
 
 _SMA_STYLE = [(50, "#1f77b4"), (150, "#ff7f0e"), (200, "#2ca02c")]
 
@@ -111,6 +112,28 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                       row=3, col=1)
         fig.add_trace(go.Scatter(x=d.index, y=rmv, name="RMV",
                                  line=dict(width=1.3, color="#8e44ad")), row=3, col=1)
+
+    # TTM Squeeze band on the price row — the direct combination of the two volatility
+    # proxies (Bollinger σ-bands contracting INSIDE the ATR-based Keltner channel). Each
+    # shaded column marks a stretch where the "spring is coiled"; watch for the breakout as
+    # it releases. Drawn below the candles (layer="below") and computed on full history.
+    try:
+        if len(d_full) >= 20:
+            sq = ttm_squeeze(d_full).reindex(d.index).fillna(False).to_numpy()
+            xi = d.index
+            i = 0
+            while i < len(sq):
+                if sq[i]:
+                    j = i
+                    while j + 1 < len(sq) and sq[j + 1]:
+                        j += 1
+                    fig.add_vrect(x0=xi[i], x1=xi[j], fillcolor="#4b6cb7", opacity=0.10,
+                                  line_width=0, layer="below", row=1, col=1)
+                    i = j + 1
+                else:
+                    i += 1
+    except Exception:
+        pass
 
     if show_overlays and vcp:
         # Shade each detected contraction (peak -> trough): a VCP *hint*.

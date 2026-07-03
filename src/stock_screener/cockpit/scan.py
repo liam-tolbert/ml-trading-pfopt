@@ -30,7 +30,8 @@ from src.stock_screener.minervini_screener.screening import (
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
-from .indicators import relative_measured_volatility
+from .indicators import (relative_measured_volatility,
+                         bollinger_bandwidth_percentile, ttm_squeeze)
 # Cockpit VCP detector replaces the vendored detect_vcp_pattern (which starves strong
 # uptrends → cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
 from .vcp import detect_vcp
@@ -169,6 +170,18 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             # move the levels for you.
             rmv_series = relative_measured_volatility(df).dropna()
             levels["rmv"] = float(rmv_series.iloc[-1]) if len(rmv_series) else None
+            # BBWP + TTM squeeze: the Bollinger-side volatility read, a cross-check on RMV
+            # (also advisory). BBWP low = a Bollinger squeeze; squeeze True = bands inside
+            # the Keltner channel (a coiled spring).
+            bbwp_series = bollinger_bandwidth_percentile(df).dropna()
+            levels["bbwp"] = float(bbwp_series.iloc[-1]) if len(bbwp_series) else None
+            sq = ttm_squeeze(df)
+            levels["squeeze"] = bool(sq.iloc[-1]) if len(sq) else False
+            # "squeeze fired": the base was coiled within the last ~6 bars but is expanding
+            # (off) now — the volatility-EXPANSION side of a breakout (vs. the tight base).
+            prior = sq.iloc[-6:-1] if len(sq) >= 2 else sq.iloc[:0]
+            levels["squeeze_released"] = bool(len(prior) and bool(prior.any())
+                                              and not levels["squeeze"])
             rows.append({
                 "ticker": t,
                 "price": round(cp, 2),

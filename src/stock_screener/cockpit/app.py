@@ -89,8 +89,12 @@ zoom into the base (a tight VCP is invisible over 2 years), **Weekly** for base 
 """
 
 INFO_STEP4 = """
-**Step 4 — Entry (you pull the trigger).** Buy only when price **closes above the
-pivot** on volume **≥ 40–50% above average** (the "breakout today" flag).
+**Step 4 — Entry (you pull the trigger).** Two opposite states, in sequence — the same
+two axes flip from quiet to loud:
+- **The base** (you wait on it): volume **dries up** and volatility **contracts** (tight
+  RMV / BBWP, squeeze on).
+- **The breakout** (the trigger): price **closes above the pivot** on volume **≥ 40–50%
+  above average** (the "breakout today" flag), and volatility **expands** (the squeeze fires).
 - **Don't chase** more than ~5% above the pivot (the buy zone).
 - Set the **7–8% stop immediately** and never lower it.
 - First target ~**20–25%**; trail with the 50-day SMA once well in profit.
@@ -457,29 +461,28 @@ with st.container(border=True):
     pct = lv.get("pct_to_pivot")
     pct_s = "n/a" if pct is None else f"{pct:+.1f}%"
     vol = lv.get("volume_ratio", 1)
-    vol_metric = f"{vol:.1f}×" if isinstance(vol, (int, float)) else "n/a"
     price_ok = bool(lv.get("breakout_today"))       # price cleared the pivot
     vol_ok = bool(lv.get("volume_confirmed"))        # latest volume >= 1.5x the 20-day avg
 
+    # Price levels — neutral (WHERE you'd act, not WHETHER to).
     r1 = st.columns(3)
-    r2 = st.columns(3)
     r1[0].metric("Pivot", _usd(lv.get("pivot")), border=True)
     r1[1].metric("Buy zone", buy_zone, border=True)
     r1[2].metric("Stop", _usd(lv.get("stop")), border=True)
+    r2 = st.columns(2)
     r2[0].metric("Target", _usd(lv.get("target")), border=True)
     r2[1].metric("To pivot", pct_s, border=True)
-    r2[2].metric("Volume", vol_metric, border=True,
-                 help="Latest-day volume ÷ its own 20-day average. A confirmed breakout "
-                      "needs ≥ 1.5× (50%+ above that average).")
 
-    # A tradeable breakout needs BOTH: price above the pivot AND volume confirmation.
-    st.markdown(
-        f"**Breakout:** price {'✅ above pivot' if price_ok else '— below pivot'} · "
-        f"volume {'✅ confirmed' if vol_ok else '— not confirmed'}"
-        + (f" ({vol:.1f}× vs 1.5×+ needed)" if isinstance(vol, (int, float)) else ""))
+    # Step 4 has two OPPOSITE states, one after the other in time. The SAME two axes —
+    # volume and volatility — flip from quiet to loud:
+    #   THE BASE      (you wait on it):  volume dries up, volatility contracts  → QUIET
+    #   THE BREAKOUT  (the trigger):     volume surges,   volatility expands     → LOUD
+    vcp_data = payload.get("vcp", {})
+    st.markdown("**The base — what you're waiting on (should be _quiet_):**")
 
-    # RMV (Relative Measured Volatility): advisory base-tightness read. Low = a quiet,
-    # coiled base (the VCP sweet spot). Purely a hint — it does NOT move the levels above.
+    # Base volatility (tight): RMV, then BBWP / squeeze as a cross-check. Point-in-time, so as
+    # a breakout fires these naturally rise (the base tightness is "spent") and the breakout
+    # reads below light up — the same volatility axis handing off from quiet to loud.
     rmv = lv.get("rmv")
     if rmv is None:
         rmv_disp, rmv_flag, rmv_label, rmv_note = "n/a", "", "n/a", "not enough history."
@@ -497,7 +500,59 @@ with st.container(border=True):
                  help="Relative Measured Volatility (0–100): today's price volatility vs "
                       "the stock's own recent range. Low = a tight, low-volatility base "
                       "(the VCP contraction). Advisory only — it does not move the levels.")
-    rc[1].markdown(f"**Base tightness:** {rmv_flag} **{rmv_label}** — {rmv_note}")
+    rc[1].markdown(f"**Base volatility:** {rmv_flag} **{rmv_label}** — {rmv_note}")
+
+    bbwp = lv.get("bbwp")
+    squeeze_on = bool(lv.get("squeeze"))
+    if bbwp is None:
+        bbwp_disp, bbwp_note = "n/a", "not enough history."
+    elif bbwp < 25:
+        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band-width in its bottom quartile — a Bollinger squeeze (tight)."
+    elif bbwp < 50:
+        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band-width mid-range — not yet a squeeze."
+    else:
+        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band-width wide — volatility is expanded, not contracted."
+    sq_flag = "✅ squeeze on" if squeeze_on else "— no squeeze"
+    bc = st.columns([1, 2])
+    bc[0].metric("BBWP", bbwp_disp, border=True,
+                 help="Bollinger Band-Width Percentile (0–100): today's Bollinger band width "
+                      "vs its own trailing range. Low = a squeeze (bands tight). Cross-checks "
+                      "RMV from the Bollinger (close-based) side. Advisory only.\n\n"
+                      "**Rule of thumb:** prioritize RMV — it's the gate. BBWP is close-to-"
+                      "close, so a smooth uptrend inflates it: if RMV reads tight but BBWP "
+                      "isn't a squeeze (a low-range drift, e.g. IFF), that's usually the trend "
+                      "fooling BBWP — go with RMV. Only defer to BBWP when it's *more* cautious "
+                      "than RMV — RMV can read falsely tight after a recent volatility spike "
+                      "(its min-max scaling), and there BBWP's skepticism wins.")
+    bc[1].markdown(f"**Squeeze:** {sq_flag} — {bbwp_note}")
+
+    # Base volume (should be DRYING UP): % of contractions whose volume ran lighter than the
+    # advance into them (vcp volume_quality). This is the quiet-base counterpart to the loud
+    # breakout-volume surge below — a different yardstick (vs. the run-up, not vs. 1.5× avg).
+    vq = vcp_data.get("volume_quality")
+    if vq is None:
+        st.markdown("**Base volume:** n/a — no contractions detected.")
+    else:
+        vq_flag = "✅" if vq >= 60 else ("" if vq >= 30 else "⚠️")
+        vq_note = ("volume dried up through the base — supply withdrawing." if vq >= 60
+                   else "only a partial dry-up — mixed." if vq >= 30
+                   else "volume did NOT dry up — a weaker base.")
+        st.markdown(f"**Base volume:** {vq_flag} drying up in **{vq:.0f}%** of contractions — {vq_note}")
+
+    st.markdown("**The breakout — the entry trigger (should be _loud_):**")
+    # Price cleared the pivot?
+    st.markdown(f"- **Price:** {'✅ above pivot' if price_ok else '— below the pivot (no trigger yet)'}")
+    # Volume SURGE — the loud counterpart to base dry-up (latest bar vs its 20-day average).
+    vol_txt = f"{vol:.1f}× the 20-day average" if isinstance(vol, (int, float)) else "n/a"
+    st.markdown(f"- **Volume:** {'✅' if vol_ok else '—'} {vol_txt} (a breakout needs ≥ 1.5×)")
+    # Volatility EXPANDING — the squeeze firing (the loud counterpart to the tight base).
+    if bool(lv.get("squeeze_released")):
+        volat_txt = "✅ squeeze released — volatility expanding out of the base"
+    elif squeeze_on:
+        volat_txt = "— still coiled (squeeze on) — no expansion yet"
+    else:
+        volat_txt = "— no active squeeze to release"
+    st.markdown(f"- **Volatility:** {volat_txt}")
     st.markdown("---")
     # Explicit keys pin these widgets' identity so their values persist across reruns.
     # Without a key, a keyless input's identity depends on the (variable) element count
