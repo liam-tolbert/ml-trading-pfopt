@@ -284,17 +284,18 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
         "4. **Step 3:** click a row and *judge the VCP yourself* on the chart.\n"
         "5. **Step 4:** if it breaks out on volume, use the advisory entry/stop/size.\n\n"
         "Each section has its own **ℹ️** button. Full details on the **SEPA Guide** page.")
+# TESTING: sp500 / tickers universes disabled — full_us only (restore the list to re-enable).
 universe = st.sidebar.selectbox(
-    "Universe", ["sp500", "full_us", "tickers"], index=0,
+    "Universe", ["full_us"], index=0,
+    # ["sp500", "full_us", "tickers"], index=0,
     format_func=lambda k: {
         "sp500": "S&P 500 (fast)",
         "full_us": "All US common stocks (~3–4k · slow first scan)",
         "tickers": "My tickers.txt",
     }[k],
-    help="sp500 = S&P 500 constituents (fast). full_us = broad US common-stock universe "
-         "from Nasdaq/NYSE listings (~3–4k names; the FIRST cold scan pulls thousands of "
-         "price histories and can take several minutes — later scans reuse the cache and "
-         "only fetch new days). tickers = data/tickers.txt")
+    help="full_us = broad US common-stock universe from Nasdaq/NYSE listings (~3–4k names; "
+         "the FIRST cold scan pulls thousands of price histories and can take several "
+         "minutes — later scans reuse the cache and only fetch new days).")
 if universe == "full_us":
     st.sidebar.caption("⏳ First full_us scan pulls ~3–4k price histories (several minutes). "
                        "Later scans use the cache and fetch only new days.")
@@ -433,6 +434,11 @@ with colB:
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
         weekly = st.checkbox("Weekly view", value=False)
         show_overlays = st.checkbox("VCP + entry overlays", value=True)
+        show_bollinger = st.checkbox(
+            "Bollinger bands", value=False,
+            help="Overlay the 20-period / 2σ Bollinger envelope on the price row — the same "
+                 "bands the Step-4 squeeze (BBWP) read is built from. Narrowing bands = the "
+                 "compression a VCP base coils into.")
 with colA:
     with st.container(border=True):
         _ranges = {"3M": 90, "6M": 180, "9M": 270, "1Y": 365, "2Y / All": None}
@@ -440,7 +446,8 @@ with colA:
                         help="Zoom in to see the VCP base; a tight base is hard to read over 2 years.")
         fig = build_chart(pick, payload["df"], vcp=payload.get("vcp"),
                           levels=payload.get("levels"), show_overlays=show_overlays,
-                          weekly=weekly, lookback_days=_ranges[rsel])
+                          weekly=weekly, lookback_days=_ranges[rsel],
+                          show_bollinger=show_bollinger)
         st.plotly_chart(fig, width="stretch")
 
 # Step 4 — Entry (advisory) + position sizer.

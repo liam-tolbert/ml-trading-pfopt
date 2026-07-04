@@ -1,8 +1,9 @@
 """Plotly charts for the cockpit — the surface where the *user* judges the VCP.
 
 ``build_chart`` renders a daily (or weekly) candlestick with 50/150/200 SMA overlays
-and a volume subplot, plus optional VCP contraction shading and the Step-4 advisory
-levels (pivot / buy-zone / stop / target). It draws *hints*; it never decides.
+and a volume subplot, plus optional VCP contraction shading, an optional Bollinger-band
+envelope (toggled from the UI), and the Step-4 advisory levels (pivot / buy-zone / stop /
+target). It draws *hints*; it never decides.
 """
 from __future__ import annotations
 
@@ -13,8 +14,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.stock_screener.minervini_screener.screening import calculate_sma
-from src.stock_screener.cockpit.indicators import (relative_measured_volatility,
-                                                   ttm_squeeze)
+from src.stock_screener.cockpit.indicators import (bollinger_bands,
+                                                   relative_measured_volatility)
 
 _SMA_STYLE = [(50, "#1f77b4"), (150, "#ff7f0e"), (200, "#2ca02c")]
 
@@ -51,12 +52,17 @@ def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                 levels: Optional[dict] = None, show_overlays: bool = True,
-                weekly: bool = False, lookback_days: Optional[int] = None) -> go.Figure:
+                weekly: bool = False, lookback_days: Optional[int] = None,
+                show_bollinger: bool = False) -> go.Figure:
     """Return a 2-row Plotly figure: candlestick + SMAs (top), volume (bottom).
 
     ``lookback_days`` zooms the VIEW to the last N calendar days so a multi-week VCP
     base is actually visible; SMAs are still computed on the full history (so the
     50/150/200 lines stay correct) and the price y-axis is fit to the window.
+
+    ``show_bollinger`` overlays the 20-period / 2σ Bollinger envelope (upper, 20-SMA
+    basis, lower) on the price row — the same bands the TTM-squeeze / BBWP reads are
+    built from, so you can eyeball the compression the Step-4 squeeze numbers report.
     """
     d_full = to_weekly(df) if weekly else df
 
@@ -74,6 +80,24 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     # from its old 0.24 share to make room for the RMV oscillator.
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                         row_heights=[0.62, 0.19, 0.19], vertical_spacing=0.03)
+
+    # Bollinger envelope (toggleable) — added BEFORE the candles so it renders beneath them
+    # (Scatter has no layer="below"; z-order is trace order). Lower then upper-with-fill draws
+    # a soft band; the dotted 20-SMA basis is the midline. Computed on FULL history (like the
+    # SMAs) so the bands stay correct when the view is zoomed. hoverinfo="skip" keeps the
+    # x-unified readout uncluttered.
+    if show_bollinger and len(d_full) >= 20:
+        bb_up, bb_mid, bb_lo = (s.reindex(d.index) for s in bollinger_bands(d_full))
+        band = "rgba(75,108,183,0.55)"
+        fig.add_trace(go.Scatter(x=d.index, y=bb_lo, name="BB lower", line=dict(width=1, color=band),
+                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=d.index, y=bb_up, name="Bollinger (20, 2σ)",
+                                 line=dict(width=1, color=band), fill="tonexty",
+                                 fillcolor="rgba(75,108,183,0.07)", hoverinfo="skip"),
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(x=d.index, y=bb_mid, name="BB basis (SMA20)",
+                                 line=dict(width=1, color="rgba(75,108,183,0.8)", dash="dot"),
+                                 showlegend=False, hoverinfo="skip"), row=1, col=1)
 
     fig.add_trace(go.Candlestick(
         x=d.index, open=d["Open"], high=d["High"], low=d["Low"], close=d["Close"],
@@ -112,28 +136,6 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                       row=3, col=1)
         fig.add_trace(go.Scatter(x=d.index, y=rmv, name="RMV",
                                  line=dict(width=1.3, color="#8e44ad")), row=3, col=1)
-
-    # TTM Squeeze band on the price row — the direct combination of the two volatility
-    # proxies (Bollinger σ-bands contracting INSIDE the ATR-based Keltner channel). Each
-    # shaded column marks a stretch where the "spring is coiled"; watch for the breakout as
-    # it releases. Drawn below the candles (layer="below") and computed on full history.
-    try:
-        if len(d_full) >= 20:
-            sq = ttm_squeeze(d_full).reindex(d.index).fillna(False).to_numpy()
-            xi = d.index
-            i = 0
-            while i < len(sq):
-                if sq[i]:
-                    j = i
-                    while j + 1 < len(sq) and sq[j + 1]:
-                        j += 1
-                    fig.add_vrect(x0=xi[i], x1=xi[j], fillcolor="#4b6cb7", opacity=0.10,
-                                  line_width=0, layer="below", row=1, col=1)
-                    i = j + 1
-                else:
-                    i += 1
-    except Exception:
-        pass
 
     if show_overlays and vcp:
         # Shade each detected contraction (peak -> trough): a VCP *hint*.

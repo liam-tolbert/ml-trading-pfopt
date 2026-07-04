@@ -69,6 +69,19 @@ def bollinger_bandwidth_percentile(df: pd.DataFrame, period: int = 20,
     return bandwidth.rolling(lookback, min_periods=period).apply(_pctrank, raw=True)
 
 
+def bollinger_bands(df: pd.DataFrame, period: int = 20, num_std: float = 2.0):
+    """Classic Bollinger Bands: middle = SMA(``period``), upper/lower = middle ± ``num_std``·σ.
+
+    Population std (``ddof=0``) to match ``ttm_squeeze`` and ``bollinger_bandwidth_percentile``,
+    so the band the chart draws is the exact same volatility envelope those squeeze reads are
+    computed from. Returns ``(upper, middle, lower)`` Series aligned to ``df`` (NaN during warm-up).
+    """
+    close = df["Close"]
+    mid = close.rolling(period, min_periods=period).mean()
+    sd = close.rolling(period, min_periods=period).std(ddof=0)
+    return mid + num_std * sd, mid, mid - num_std * sd
+
+
 def ttm_squeeze(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.0,
                 kc_period: int = 20, kc_mult: float = 1.5) -> pd.Series:
     """TTM Squeeze: True where the Bollinger Bands sit *inside* the Keltner Channel.
