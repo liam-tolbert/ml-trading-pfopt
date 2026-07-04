@@ -3,6 +3,7 @@
 *.pkl
 *.xlsx
 *.parquet
+!tests/fixtures/**
 __pycache__/
 .ipynb_checkpoints/
 .env
