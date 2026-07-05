@@ -20,6 +20,8 @@ if str(ROOT) not in sys.path:                       # so `from src.X import ...`
 import streamlit as st  # noqa: E402
 
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
+from src.stock_screener.cockpit.export import (  # noqa: E402
+    watchlist_list_csv, watchlist_ohlcv_csv)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
@@ -268,6 +270,40 @@ def filter_table(df, key_prefix: str = "flt"):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Watchlist — a per-session shortlist you build by clicking, then export. The
+# canonical store is a plain ordered list in session_state (NOT a widget key), so
+# button callbacks and the multiselect can both mutate it without fighting over
+# widget ownership. It's the export that persists it — download the CSV to keep it.
+# --------------------------------------------------------------------------- #
+def _wl() -> list:
+    return st.session_state.setdefault("watchlist", [])
+
+
+def _wl_add(ticker: str) -> None:
+    wl = _wl()
+    if ticker and ticker not in wl:
+        wl.append(ticker)
+
+
+def _wl_remove(ticker: str) -> None:
+    wl = _wl()
+    if ticker in wl:
+        wl.remove(ticker)
+
+
+def _wl_clear() -> None:
+    st.session_state["watchlist"] = []
+
+
+def _wl_add_from_picker() -> None:
+    """Merge the bulk-add multiselect's picks into the watchlist, then clear the picker
+    (resetting a widget's value is allowed inside its own on_change callback)."""
+    for t in st.session_state.get("wl_picker", []):
+        _wl_add(t)
+    st.session_state["wl_picker"] = []
+
+
 @st.cache_data(show_spinner=False)
 def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
     cfg = ScanConfig(min_criteria=min_criteria, min_rs=float(min_rs),
@@ -325,6 +361,46 @@ if st.sidebar.button("🔄 Re-scan (refresh prices)"):
 with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"):
     res = _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund,
                        st.session_state.nonce)
+
+# --------------------------------------------------------------------------- #
+# Sidebar — Watchlist (build by clicking ⭐ on charts / the picker; export to keep).
+# Rendered here (right after the scan) so it always shows, even when later filters
+# leave zero rows and the page st.stop()s below.
+# --------------------------------------------------------------------------- #
+with st.sidebar:
+    st.markdown("---")
+    _watch = _wl()
+    st.markdown(f"### ⭐ Watchlist ({len(_watch)})")
+    _all_tickers = (res.candidates["ticker"].tolist()
+                    if res.candidates is not None and len(res.candidates) else [])
+    st.multiselect(
+        "Add tickers", options=sorted(set(_all_tickers) | set(_watch)),
+        key="wl_picker", on_change=_wl_add_from_picker,
+        placeholder="Pick tickers to add…",
+        help="Add several at once, or click the ⭐ button next to any chart. "
+             "The list lives for this session — download it to keep it.")
+    if _watch:
+        st.caption(", ".join(_watch))
+        _d1, _d2 = st.columns(2)
+        _d1.download_button(
+            "⬇ List (CSV)",
+            watchlist_list_csv(res.candidates, _watch, DISPLAY_ORDER),
+            file_name="watchlist.csv", mime="text/csv", width="stretch",
+            help="Your shortlist with its decision columns (tier, pivot, stop, target, …), "
+                 "in the order you added them.")
+        _d2.download_button(
+            "⬇ OHLCV (CSV)", watchlist_ohlcv_csv(_watch, res.payloads),
+            file_name="watchlist_ohlcv.csv", mime="text/csv", width="stretch",
+            help="Daily Open/High/Low/Close/Volume for every watchlisted name, stacked "
+                 "long-format with a Ticker column.")
+        st.button("🗑 Clear watchlist", on_click=_wl_clear, width="stretch")
+        _missing = [t for t in _watch if t not in res.payloads]
+        if _missing:
+            st.caption(f"⚠︎ {', '.join(_missing)} not in the current scan — the list CSV "
+                       "keeps the ticker only and the OHLCV omits it. Re-scan the universe "
+                       "that has them to include their data.")
+    else:
+        st.caption("Empty — click ⭐ on a chart, or use the picker above.")
 
 # --------------------------------------------------------------------------- #
 # Regime banner
@@ -440,6 +516,13 @@ colA, colB = st.columns([3, 1])
 with colB:
     with st.container(border=True):
         st.markdown(f"### {pick}")
+        # Add/remove the charted name to the export watchlist (the "judge it → keep it" flow).
+        if pick in _wl():
+            st.button(f"✓ In watchlist — remove {pick}", key="wl_toggle",
+                      on_click=_wl_remove, args=(pick,), width="stretch")
+        else:
+            st.button(f"⭐ Add {pick} to watchlist", key="wl_toggle", type="primary",
+                      on_click=_wl_add, args=(pick,), width="stretch")
         st.markdown(step_badge("Step 3", "Judge the VCP"))
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
         weekly = st.checkbox("Weekly view", value=False)

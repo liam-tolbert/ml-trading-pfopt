@@ -161,6 +161,83 @@ def test_streamlit_app_renders_offline():
     assert not at.exception, f"app raised: {at.exception}"
 
 
+def test_watchlist_export_helpers():
+    """The watchlist CSV builders: the decision list keeps user order and never drops a
+    picked ticker (stale ones survive as ticker-only rows); the OHLCV dump stacks every
+    present name long-format with a Ticker column."""
+    import pandas as pd
+    from src.stock_screener.cockpit.export import (watchlist_list_csv,
+                                                   watchlist_ohlcv_csv)
+
+    cand = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"],
+                         "tier": ["A", "B", "A"], "pivot": [10.0, 20.0, 30.0]})
+
+    # list CSV: order follows the watchlist (BBB before AAA); a stale pick (ZZZ, not in
+    # the scan) still appears so nothing the user chose is silently lost.
+    csv = watchlist_list_csv(cand, ["BBB", "AAA", "ZZZ"],
+                             columns=["ticker", "tier", "pivot"]).decode()
+    lines = csv.strip().splitlines()
+    assert lines[0] == "ticker,tier,pivot"
+    order = [ln.split(",")[0] for ln in lines[1:]]
+    assert order == ["BBB", "AAA", "ZZZ"], order
+    assert lines[1].startswith("BBB,B,20.0")
+
+    # empty candidates -> ticker-only fallback (never raises)
+    empty = watchlist_list_csv(pd.DataFrame(), ["AAA", "BBB"]).decode()
+    assert empty.strip().splitlines() == ["ticker", "AAA", "BBB"]
+
+    # OHLCV CSV: two names stacked, Date + Ticker lead, present names only
+    idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=5)
+    mk = lambda base: pd.DataFrame(  # noqa: E731
+        {"Open": base, "High": base + 1, "Low": base - 1, "Close": base,
+         "Volume": 100}, index=idx)
+    payloads = {"AAA": {"df": mk(10.0)}, "BBB": {"df": mk(20.0)}}
+    ocsv = watchlist_ohlcv_csv(["AAA", "BBB", "ZZZ"], payloads).decode()
+    olines = ocsv.strip().splitlines()
+    assert olines[0].split(",")[:2] == ["Date", "Ticker"], olines[0]
+    assert len(olines) == 1 + 2 * len(idx)                      # header + 5 bars × 2 names
+    assert "ZZZ" not in ocsv                                    # absent name omitted
+    assert ",AAA," in ocsv and ",BBB," in ocsv
+
+    assert watchlist_ohlcv_csv([], payloads) == b""             # empty list -> empty bytes
+
+
+def test_watchlist_add_button_and_download(monkeypatch=None):
+    """Through the real app: clicking the ⭐ button adds the charted name to
+    session_state['watchlist'], and the sidebar then exposes the two download buttons."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_watchlist_add_button_and_download (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    assert len(result.candidates) >= 1
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with patch.object(scanmod, "run_scan", return_value=result):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        # the sidebar's _wl() setdefaults the key, so it exists and starts empty
+        assert list(at.session_state["watchlist"]) == [], "watchlist should start empty"
+
+        toggle = [b for b in at.button if b.key == "wl_toggle"]
+        assert toggle, "watchlist add/remove button missing"
+        toggle[0].click().run()
+        assert not at.exception, f"app raised after add: {at.exception}"
+
+    wl = list(at.session_state["watchlist"])
+    assert len(wl) == 1, f"expected 1 watchlisted ticker, got {wl}"
+    assert wl[0] in result.payloads
+    # With a non-empty watchlist the sidebar builds both download buttons; that it reran
+    # without raising (asserted above) means the CSV builders ran cleanly on real payloads.
+
+
 def test_sepa_guide_page_renders():
     """The SEPA Guide page must load and render the method markdown without error."""
     try:
