@@ -482,38 +482,43 @@ pick = view.iloc[row_pos]["ticker"]
 
 payload = res.payloads[pick]
 
-# Step 2 — Fundamentals: sits directly ABOVE the Step 3 chart (read the fuel, then the base).
-with st.container(border=True):
-    st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
-    info_btn(INFO_STEP2)
-    f = payload.get("fundamentals")
-    s2 = payload.get("step2", {})
-    if not f:
-        st.caption("No fundamental data available (yfinance).")
-    else:
-        fields = [("Revenue YoY", "revenue_yoy"), ("Revenue QoQ", "revenue_qoq"),
-                  ("EPS YoY", "eps_yoy"), ("EPS QoQ", "eps_qoq"),
-                  ("Operating margin", "operating_margin"),
-                  ("Margin trend (pp)", "margin_trend"),
-                  ("Inventory QoQ", "inventory_qoq")]
-        lines = [f"**{label}:** "
-                 + ("n/a" if f.get(key) is None else f"{f.get(key):+.1f}%")
-                 for label, key in fields]
-        g1, g2 = st.columns(2)
-        half = (len(lines) + 1) // 2
-        g1.markdown("\n\n".join(lines[:half]))
-        g2.markdown("\n\n".join(lines[half:]))
-        checks = s2.get("checks", {})
-        st.markdown(" ".join(
-            f"{'✅' if checks.get(k) else '—'} {lbl}"
-            for k, lbl in [("revenue_growth", "Rev ≥20%"), ("eps_growth", "EPS ≥20%"),
-                           ("eps_accelerating", "EPS accel"),
-                           ("margin_expanding", "Margin ↑")]))
-        st.caption(f"Score {s2.get('score', 0)}/4")
+# Steps 2 + 3 share one row: the large chart on the LEFT, with the Step-2 (fundamentals)
+# and Step-3 (chart controls) boxes stacked in a same-width column on the RIGHT — read the
+# fuel, then judge the base, without scrolling. The side column is written FIRST in code so
+# its control values (weekly / overlays / bollinger) exist before the chart builds; it still
+# renders on the right because it's the second column returned.
+colChart, colSide = st.columns([3, 1])
 
-# Step 3 — the chart (judge the VCP) + its controls.
-colA, colB = st.columns([3, 1])
-with colB:
+with colSide:
+    # Step 2 — Fundamentals, condensed to sit beside the chart (~same height as Step 3).
+    with st.container(border=True):
+        st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
+        info_btn(INFO_STEP2)
+        f = payload.get("fundamentals")
+        s2 = payload.get("step2", {})
+        if not f:
+            st.caption("No fundamental data available (yfinance).")
+        else:
+            def _p(v):                       # signed % (growth), or n/a
+                return "n/a" if v is None else f"{v:+.1f}%"
+
+            mt = f.get("margin_trend")
+            opm = f.get("operating_margin")
+            st.markdown(f"**Rev:** {_p(f.get('revenue_yoy'))} YoY · "
+                        f"{_p(f.get('revenue_qoq'))} QoQ")
+            st.markdown(f"**EPS:** {_p(f.get('eps_yoy'))} YoY · "
+                        f"{_p(f.get('eps_qoq'))} QoQ")
+            st.markdown(f"**Op margin:** {'n/a' if opm is None else f'{opm:.1f}%'} "
+                        f"(Δ {'n/a' if mt is None else f'{mt:+.1f}pp'})")
+            checks = s2.get("checks", {})
+            st.markdown(" ".join(
+                f"{'✅' if checks.get(k) else '—'} {lbl}"
+                for k, lbl in [("revenue_growth", "Rev ≥20%"), ("eps_growth", "EPS ≥20%"),
+                               ("eps_accelerating", "EPS accel"),
+                               ("margin_expanding", "Margin ↑")]))
+            st.caption(f"Score {s2.get('score', 0)}/4")
+
+    # Step 3 — chart controls (the chart itself renders in colChart on the left).
     with st.container(border=True):
         st.markdown(f"### {pick}")
         # Add/remove the charted name to the export watchlist (the "judge it → keep it" flow).
@@ -532,7 +537,8 @@ with colB:
             help="Overlay the 20-period / 2σ Bollinger envelope on the price row — the same "
                  "bands the Step-4 squeeze (BBWP) read is built from. Narrowing bands = the "
                  "compression a VCP base coils into.")
-with colA:
+
+with colChart:
     with st.container(border=True):
         _ranges = {"3M": 90, "6M": 180, "9M": 270, "1Y": 365, "2Y / All": None}
         rsel = st.radio("Time range", list(_ranges), index=1, horizontal=True,
