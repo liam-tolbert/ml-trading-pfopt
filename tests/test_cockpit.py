@@ -238,6 +238,60 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
     # without raising (asserted above) means the CSV builders ran cleanly on real payloads.
 
 
+def test_build_buy_plan_sizing_modes():
+    """The paper-trade plan builder sizes each name by the chosen mode — % of equity,
+    $ per name, or an explicit share count — flags extended names, and skips ones that
+    round below 1 share, fall under the $50 floor (dollar modes only), lack equity for the
+    % mode, or aren't in the scan."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan, MIN_TRADE_USD
+
+    def _payload(price, pivot):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        return {"df": df, "levels": {"pivot": pivot,
+                                     "buy_zone": (pivot, pivot * 1.05)}}
+
+    pl = {"AAA": _payload(100.0, 100.0),        # in zone
+          "BBB": _payload(110.0, 100.0)}        # extended (110 > 100*1.05)
+
+    # % of portfolio: 5% of $100k equity = $5,000 per name -> floor($5,000 / price)
+    plan, _ = build_buy_plan(["AAA", "BBB"], pl, mode="pct", amount=5.0, equity=100_000.0)
+    by = {o["ticker"]: o for o in plan}
+    assert by["AAA"]["shares"] == int(5000 / 100)              # 50
+    assert by["BBB"]["shares"] == int(5000 / 110)              # 45
+    assert by["AAA"]["extended"] is False and by["BBB"]["extended"] is True
+
+    # % mode with no equity available -> every name skipped with a clear reason
+    p_noeq, s_noeq = build_buy_plan(["AAA"], pl, mode="pct", amount=5.0, equity=None)
+    assert not p_noeq and "equity" in s_noeq[0]["reason"]
+
+    # $ per name: floor($ / price)
+    p_dol, _ = build_buy_plan(["AAA"], pl, mode="dollars", amount=1000.0)
+    assert p_dol[0]["shares"] == int(1000 / 100)               # 10
+
+    # # shares per name: exact count, and exempt from the $50 floor
+    p_sh, _ = build_buy_plan(["AAA"], pl, mode="shares", amount=3)
+    assert p_sh[0]["shares"] == 3
+    cheap = {"CHEAP": _payload(10.0, 10.0)}
+    p_one, _ = build_buy_plan(["CHEAP"], cheap, mode="shares", amount=1)   # $10 order OK
+    assert p_one and p_one[0]["shares"] == 1
+    # the same $10 notional IS skipped in a dollar-denominated mode (< $50 floor)
+    p_tiny, s_tiny = build_buy_plan(["CHEAP"], cheap, mode="dollars", amount=10.0)
+    assert not p_tiny and s_tiny[0]["ticker"] == "CHEAP"
+    assert MIN_TRADE_USD == 50.0
+
+    # not-in-scan is always skipped; an unknown mode is a hard error
+    _, s_zzz = build_buy_plan(["ZZZ"], pl, mode="dollars", amount=1000.0)
+    assert "scan" in s_zzz[0]["reason"]
+    try:
+        build_buy_plan(["AAA"], pl, mode="bogus", amount=1.0)
+        raise AssertionError("expected ValueError for unknown mode")
+    except ValueError:
+        pass
+
+
 def test_sepa_guide_page_renders():
     """The SEPA Guide page must load and render the method markdown without error."""
     try:

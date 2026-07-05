@@ -23,6 +23,8 @@ from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     watchlist_list_csv, watchlist_ohlcv_csv)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
+from src.stock_screener.cockpit.trade import (  # noqa: E402
+    TradeUnavailable, build_buy_plan, fetch_account_summary, submit_buy_plan)
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
@@ -399,6 +401,103 @@ with st.sidebar:
             st.caption(f"⚠︎ {', '.join(_missing)} not in the current scan — the list CSV "
                        "keeps the ticker only and the OHLCV omits it. Re-scan the universe "
                        "that has them to include their data.")
+
+        # --- Paper-trade the watchlist via Alpaca (paper account only) --------------- #
+        st.markdown("---")
+        st.markdown("**⚡ Paper trade (Alpaca)**")
+        # How to size EACH name's market BUY — % of portfolio, raw $, or raw share count.
+        _mode_label = st.selectbox(
+            "Size each buy by", ["% of portfolio", "$ per name", "# shares"],
+            key="trade_mode",
+            help="Applied to EACH watchlisted name. '% of portfolio' = that % of your "
+                 "Alpaca equity per name; '$ per name' = that many dollars each; "
+                 "'# shares' = exactly that many shares each.")
+        if _mode_label == "% of portfolio":
+            _mode = "pct"
+            _amount = st.number_input("% of equity per name", min_value=0.0, value=5.0,
+                                      step=0.5, key="trade_amt_pct")
+            _size_note = f"{_amount:.1f}% of equity per name"
+        elif _mode_label == "$ per name":
+            _mode = "dollars"
+            _amount = st.number_input("$ per name", min_value=0.0, value=5000.0,
+                                      step=500.0, key="trade_amt_dol")
+            _size_note = f"~${_amount:,.0f} per name"
+        else:
+            _mode = "shares"
+            _amount = float(st.number_input("Shares per name", min_value=0, value=100,
+                                            step=10, key="trade_amt_sh"))
+            _size_note = f"{int(_amount)} shares per name"
+        st.caption(f"Market BUYs: {_size_note}. Paper account only; whole shares, "
+                   "each order still capped at 10% of equity.")
+        if st.button("Build trade plan", key="trade_build", width="stretch"):
+            # Fetch the target account ONCE here (not every rerun) so the user can confirm
+            # which paper account will be traded — and, for '% of portfolio', to size on
+            # its live equity.
+            try:
+                _account = fetch_account_summary()
+            except TradeUnavailable as _e:
+                _account = {"error": str(_e)}
+            _plan, _skip = build_buy_plan(_watch, res.payloads, mode=_mode,
+                                          amount=_amount, equity=_account.get("equity"))
+            st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
+                                              "account": _account}
+            st.session_state.pop("trade_result", None)
+
+        _tp = st.session_state.get("trade_plan")
+        if _tp:
+            _plan, _skip = _tp["plan"], _tp["skipped"]
+            if _plan:
+                _tot = sum(o["est_value"] for o in _plan)
+                st.caption(f"**{len(_plan)} BUY order(s)** · ~${_tot:,.0f} est.")
+                for _o in _plan:
+                    _fl = " ⚠︎ extended" if _o["extended"] else ""
+                    st.caption(f"• **{_o['ticker']}** {_o['shares']} sh @ "
+                               f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}")
+                if any(_o["extended"] for _o in _plan):
+                    st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
+                               "the real risk to your stop is larger.")
+                # Confirm WHICH account before submitting (each paper account has its own keys).
+                _account = _tp.get("account", {})
+                if _account.get("error"):
+                    st.warning(_account["error"])
+                else:
+                    _src = ("Minervini Trader keys" if _account.get("using_dedicated")
+                            else "shared ALPACA_* keys — set ALPACA_MINERVINI_API_KEY/"
+                                 "SECRET to target the Minervini account")
+                    st.caption(f"Target account **…{str(_account['account_number'])[-4:]}** "
+                               f"({_src}) · equity ${_account['equity']:,.0f}")
+                _c1, _c2 = st.columns(2)
+                if _c1.button("✅ Submit (paper)", key="trade_submit",
+                              type="primary", width="stretch"):
+                    with st.spinner("Submitting to Alpaca paper…"):
+                        try:
+                            st.session_state["trade_result"] = submit_buy_plan(_plan)
+                        except TradeUnavailable as _e:
+                            st.session_state["trade_result"] = {"error": str(_e)}
+                    st.session_state.pop("trade_plan", None)
+                    st.rerun()
+                if _c2.button("Cancel", key="trade_cancel", width="stretch"):
+                    st.session_state.pop("trade_plan", None)
+                    st.rerun()
+            else:
+                st.caption("No tradable orders from the current watchlist.")
+            if _skip:
+                st.caption("Skipped: "
+                           + " · ".join(f"{s['ticker']} ({s['reason']})" for s in _skip))
+
+        _tr = st.session_state.get("trade_result")
+        if _tr:
+            if _tr.get("error"):
+                st.error(f"Trade failed: {_tr['error']}")
+            else:
+                _sub = [r for r in _tr["results"] if r["status"] == "submitted"]
+                st.success(f"Submitted {len(_sub)}/{len(_tr['results'])} order(s) to "
+                           f"account …{str(_tr['account_number'])[-4:]} · "
+                           f"equity ${_tr['equity']:,.0f}")
+                for _r in _tr["results"]:
+                    _ic = {"submitted": "✅", "skipped": "—",
+                           "failed": "⚠️"}.get(_r["status"], "•")
+                    st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
 
