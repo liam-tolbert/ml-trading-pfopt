@@ -393,20 +393,152 @@ def test_bbwp_and_squeeze_indicators():
     assert bool(sq.iloc[-1]) is True, "coiled tail should register a TTM squeeze"
 
 
-def test_strict_gate_requires_volatility_confirmation():
-    """Strict AND-gate: identical swing STRUCTURE, but a calm tight ending is a VCP while a
-    volatile final thrust (RMV high) is rejected — the volatility half must confirm."""
+def test_rmv_gate_vetoes_below_pivot_only():
+    """RMV semantics (benchmarked): while price is still BELOW the pivot the base should be
+    quiet, so a loud tape is vetoed. AT/ABOVE the pivot a breakout IS a burst of movement —
+    RMV reads high at exactly the moment a setup completes (the SMBC false-negative class) —
+    so it must NOT veto there; structure alone decides."""
     from src.stock_screener.cockpit.vcp import detect_vcp
 
-    calm = _lin_series([(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
-                        (10, 135.8), (8, 144), (10, 136.8), (8, 143)])
-    hot = _lin_series([(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
-                       (10, 135.8), (8, 144), (10, 136.8), (2, 150)])   # sharp final thrust
+    base_legs = [(100, 150), (10, 126), (8, 148), (10, 131.7), (8, 146),
+                 (10, 135.8), (8, 144), (10, 136.8)]
+    calm = _lin_series(base_legs + [(8, 143)])                    # quiet drift below pivot
+    loud = _lin_series(base_legs + [(1, 143), (1, 137.5), (1, 143), (1, 137.5),
+                                    (1, 143), (1, 137.5), (1, 142), (1, 138)])
+    hot = _lin_series(base_legs + [(2, 150)])                     # breakout thrust AT pivot
+
     vc = detect_vcp(calm, float(calm["Close"].iloc[-1]), {}, thr=0.04)
+    vl = detect_vcp(loud, float(loud["Close"].iloc[-1]), {}, thr=0.04)
     vh = detect_vcp(hot, float(hot["Close"].iloc[-1]), {}, thr=0.04)
+
     assert vc["is_vcp"] is True, vc["pattern_details"]
-    assert vh["is_vcp"] is False, (vh["rmv"], vh["pattern_details"])
+    # below the pivot with a whipsawing tape -> RMV (or the churned structure) must reject
+    assert vl["is_vcp"] is False, (vl["rmv"], vl["pattern_details"])
+    assert vl["rmv"] > vc["rmv"], (vl["rmv"], vc["rmv"])
+    # at the pivot mid-breakout the RMV burst must NOT veto a valid structure
+    assert vh["is_vcp"] is True, (vh["rmv"], vh["pattern_details"])
     assert vh["rmv"] > vc["rmv"], (vh["rmv"], vc["rmv"])
+    assert vh["tier"] == "A", (vh["tier"], vh["tier_reason"])
+
+
+def _ohlc_series(segments, start=100.0, band=0.01):
+    """Like ``_lin_series`` but with real intrabar range: High/Low sit ±band around the
+    close walk. Needed for adaptive-mode (thr=None) detector tests — H=L=C frames have no
+    true range, so they'd false-trigger the dead-tape guard."""
+    import pandas as pd
+    closes = [start]
+    for days, end in segments:
+        s = closes[-1]
+        closes += [s + (end - s) * k / days for k in range(1, days + 1)]
+    idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=len(closes))
+    c = pd.Series(closes, index=idx)
+    return pd.DataFrame({"Open": c, "High": c * (1 + band), "Low": c * (1 - band),
+                         "Close": c, "Volume": 1_000_000}, index=idx)
+
+
+def test_vcp_multi_threshold_sees_quiet_taper_after_loud_history():
+    """SMBC shape: a formerly-loud stock (±20% swings) whose base tapers 9→7→5.5→4.5%.
+    The long-history threshold alone is calibrated to the loud past and cannot see the
+    tight legs — the multi-threshold ladder must find them (tier A, adaptive mode)."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    df = _ohlc_series([(60, 150), (15, 115), (15, 150), (15, 122), (15, 152),
+                       (10, 141.5), (8, 152), (8, 145.2), (8, 152.5),
+                       (8, 147.2), (8, 153), (8, 149.2), (6, 156)])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    assert v["is_vcp"] is True, (v["tier"], v["tier_reason"], v["pattern_details"])
+    assert v["tier"] == "A", (v["tier"], v["tier_reason"])
+    assert v["contraction_count"] >= 3, v["pattern_details"]
+
+
+def test_vcp_finds_tight_final_leg_after_wide_start():
+    """VRA shape: wide early pullbacks (~20%) ending in one tight final leg, price still
+    below the pivot. A single history-wide threshold missed the final leg entirely."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    df = _ohlc_series([(60, 150), (12, 120), (12, 148), (10, 133), (10, 147),
+                       (8, 137), (10, 145)])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    assert v["is_vcp"] is True, (v["tier"], v["tier_reason"], v["pattern_details"])
+    assert v["tier"] == "A", (v["tier"], v["tier_reason"])
+    depths = [c["drawdown_pct"] for c in v["contractions"]]
+    assert depths[-1] < 10.0, depths
+
+
+def test_vcp_two_day_spike_is_not_a_base():
+    """EQ shape: a straight run-up whose only 'pullback' is a violent 1-bar plunge and
+    rebound. A 1-bar leg is a junk anchor, not a base — tier C, never a VCP."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    df = _ohlc_series([(150, 250), (1, 225), (1, 248)])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    assert v["is_vcp"] is False, v["pattern_details"]
+    assert v["tier"] == "C", (v["tier"], v["tier_reason"])
+
+
+def test_vcp_deal_pinned_stock_is_dead_tape():
+    """Deal-stock shape: months of near-zero movement (an acquisition-arb zombie) cannot
+    be a live setup — tier C with the dead-tape reason recorded."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    df = _ohlc_series([(60, 90), (20, 100)], band=0.01)
+    import pandas as pd
+    flat_idx = pd.bdate_range(start=df.index[-1] + pd.Timedelta(days=1), periods=150)
+    flat = pd.DataFrame({"Open": 100.2, "High": 100.25, "Low": 100.15, "Close": 100.2,
+                         "Volume": 50_000}, index=flat_idx)
+    df = pd.concat([df, flat])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    assert v["tier"] == "C", (v["tier"], v["tier_reason"])
+    assert "Dead tape" in v["tier_reason"], v["tier_reason"]
+
+
+def test_vcp_extended_breakout_is_watch_not_review():
+    """Extended-breakout shape: a textbook base whose breakout already ran ~15% past the
+    pivot is spent — a valid pattern, but tier B (watch), never tier A."""
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    df = _ohlc_series([(60, 150), (10, 138), (8, 149), (8, 141.8), (8, 150),
+                       (8, 145.5), (15, 175)])
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+    assert v["tier"] == "B", (v["tier"], v["tier_reason"])
+    assert "extended" in v["tier_reason"].lower() or "past the pivot" in v["tier_reason"], \
+        v["tier_reason"]
+
+
+def test_vcp_benchmark_200_charts():
+    """The 200-chart hand-labeled benchmark (see tests/vcp_labels.py for the blind
+    protocol). Hard contracts:
+      - never-miss: ZERO YES-labeled charts land in tier C;
+      - shortlist:  every YES-labeled chart lands in tier A or B;
+      - regression floor: tier A captures at least 45 of the 72 YES charts.
+    Soft stats (tier sizes, precision) are printed for future tuning."""
+    import pandas as pd
+    from vcp_labels import LABELS, fixture_filename
+    from src.stock_screener.cockpit.vcp import detect_vcp
+
+    fdir = ROOT / "tests" / "fixtures" / "vcp_bench"
+    assert fdir.exists(), "benchmark fixtures missing — were tests/fixtures committed?"
+
+    tiers, misses = {}, []
+    for t, lab in LABELS.items():
+        df = pd.read_parquet(fdir / fixture_filename(t))
+        r = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+        tiers[t] = r["tier"]
+        if lab["label"] == "YES" and r["tier"] == "C":
+            misses.append((t, r["tier_reason"]))
+
+    yes = [t for t, v in LABELS.items() if v["label"] == "YES"]
+    n_a = sum(1 for t in tiers if tiers[t] == "A")
+    n_b = sum(1 for t in tiers if tiers[t] == "B")
+    n_c = sum(1 for t in tiers if tiers[t] == "C")
+    yes_a = sum(1 for t in yes if tiers[t] == "A")
+    yes_b = sum(1 for t in yes if tiers[t] == "B")
+    print(f"    benchmark: A={n_a} (YES {yes_a}, precision {yes_a / max(n_a, 1) * 100:.0f}%)"
+          f"  B={n_b} (YES {yes_b})  C={n_c}  | YES total {len(yes)}")
+
+    assert not misses, f"never-miss violated — YES charts in tier C: {misses}"
+    assert all(tiers[t] in ("A", "B") for t in yes), "a YES chart left tier A/B"
+    assert yes_a >= 45, f"tier-A recall regressed: only {yes_a}/{len(yes)} YES in A"
 
 
 def _run_all():

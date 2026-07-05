@@ -116,9 +116,11 @@ READABLE_COLS = {
     "rev_yoy": "Revenue YoY (%)",
     "eps_yoy": "EPS YoY (%)",
     "op_margin": "Operating margin (%)",
+    "tier": "Tier",
     "vcp": "VCP detected",
     "num_contractions": "# Contractions",
     "vcp_quality": "VCP quality (0-100)",
+    "tier_reason": "Tier reason",
     "breakout_today": "Breakout today",
     "vol_confirmed": "Vol confirmed",
     "pct_to_pivot": "Distance to pivot (%)",
@@ -139,12 +141,19 @@ COL_HELP = {
                "(unknown, not zero).",
     "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",
     "op_margin": "Current operating margin. Look for stable or expanding.",
+    "tier": "Review tier (recall-first): A = valid tightening base in/near the buy zone — "
+            "review these. B = watch: base still forming, or valid but extended past the "
+            "buy zone; never hidden. C = safely skipped (dead tape / no pullbacks / stale "
+            "base) — the reason is in 'Tier reason'. Benchmarked on 200 hand-labeled "
+            "charts: zero real setups landed in C.",
     "vcp": "A valid Volatility Contraction Pattern was detected: 2–6 progressively tighter "
            "pullbacks, the last one tight (≤12%), with price near its 52-week high.",
     "num_contractions": "Number of peak→trough pullbacks in the current base. Minervini's "
                         "range is 2–6.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
                    "+ near-high 20 + base length 10). Shown even when VCP is False.",
+    "tier_reason": "Why the detector placed the name in its tier — every exclusion or "
+                   "demotion is auditable, nothing is silently hidden.",
     "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
                       "confirmed' for the volume side).",
     "vol_confirmed": "True when the latest-day volume is ≥ 1.5× its 20-day average — the "
@@ -163,7 +172,8 @@ COL_HELP = {
 COL_GROUPS = [
     ("Identify", ["ticker", "price"]),
     ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
-    ("Base — the VCP setup", ["vcp", "num_contractions", "vcp_quality"]),
+    ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
+                              "tier_reason"]),
     ("Entry — timing & risk", ["breakout_today", "vol_confirmed", "pct_to_pivot",
                                "pivot", "stop", "target"]),
 ]

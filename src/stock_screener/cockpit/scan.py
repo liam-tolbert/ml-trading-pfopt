@@ -191,9 +191,11 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "rev_yoy": _fmt(fund and fund.get("revenue_yoy")),
                 "eps_yoy": _fmt(fund and fund.get("eps_yoy")),
                 "op_margin": _fmt(fund and fund.get("operating_margin")),
+                "tier": vcp.get("tier", "B"),
                 "vcp": bool(vcp.get("is_vcp")),
                 "num_contractions": int(vcp.get("contraction_count", 0) or 0),
                 "vcp_quality": round(float(vcp.get("vcp_quality", 0) or 0), 0),
+                "tier_reason": vcp.get("tier_reason", ""),
                 "breakout_today": levels["breakout_today"],
                 "vol_confirmed": levels["volume_confirmed"],
                 "pct_to_pivot": _fmt(levels["pct_to_pivot"]),
@@ -223,8 +225,11 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     }
 
     if rows:
+        # Review order: tier A first (the shortlist), then quality within a tier — the
+        # recall-first workflow is "walk the A block, glance at B, trust C's reasons".
         cand = pd.DataFrame(rows).sort_values(
-            ["fund_score", "rs"], ascending=[False, False],
+            ["tier", "vcp_quality", "fund_score", "rs"],
+            ascending=[True, False, False, False],
             na_position="last").reset_index(drop=True)
     else:
         cand = pd.DataFrame()
