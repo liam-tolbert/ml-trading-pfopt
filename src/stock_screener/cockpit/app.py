@@ -21,7 +21,7 @@ import streamlit as st  # noqa: E402
 
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
-    watchlist_list_csv, watchlist_ohlcv_csv)
+    parse_ticker_list, watchlist_list_csv, watchlist_ohlcv_csv)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     TradeUnavailable, build_buy_plan, fetch_account_summary, submit_buy_plan)
@@ -306,6 +306,25 @@ def _wl_add_from_picker() -> None:
     st.session_state["wl_picker"] = []
 
 
+def _wl_add_from_upload() -> None:
+    """Merge tickers from an uploaded .txt into the watchlist. Names may be separated by
+    commas and/or any whitespace/newlines; each is upper-cased and de-duplicated. Fires on
+    the uploader's on_change, so it processes a given file exactly once (not every rerun)."""
+    up = st.session_state.get("wl_upload")
+    if up is None:                                       # file was cleared/removed
+        return
+    try:
+        text = up.getvalue().decode("utf-8", errors="ignore")
+    except Exception:
+        st.session_state["_wl_upload_msg"] = "Could not read that file."
+        return
+    before = len(_wl())
+    for sym in parse_ticker_list(text):                  # commas OR whitespace/newlines
+        _wl_add(sym)
+    st.session_state["_wl_upload_msg"] = (
+        f"Added {len(_wl()) - before} new ticker(s) from {getattr(up, 'name', 'the file')}.")
+
+
 @st.cache_data(show_spinner=False)
 def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
     cfg = ScanConfig(min_criteria=min_criteria, min_rs=float(min_rs),
@@ -381,6 +400,15 @@ with st.sidebar:
         placeholder="Pick tickers to add…",
         help="Add several at once, or click the ⭐ button next to any chart. "
              "The list lives for this session — download it to keep it.")
+    st.file_uploader(
+        "Upload tickers (.txt)", type=["txt"], key="wl_upload",
+        on_change=_wl_add_from_upload,
+        help="A .txt file of ticker symbols separated by commas (and/or new lines) — "
+             "e.g. `AAPL, MSFT, NVDA`. They're merged into the watchlist, upper-cased "
+             "and de-duplicated. Pairs with the '⬇ Names (.txt)' download below.")
+    _up_msg = st.session_state.pop("_wl_upload_msg", None)
+    if _up_msg:
+        st.caption(_up_msg)
     if _watch:
         st.caption(", ".join(_watch))
         _d1, _d2 = st.columns(2)
@@ -395,6 +423,11 @@ with st.sidebar:
             file_name="watchlist_ohlcv.csv", mime="text/csv", width="stretch",
             help="Daily Open/High/Low/Close/Volume for every watchlisted name, stacked "
                  "long-format with a Ticker column.")
+        st.download_button(
+            "⬇ Names (.txt)", ",".join(_watch), file_name="watchlist.txt",
+            mime="text/plain", width="stretch",
+            help="Just the tickers, comma-separated — the format the uploader above reads "
+                 "back in.")
         st.button("🗑 Clear watchlist", on_click=_wl_clear, width="stretch")
         _missing = [t for t in _watch if t not in res.payloads]
         if _missing:

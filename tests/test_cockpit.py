@@ -202,6 +202,17 @@ def test_watchlist_export_helpers():
     assert watchlist_ohlcv_csv([], payloads) == b""             # empty list -> empty bytes
 
 
+def test_parse_ticker_list():
+    """The .txt-upload parser tokenizes on commas AND whitespace/newlines, upper-cases,
+    drops blanks, and de-duplicates while preserving first-seen order."""
+    from src.stock_screener.cockpit.export import parse_ticker_list
+
+    assert parse_ticker_list("aapl, msft\nnvda,,  tsla ") == ["AAPL", "MSFT", "NVDA", "TSLA"]
+    assert parse_ticker_list("MSFT,msft , AAPL") == ["MSFT", "AAPL"]   # case-insensitive dedupe
+    assert parse_ticker_list("") == [] and parse_ticker_list("  , \n ") == []
+    assert parse_ticker_list("BRK.B goog") == ["BRK.B", "GOOG"]        # dots kept, ws-split
+
+
 def test_watchlist_add_button_and_download(monkeypatch=None):
     """Through the real app: clicking the ⭐ button adds the charted name to
     session_state['watchlist'], and the sidebar then exposes the two download buttons."""

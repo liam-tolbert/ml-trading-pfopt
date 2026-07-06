@@ -11,6 +11,20 @@ from typing import Dict, List, Optional, Sequence
 import pandas as pd
 
 
+def parse_ticker_list(text: str) -> List[str]:
+    """Parse an uploaded ticker list: split on commas AND any whitespace/newlines,
+    upper-case, drop blanks, and de-duplicate while keeping first-seen order.
+
+    So ``"aapl, msft\\nnvda,, tsla"`` -> ``["AAPL", "MSFT", "NVDA", "TSLA"]``.
+    """
+    seen: dict = {}                                      # ordered set (py3.7+ dict order)
+    for token in (text or "").replace(",", " ").split():
+        sym = token.strip().upper()
+        if sym:
+            seen.setdefault(sym, None)
+    return list(seen)
+
+
 def watchlist_list_csv(candidates: Optional[pd.DataFrame], tickers: Sequence[str],
                        columns: Optional[Sequence[str]] = None) -> bytes:
     """The shortlist with its decision columns, in ``tickers`` order.
