@@ -69,11 +69,14 @@ class PlannedOrder:
 def connect() -> TradingClient:
     """Construct an Alpaca paper TradingClient from env credentials."""
     load_dotenv()
-    api_key = os.environ.get("ALPACA_API_KEY")
-    api_secret = os.environ.get("ALPACA_API_SECRET")
+    # Accept the PAPER1-suffixed spelling actually used in this repo's .env as a fallback,
+    # so a rename doesn't silently break the mirror (see trade.py for the same guard).
+    api_key = os.environ.get("ALPACA_API_KEY") or os.environ.get("ALPACA_API_KEY_PAPER1")
+    api_secret = os.environ.get("ALPACA_API_SECRET") or os.environ.get("ALPACA_API_SECRET_PAPER1")
     if not api_key or not api_secret:
         raise RuntimeError(
-            "ALPACA_API_KEY and ALPACA_API_SECRET must be set in .env"
+            "ALPACA_API_KEY and ALPACA_API_SECRET (or ALPACA_API_KEY_PAPER1 / "
+            "ALPACA_API_SECRET_PAPER1) must be set in .env"
         )
     return TradingClient(api_key, api_secret, paper=True)
 

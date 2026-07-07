@@ -21,11 +21,35 @@ MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so 
                             # plan builder needn't import alpaca-py)
 
 # The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which
-# owns ALPACA_API_KEY/SECRET). Each Alpaca paper account has its own key pair, so we select
-# the "Minervini Trader" account by preferring its dedicated keys, falling back to the
-# shared ones only if the dedicated pair isn't set.
-MINERVINI_KEY_ENV = "ALPACA_MINERVINI_API_KEY"
-MINERVINI_SECRET_ENV = "ALPACA_MINERVINI_API_SECRET"
+# owns the shared ALPACA_API_KEY/SECRET pair). Each Alpaca paper account has its own key
+# pair, so we select the "Minervini Trader" account by preferring its dedicated keys,
+# falling back to the shared ones only if the dedicated pair isn't set.
+#
+# We accept TWO spellings of each name — the originally-documented ``ALPACA_MINERVINI_API_*``
+# form and the ``ALPACA_API_KEY_*_MINERVINI`` / ``*_PAPER1`` form actually used in this repo's
+# .env — because a silent drift between the .env names and the names the code reads routes
+# every order to nowhere (both resolve to None -> TradeUnavailable) with no obvious cause.
+# First non-empty match in each tuple wins.
+MINERVINI_KEY_ENVS = "ALPACA_API_KEY_MINERVINI"
+MINERVINI_SECRET_ENVS = "ALPACA_API_KEY_SECRET_MINERVINI"
+SHARED_KEY_ENVS = ("ALPACA_API_KEY", "ALPACA_API_KEY_PAPER1")
+SHARED_SECRET_ENVS = ("ALPACA_API_SECRET", "ALPACA_API_SECRET_PAPER1")
+
+
+def _first_env(names: "Sequence[str] | str") -> Optional[str]:
+    """Return the value of the first env var named in ``names`` that is set and non-empty.
+
+    Accepts a single name (``str``) or a sequence of candidate names. A bare string is
+    treated as ONE name — never iterated character-by-character, which would silently
+    resolve a stray one-char env var (e.g. ``$_``) instead of the intended key.
+    """
+    if isinstance(names, str):
+        names = (names,)
+    for n in names:
+        v = os.environ.get(n)
+        if v:
+            return v
+    return None
 
 
 class TradeUnavailable(RuntimeError):
@@ -50,15 +74,15 @@ def _connect_paper():
     except ImportError:
         pass
 
-    ded_key = os.environ.get(MINERVINI_KEY_ENV)
-    ded_secret = os.environ.get(MINERVINI_SECRET_ENV)
-    key = ded_key or os.environ.get("ALPACA_API_KEY")
-    secret = ded_secret or os.environ.get("ALPACA_API_SECRET")
+    ded_key = _first_env(MINERVINI_KEY_ENVS)
+    ded_secret = _first_env(MINERVINI_SECRET_ENVS)
+    key = ded_key or _first_env(SHARED_KEY_ENVS)
+    secret = ded_secret or _first_env(SHARED_SECRET_ENVS)
     if not key or not secret:
         raise TradeUnavailable(
-            f"No Alpaca credentials in .env. Add the Minervini Trader paper account's keys "
-            f"as {MINERVINI_KEY_ENV} / {MINERVINI_SECRET_ENV} (each Alpaca paper account has "
-            f"its own key pair), or the shared ALPACA_API_KEY / ALPACA_API_SECRET.")
+            "No Alpaca credentials in .env. Add the Minervini Trader paper account's keys as "
+            "ALPACA_API_KEY_MINERVINI / ALPACA_API_KEY_SECRET_MINERVINI (each Alpaca paper "
+            "account has its own key pair), or a shared ALPACA_API_KEY / ALPACA_API_SECRET pair.")
     return TradingClient(key, secret, paper=True), bool(ded_key and ded_secret)
 
 

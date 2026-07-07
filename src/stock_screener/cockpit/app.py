@@ -495,8 +495,8 @@ with st.sidebar:
                     st.warning(_account["error"])
                 else:
                     _src = ("Minervini Trader keys" if _account.get("using_dedicated")
-                            else "shared ALPACA_* keys — set ALPACA_MINERVINI_API_KEY/"
-                                 "SECRET to target the Minervini account")
+                            else "shared ALPACA_* keys — set ALPACA_API_KEY_MINERVINI / "
+                                 "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
                     st.caption(f"Target account **…{str(_account['account_number'])[-4:]}** "
                                f"({_src}) · equity ${_account['equity']:,.0f}")
                 _c1, _c2 = st.columns(2)

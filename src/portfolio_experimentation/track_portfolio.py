@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Portfolio Change Tracker for The All-Weather Portfolio (Q1 2026).
+Portfolio Change Tracker for The All-Weather Portfolio.
 
 Fetches the published Google Sheet, saves timestamped snapshots,
 and diffs against the previous snapshot to report changes:
@@ -37,12 +37,15 @@ sys.stdout.reconfigure(encoding="utf-8")  # Fix Windows console encoding
 # =============================================================================
 
 SHEET_CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/e/"
-    "2PACX-1vQT7uecuE4ONP7z6L71E1y9F0mWp-Wbs6MrXpBtJ20toZwZhUuo0MVI36ahr1jpEqJJi1hXMKTnseRI"
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vQT7uecuE4ONP7z6L71E1y9F0mWp-Wbs6MrXpBtJ20toZwZhUuo0MVI36ahr1jpEqJJi1hXMKTnseRI"
     "/pub?output=csv"
 )
 
 SNAPSHOT_DIR = Path(__file__).parent.parent / "data" / "portfolio_snapshots"
+
+# Display label for the quarter the published sheet covers. Bump this once per quarter
+# (it's cosmetic — only used in printed headers / help text).
+QUARTER_LABEL = "Q3 2026"
 
 # Column names mapped to the published CSV (order matters)
 CSV_COLUMNS = [
@@ -51,6 +54,7 @@ CSV_COLUMNS = [
     "shares", "starting_position", "current_position",
     "price_at_start", "day_chng_pct", "current_price",
     "sale_price_strike", "price_change", "pct_gain_loss", "gain_loss",
+    "stops", "stop_pct",                        # added to the sheet in Q3 2026
     "div_yield", "div_income",
     "active_ccd_info", "ccd_income", "active_collar_put_info",
     "sale_ticker", "sell_date", "sale_price", "sale_position_size",
@@ -120,11 +124,24 @@ def fmt_dollar(val) -> str:
 # =============================================================================
 
 def fetch_sheet() -> pd.DataFrame:
-    """Download the Q1 2026 sheet as a DataFrame from the published CSV URL."""
+    """Download the current sheet as a DataFrame from the published CSV URL.
+
+    Column names are assigned positionally from CSV_COLUMNS, so a layout change in the
+    sheet (a column added/removed) must be mirrored there. We fail loudly with the raw
+    headers when the counts drift instead of silently mis-mapping or raising a cryptic
+    pandas ``Length mismatch`` — that's how the Q3 2026 "Stops"/"Stop %" insert surfaced.
+    """
     resp = requests.get(SHEET_CSV_URL, timeout=30)
     resp.raise_for_status()
     df = pd.read_csv(io.StringIO(resp.text), header=0)
-    df.columns = CSV_COLUMNS[:len(df.columns)]
+    if len(df.columns) != len(CSV_COLUMNS):
+        raw = "\n  ".join(f"{i:>2}: {h}" for i, h in enumerate(df.columns))
+        raise ValueError(
+            f"All-Weather sheet has {len(df.columns)} columns but the tracker maps "
+            f"{len(CSV_COLUMNS)} (CSV_COLUMNS). The sheet layout changed (a column was "
+            f"added or removed) or the published URL is wrong.\nRaw headers:\n  {raw}\n"
+            f"Update CSV_COLUMNS in track_portfolio.py to match, then re-run.")
+    df.columns = CSV_COLUMNS
     return df
 
 
@@ -417,7 +434,7 @@ def print_holdings(positions: dict):
 
     w = HOLDINGS_WIDTH
     print("\n" + "=" * w)
-    print(f"  ALL-WEATHER PORTFOLIO - Q2 2026  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"  ALL-WEATHER PORTFOLIO - {QUARTER_LABEL}  |  {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * w)
     print(
         f"  {'Ticker':<8} {'Company':<22} {'Shares':>10} {'Price':>10} "
@@ -573,7 +590,7 @@ def print_change_report(changes: dict, positions: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Track All-Weather Portfolio changes (Q2 2026)"
+        description=f"Track All-Weather Portfolio changes ({QUARTER_LABEL})"
     )
     parser.add_argument("--holdings", action="store_true", help="Print current holdings only")
     parser.add_argument("--history",  action="store_true", help="List saved snapshots")
@@ -593,7 +610,7 @@ def main():
         return
 
     # Fetch and parse
-    print("Fetching Q2 2026 portfolio data...")
+    print(f"Fetching {QUARTER_LABEL} portfolio data...")
     df = fetch_sheet()
     records = clean_data(df)
     positions = aggregate_positions(records)
