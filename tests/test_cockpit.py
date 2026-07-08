@@ -135,6 +135,72 @@ def test_step2_summary_logic():
     assert weak["score"] == 0
 
 
+def test_earnings_date_plumbing():
+    """The next-earnings date flows yfinance-calendar -> fundamentals dict -> scan
+    column/payload -> trade plan; the day-count helper handles past/None/garbage."""
+    import datetime as _dt
+
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed
+    from src.stock_screener.cockpit.trade import build_buy_plan
+
+    # calendar parsing: dict shape (modern yfinance) — earliest of the 2-day window wins
+    class _TkDict:
+        calendar = {"Earnings Date": [_dt.date(2026, 8, 3), _dt.date(2026, 7, 30)]}
+
+    assert data_feed._next_earnings_date(_TkDict()) == "2026-07-30"
+
+    # DataFrame shape (older yfinance): an 'Earnings Date' row
+    class _TkFrame:
+        calendar = pd.DataFrame({0: [pd.Timestamp("2026-07-30")]},
+                                index=["Earnings Date"])
+
+    assert data_feed._next_earnings_date(_TkFrame()) == "2026-07-30"
+
+    # empty / broken calendars -> None, never a raise
+    class _TkEmpty:
+        calendar = {}
+
+    class _TkBoom:
+        @property
+        def calendar(self):
+            raise RuntimeError("offline")
+
+    assert data_feed._next_earnings_date(_TkEmpty()) is None
+    assert data_feed._next_earnings_date(_TkBoom()) is None
+
+    # day-count helper (today pinned so the test is deterministic)
+    today = pd.Timestamp("2026-07-07")
+    assert scan_mod._days_to_earnings({"next_earnings": "2026-07-17"}, today=today) == 10
+    assert scan_mod._days_to_earnings({"next_earnings": "2026-07-04"}, today=today) == -3
+    assert scan_mod._days_to_earnings({"next_earnings": None}, today=today) is None
+    assert scan_mod._days_to_earnings(None, today=today) is None
+    assert scan_mod._days_to_earnings({"next_earnings": "garbage"}, today=today) is None
+
+    # through the funnel: the candidates column and the payload both carry the value
+    prices, spy, _ = _synthetic_slice()
+    soon = (pd.Timestamp.today().normalize() + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+
+    def fund_with_date(_t):
+        return {"revenue_yoy": 40.0, "eps_yoy": 60.0, "eps_yoy_prev": 50.0,
+                "margin_trend": 1.0, "operating_margin": 25.0, "next_earnings": soon}
+
+    res = screen_universe(list(prices), prices, spy, get_fundamentals=fund_with_date,
+                          cfg=ScanConfig(min_rs=0.0))
+    assert len(res.candidates), "no candidates in the synthetic slice"
+    assert "earnings_in" in res.candidates.columns
+    # scan computes vs the real 'today'; tolerate the (theoretical) midnight rollover
+    assert set(int(v) for v in res.candidates["earnings_in"]) <= {9, 10}
+    t0 = res.candidates["ticker"].iloc[0]
+    assert res.payloads[t0]["earnings_in"] in (9, 10)
+
+    # and into the trade plan, untouched (build_buy_plan does no date math)
+    pl = {t0: {"df": res.payloads[t0]["df"], "levels": res.payloads[t0]["levels"],
+               "earnings_in": 5}}
+    plan, _ = build_buy_plan([t0], pl, mode="shares", amount=1)
+    assert plan and plan[0]["earnings_in"] == 5
+
+
 def test_streamlit_app_renders_offline():
     """Execute app.py through Streamlit's AppTest with run_scan patched to a real,
     offline ScanResult (synthetic fixture). Verifies the whole UI render path —
@@ -146,9 +212,21 @@ def test_streamlit_app_renders_offline():
         return
     from unittest.mock import patch
 
+    import pandas as pd
+
     from src.stock_screener.cockpit import scan as scanmod
     prices, spy, _ = _synthetic_slice()
-    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+
+    # Fundamentals WITH a near-term earnings date, so the populated Step-2 panel
+    # (earnings line + ⚠ flag) and the earnings_in table column render, not just
+    # their n/a fallbacks.
+    soon = (pd.Timestamp.today().normalize() + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+
+    def _fund(_t):
+        return {"revenue_yoy": 40.0, "eps_yoy": 60.0, "eps_yoy_prev": 50.0,
+                "margin_trend": 1.0, "operating_margin": 25.0, "next_earnings": soon}
+
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=_fund,
                              cfg=ScanConfig(min_rs=0.0))
     assert len(result.candidates) >= 1, "fixture must yield >=1 candidate for the app path"
 

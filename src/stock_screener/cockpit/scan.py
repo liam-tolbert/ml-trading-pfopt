@@ -92,6 +92,22 @@ def _step2_summary(f: Optional[dict]) -> dict:
     return {"score": int(sum(checks.values())), "checks": checks, "available": True}
 
 
+def _days_to_earnings(f: Optional[dict],
+                      today: Optional[pd.Timestamp] = None) -> Optional[int]:
+    """Calendar days until the next scheduled earnings report, from the fundamentals
+    dict's ``next_earnings`` ('YYYY-MM-DD'). Negative = the (cached) date has passed,
+    i.e. the company just reported; None = no date known. ``today`` is overridable so
+    tests stay deterministic."""
+    d = (f or {}).get("next_earnings")
+    if not d:
+        return None
+    try:
+        today = (today if today is not None else pd.Timestamp.today()).normalize()
+        return int((pd.Timestamp(d).normalize() - today).days)
+    except Exception:
+        return None
+
+
 def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
                   phase_info: dict) -> dict:
     """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else
@@ -163,6 +179,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             s2 = _step2_summary(fund)
             if s2["score"] < cfg.min_fundamental_score:
                 continue
+            earnings_in = _days_to_earnings(fund)
 
             levels = _entry_levels(cp, breakout, stop, phase_info)
             # RMV (Relative Measured Volatility): advisory base-tightness read for Step 4.
@@ -191,6 +208,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "rev_yoy": _fmt(fund and fund.get("revenue_yoy")),
                 "eps_yoy": _fmt(fund and fund.get("eps_yoy")),
                 "op_margin": _fmt(fund and fund.get("operating_margin")),
+                "earnings_in": earnings_in,
                 "tier": vcp.get("tier", "B"),
                 "vcp": bool(vcp.get("is_vcp")),
                 "num_contractions": int(vcp.get("contraction_count", 0) or 0),
@@ -207,6 +225,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "df": df, "phase_info": phase_info, "vcp": vcp,
                 "breakout": breakout, "levels": levels, "fundamentals": fund,
                 "step2": s2, "rs": rsr, "template": tmpl,
+                "earnings_in": earnings_in,
             }
         except Exception as e:                                  # never let one name kill the scan
             errors.append(f"{t}: {e}")

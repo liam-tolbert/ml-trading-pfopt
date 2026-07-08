@@ -75,6 +75,9 @@ Look for:
 `fund_score` (0–4) counts how many checks pass. yfinance often exposes only ~4
 quarters, so **YoY may read n/a** — QoQ is the fallback. Use this to rank the
 Step-1 list, not as a hard cutoff unless you set "min fundamental checks".
+
+The **next earnings date** shows here too — it's an *entry-timing* input
+(see Step 4): don't open a fresh position within ~2–3 weeks of a report.
 """
 
 INFO_STEP3 = """
@@ -100,12 +103,17 @@ two axes flip from quiet to loud:
 - **The breakout** (the trigger): price **closes above the pivot** on volume **≥ 40–50%
   above average** (the "breakout today" flag), and volatility **expands** (the squeeze fires).
 - **Don't chase** more than ~5% above the pivot (the buy zone).
+- **Check the calendar:** don't open a fresh position within ~2–3 weeks of a
+  scheduled **earnings report** — with no profit cushion, an earnings gap can blow
+  straight through the stop. (Minervini holds through earnings only with a cushion.)
 - Set the **7–8% stop immediately** and never lower it.
 - First target ~**20–25%**; trail with the 50-day SMA once well in profit.
 - **Size** so a stop-out costs ~1% of the account (set Account $ / Risk %).
 
 These levels are advisory — place the order in your broker.
 """
+
+EARNINGS_SOON_DAYS = 21   # flag entries within ~3 weeks of a scheduled report
 
 
 # Raw candidate-frame column name -> human-readable label. Used both to relabel the
@@ -120,6 +128,7 @@ READABLE_COLS = {
     "rev_yoy": "Revenue YoY (%)",
     "eps_yoy": "EPS YoY (%)",
     "op_margin": "Operating margin (%)",
+    "earnings_in": "Earnings in (days)",
     "tier": "Tier",
     "vcp": "VCP detected",
     "num_contractions": "# Contractions",
@@ -145,6 +154,10 @@ COL_HELP = {
                "(unknown, not zero).",
     "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",
     "op_margin": "Current operating margin. Look for stable or expanding.",
+    "earnings_in": "Calendar days until the next scheduled earnings report (yfinance). "
+                   "Minervini: don't open a fresh position within ~2–3 weeks of a report — "
+                   "with no profit cushion, an earnings gap can blow straight through the "
+                   "stop. Negative = just reported (the safest window); n/a = no date found.",
     "tier": "Review tier (recall-first): A = valid tightening base in/near the buy zone — "
             "review these. B = watch: base still forming, or valid but extended past the "
             "buy zone; never hidden. C = safely skipped (dead tape / no pullbacks / stale "
@@ -178,8 +191,8 @@ COL_GROUPS = [
     ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
                               "tier_reason"]),
-    ("Entry — timing & risk", ["breakout_today", "vol_confirmed", "pct_to_pivot",
-                               "pivot", "stop", "target"]),
+    ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
+                               "pct_to_pivot", "pivot", "stop", "target"]),
 ]
 DISPLAY_ORDER = [c for _, cols in COL_GROUPS for c in cols]
 
@@ -203,6 +216,12 @@ def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
 def _tag(text, color: str = "blue") -> str:
     """A colored-background inline chip via Streamlit markdown; None -> 'n/a'."""
     return f":{color}-background[{'n/a' if text is None else text}]"
+
+
+def _earnings_flag(days) -> str:
+    """'⚠︎ earnings in Nd' when a report is 0–21 days out, else '' (unknown/far/past)."""
+    return (f"⚠︎ earnings in {int(days)}d"
+            if days is not None and 0 <= days <= EARNINGS_SOON_DAYS else "")
 
 
 def _regime_color(regime) -> str:
@@ -500,9 +519,11 @@ with st.sidebar:
                 for _o in _plan:
                     _t = _o["ticker"]
                     _fl = " ⚠︎ extended" if _o["extended"] else ""
+                    _ew = _earnings_flag(_o.get("earnings_in"))
                     _cA, _cB = st.columns([3, 2])
                     _cA.caption(f"• **{_t}** {_o['shares']} sh @ "
-                                f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}")
+                                f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}"
+                                + (f" · {_ew}" if _ew else ""))
                     _cB.number_input(
                         f"stop {_t}", min_value=0.0,
                         value=float(_o["stop_price"]) if _o["stop_price"] else 0.0,
@@ -514,6 +535,11 @@ with st.sidebar:
                 if any(_o["extended"] for _o in _plan):
                     st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
                                "the real risk to your stop is larger.")
+                if any(_earnings_flag(_o.get("earnings_in")) for _o in _plan):
+                    st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
+                               f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "
+                               "cushion to absorb an earnings gap — Minervini would wait "
+                               "for the report or already have a cushion.")
                 # Confirm WHICH account before submitting (each paper account has its own keys).
                 _account = _tp.get("account", {})
                 if _account.get("error"):
@@ -672,6 +698,12 @@ with colSide:
                         f"{_p(f.get('eps_qoq'))} QoQ")
             st.markdown(f"**Op margin:** {'n/a' if opm is None else f'{opm:.1f}%'} "
                         f"(Δ {'n/a' if mt is None else f'{mt:+.1f}pp'})")
+            ne, ei = f.get("next_earnings"), payload.get("earnings_in")
+            if ne:
+                when = ("" if ei is None
+                        else f" ({-ei}d ago)" if ei < 0 else f" (in {ei}d)")
+                warn = " ⚠️" if _earnings_flag(ei) else ""
+                st.markdown(f"**Earnings:** {ne}{when}{warn}")
             checks = s2.get("checks", {})
             st.markdown(" ".join(
                 f"{'✅' if checks.get(k) else '—'} {lbl}"

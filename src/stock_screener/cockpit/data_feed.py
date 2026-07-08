@@ -546,6 +546,37 @@ def _jsonable(v) -> Optional[float]:
         return None
 
 
+def _next_earnings_date(tk) -> Optional[str]:
+    """Next scheduled earnings date as ``'YYYY-MM-DD'``, or None if unknown.
+
+    Reads ``yf.Ticker.calendar`` — a dict on modern yfinance
+    (``{'Earnings Date': [date, ...]}``, often a 2-day window; we take the earliest)
+    and a DataFrame with an ``'Earnings Date'`` row on older versions. Yahoo sometimes
+    lists only the LAST report until the next one is scheduled, so the returned date
+    can be in the past — callers surface that as "just reported" rather than hiding it.
+    """
+    try:
+        cal = tk.calendar
+        if isinstance(cal, dict):
+            dates = cal.get("Earnings Date")
+        elif cal is not None and not getattr(cal, "empty", True) \
+                and "Earnings Date" in getattr(cal, "index", []):
+            dates = list(cal.loc["Earnings Date"])
+        else:
+            dates = None
+        if dates is None or isinstance(dates, str):
+            dates = [dates] if dates else []
+        elif not isinstance(dates, (list, tuple)):
+            try:
+                dates = list(dates)          # a Series/array of dates
+            except TypeError:
+                dates = [dates]              # a single scalar date
+        parsed = sorted(pd.Timestamp(d) for d in dates if d is not None and not pd.isna(d))
+        return parsed[0].strftime("%Y-%m-%d") if parsed else None
+    except Exception:
+        return None
+
+
 def _fetch_fundamentals(sym: str) -> Optional[dict]:
     """Quarterly growth/margin metrics from yfinance (no cache). Keys are None when a
     metric can't be computed (yfinance often exposes only ~4 quarters, so YoY may be
@@ -577,7 +608,10 @@ def _fetch_fundamentals(sym: str) -> Optional[dict]:
         "margin_trend": _margin_trend(oi, rev),
         "inventory_qoq": _qoq(inv),
     }
-    return {k: _jsonable(v) for k, v in out.items()}
+    out = {k: _jsonable(v) for k, v in out.items()}
+    # A date string, so added AFTER the float coercion (which would None it out).
+    out["next_earnings"] = _next_earnings_date(tk)
+    return out
 
 
 def get_fundamentals(ticker: str, force: bool = False,
@@ -590,7 +624,12 @@ def get_fundamentals(ticker: str, force: bool = False,
     path = FUNDAMENTALS_DIR / f"{sym}.json"
     if not force and age_days(path) <= max_age_days:
         try:
-            return json.loads(path.read_text())
+            cached = json.loads(path.read_text())
+            # Schema upgrade: caches written before the earnings-date field lack the
+            # key entirely — refetch those once so the column fills without waiting
+            # out the weekly staleness. (A present-but-None value stays cached.)
+            if "next_earnings" in cached:
+                return cached
         except Exception:
             pass
     out = _fetch_fundamentals(sym)

@@ -130,7 +130,9 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     a price already above the no-chase buy zone (> pivot × 1.05); the caller surfaces it as a
     warning rather than skipping. ``stop_price`` is the app-computed protective stop
     (``levels["stop"]``, ~7-8% below pivot) or ``None`` if unavailable — the caller may edit it
-    before submit; it is never used for sizing here.
+    before submit; it is never used for sizing here. ``earnings_in`` (calendar days to the next
+    scheduled report, from the scan payload; None = unknown) is carried through untouched so the
+    caller can warn about buying into an imminent report — advisory only, never a skip.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
@@ -177,6 +179,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "est_value": round(est_value, 2),
             "extended": bool(bz[1] and price > bz[1]),
             "stop_price": round(float(stop), 2) if stop and stop > 0 else None,
+            "earnings_in": payload.get("earnings_in"),
         })
     return plan, skipped
 
