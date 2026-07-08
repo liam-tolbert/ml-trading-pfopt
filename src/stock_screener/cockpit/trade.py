@@ -103,6 +103,16 @@ def fetch_account_summary() -> dict:
 SIZING_MODES = ("pct", "dollars", "shares")
 
 
+def stop_is_valid(stop_price, price) -> bool:
+    """A protective sell-stop is valid only strictly BELOW the reference price.
+
+    Alpaca rejects a sell stop at/above the market (it would trigger instantly) and an OTO
+    stop-loss leg that isn't below the entry. Used by the UI (live per-keystroke check) and
+    re-checked in :func:`submit_buy_plan` against the last close.
+    """
+    return bool(stop_price and price and stop_price > 0 and stop_price < price)
+
+
 def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                    mode: str, amount: float,
                    equity: Optional[float] = None) -> Tuple[List[dict], List[dict]]:
@@ -113,12 +123,14 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     * ``"shares"``  — exactly ``amount`` (whole) shares per name.
 
     Returns ``(plan, skipped)``. Each plan entry has ticker / shares / price / pivot /
-    est_value / extended; each skipped entry is ``{ticker, reason}``. A name is skipped when
-    it isn't in the current scan, has no current price, sizes to < 1 share, or (for the two
-    dollar-denominated modes) rounds to a notional under the $50 floor — the ``"shares"``
-    mode is exempt from that floor since the count is explicit. ``extended`` flags a price
-    already above the no-chase buy zone (> pivot × 1.05); the caller surfaces it as a
-    warning rather than skipping.
+    est_value / extended / stop_price; each skipped entry is ``{ticker, reason}``. A name is
+    skipped when it isn't in the current scan, has no current price, sizes to < 1 share, or
+    (for the two dollar-denominated modes) rounds to a notional under the $50 floor — the
+    ``"shares"`` mode is exempt from that floor since the count is explicit. ``extended`` flags
+    a price already above the no-chase buy zone (> pivot × 1.05); the caller surfaces it as a
+    warning rather than skipping. ``stop_price`` is the app-computed protective stop
+    (``levels["stop"]``, ~7-8% below pivot) or ``None`` if unavailable — the caller may edit it
+    before submit; it is never used for sizing here.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
@@ -158,58 +170,148 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
 
         bz = lv.get("buy_zone") or (None, None)
         pivot = bz[0]
+        stop = lv.get("stop")
         plan.append({
             "ticker": t, "shares": shares, "price": round(price, 2),
             "pivot": round(float(pivot), 2) if pivot else None,
             "est_value": round(est_value, 2),
             "extended": bool(bz[1] and price > bz[1]),
+            "stop_price": round(float(stop), 2) if stop and stop > 0 else None,
         })
     return plan, skipped
 
 
-def submit_buy_plan(plan: List[dict]) -> dict:
-    """Submit each planned BUY as a market/DAY order on the cockpit's Alpaca **paper**
-    account (Minervini Trader keys preferred — see :func:`_connect_paper`).
+def _cancel_open_sell_stops(client, ticker: str, *, GetOrdersRequest, QueryOrderStatus,
+                            OrderSide, OrderType) -> List[str]:
+    """Cancel this ticker's OPEN sell **stop** orders so a fresh one can replace them.
 
-    Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap. Returns
-    ``{equity, cash, account_number, using_dedicated, results}`` where each result is the
-    plan entry plus a ``status`` ("submitted" / "skipped" / "failed") and a ``detail``
-    string. Raises :class:`TradeUnavailable` if alpaca-py or credentials are missing.
+    Only STOP / STOP_LIMIT / TRAILING_STOP sells are cancelled — a manual limit sell is left
+    alone. Each cancel is independently guarded so one stuck order never blocks placing the new
+    stop. Alpaca returns a triggered OTO stop leg as its own top-level SELL order too, so this
+    flat query catches both standalone stops and prior OTO legs. Returns the cancelled ids.
+    """
+    stop_types = {OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
+    cancelled: List[str] = []
+    try:
+        opens = client.get_orders(filter=GetOrdersRequest(
+            status=QueryOrderStatus.OPEN, side=OrderSide.SELL, symbols=[ticker]))
+    except Exception:
+        return cancelled
+    for od in opens or []:
+        if getattr(od, "symbol", None) != ticker:
+            continue
+        otype = getattr(od, "type", None) or getattr(od, "order_type", None)
+        if otype not in stop_types:
+            continue
+        try:
+            client.cancel_order_by_id(od.id)
+            cancelled.append(str(getattr(od, "id", "?")))
+        except Exception:
+            pass
+    return cancelled
+
+
+def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
+    """Submit each planned order on the cockpit's Alpaca **paper** account (Minervini Trader
+    keys preferred — see :func:`_connect_paper`), attaching a protective stop when
+    ``attach_stop`` is set.
+
+    Per name:
+
+    * **already held** in the account — no buy is sent; a DAY sell-stop for the WHOLE held
+      position is placed at ``stop_price``, first cancelling any open sell stop on it (replace).
+      Exempt from the $50 floor / 10%-cap since a protective stop is risk-reducing.
+    * **not held** — a market BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
+      leg (the stop activates only after the buy fills, so it works even when the buy is queued
+      to the next open); without it, a plain market BUY.
+
+    Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap (buys only).
+    Returns ``{equity, cash, account_number, using_dedicated, results}`` where each result is
+    the plan entry plus a ``status`` ("submitted" / "stop_only" / "skipped" / "failed") and a
+    ``detail`` string. Raises :class:`TradeUnavailable` if alpaca-py or credentials are missing.
     """
     client, using_dedicated = _connect_paper()          # paper=True enforced inside
     try:
-        from alpaca.trading.requests import MarketOrderRequest
-        from alpaca.trading.enums import OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            MarketOrderRequest, StopOrderRequest, StopLossRequest, GetOrdersRequest)
+        from alpaca.trading.enums import (
+            OrderSide, TimeInForce, OrderClass, QueryOrderStatus, OrderType)
         from src.portfolio_experimentation.alpaca_trader import (
             validate_tradable, MAX_ORDER_PCT)
     except ImportError as e:                             # alpaca-py present for _connect but
-        raise TradeUnavailable(str(e)) from e            # the requests submodule somehow isn't
+        raise TradeUnavailable(str(e)) from e            # a submodule/name somehow isn't
 
     acct = client.get_account()
     equity, cash = float(acct.equity), float(acct.cash)
     account_number = getattr(acct, "account_number", "?")
+    # {ticker: whole shares held} — mirrors get_account_state's int(float(qty)) convention.
+    held = {p.symbol: int(float(p.qty)) for p in client.get_all_positions()}
     tradable = validate_tradable(client, [o["ticker"] for o in plan])
     max_allowed = MAX_ORDER_PCT * equity
 
     results: List[dict] = []
     for o in plan:
         t = o["ticker"]
+        stop = o.get("stop_price")
+        held_shares = held.get(t, 0)
         if t not in tradable:
             results.append({**o, "status": "skipped",
                             "detail": "not tradable on Alpaca"})
             continue
-        if o["est_value"] > max_allowed:
-            results.append({**o, "status": "skipped",
-                            "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
-            continue
         try:
-            req = MarketOrderRequest(
-                symbol=t, qty=o["shares"], side=OrderSide.BUY,
-                time_in_force=TimeInForce.DAY,
-                client_order_id=f"SEPAcockpit-{t}-{int(time.time())}")
+            if held_shares > 0:
+                # Already invested — (re)place a protective stop for the whole position, no buy.
+                if not attach_stop:
+                    results.append({**o, "status": "skipped",
+                                    "detail": f"already held ({held_shares} sh); "
+                                              "stop attach disabled"})
+                    continue
+                if not stop_is_valid(stop, o["price"]):
+                    results.append({**o, "status": "skipped",
+                                    "detail": "no valid stop (must be > 0 and < current price)"})
+                    continue
+                cancelled = _cancel_open_sell_stops(
+                    client, t, GetOrdersRequest=GetOrdersRequest,
+                    QueryOrderStatus=QueryOrderStatus, OrderSide=OrderSide, OrderType=OrderType)
+                req = StopOrderRequest(
+                    symbol=t, qty=held_shares, side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY, stop_price=round(float(stop), 2),
+                    client_order_id=f"SEPAstop-{t}-{int(time.time() * 1000)}")
+                resp = client.submit_order(order_data=req)
+                detail = (f"stop-only: SELL {held_shares} @ {stop:.2f} "
+                          f"(id {getattr(resp, 'id', '?')})")
+                if cancelled:
+                    detail += f"; replaced {len(cancelled)} open stop(s)"
+                results.append({**o, "status": "stop_only",
+                                "stop_price": round(float(stop), 2), "detail": detail})
+                continue
+
+            # Not held — a market BUY, with an OTO protective stop when attach_stop is on.
+            if o["est_value"] > max_allowed:
+                results.append({**o, "status": "skipped",
+                                "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
+                continue
+            if attach_stop:
+                if not stop_is_valid(stop, o["price"]):
+                    results.append({**o, "status": "skipped",
+                                    "detail": "stop not below entry — fix stop or turn off "
+                                              "Attach stop"})
+                    continue
+                req = MarketOrderRequest(
+                    symbol=t, qty=o["shares"], side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY, order_class=OrderClass.OTO,
+                    stop_loss=StopLossRequest(stop_price=round(float(stop), 2)),
+                    client_order_id=f"SEPAoto-{t}-{int(time.time() * 1000)}")
+                detail_head = f"buy {o['shares']} + stop @ {stop:.2f}"
+            else:
+                req = MarketOrderRequest(
+                    symbol=t, qty=o["shares"], side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY,
+                    client_order_id=f"SEPAcockpit-{t}-{int(time.time() * 1000)}")
+                detail_head = f"buy {o['shares']} (no stop)"
             resp = client.submit_order(order_data=req)
             results.append({**o, "status": "submitted",
-                            "detail": f"order id {getattr(resp, 'id', '?')}"})
+                            "detail": f"{detail_head} (id {getattr(resp, 'id', '?')})"})
         except Exception as e:                          # one bad symbol shouldn't abort the rest
             results.append({**o, "status": "failed", "detail": str(e)})
 

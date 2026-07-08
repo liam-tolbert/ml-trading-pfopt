@@ -257,12 +257,13 @@ def test_build_buy_plan_sizing_modes():
     import pandas as pd
     from src.stock_screener.cockpit.trade import build_buy_plan, MIN_TRADE_USD
 
-    def _payload(price, pivot):
+    def _payload(price, pivot, stop=None):
         idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
         df = pd.DataFrame({"Open": price, "High": price, "Low": price,
                            "Close": price, "Volume": 1000}, index=idx)
-        return {"df": df, "levels": {"pivot": pivot,
-                                     "buy_zone": (pivot, pivot * 1.05)}}
+        lv = {"pivot": pivot, "buy_zone": (pivot, pivot * 1.05),
+              "stop": round(pivot * 0.925, 2) if stop is None else stop}
+        return {"df": df, "levels": lv}
 
     pl = {"AAA": _payload(100.0, 100.0),        # in zone
           "BBB": _payload(110.0, 100.0)}        # extended (110 > 100*1.05)
@@ -273,6 +274,7 @@ def test_build_buy_plan_sizing_modes():
     assert by["AAA"]["shares"] == int(5000 / 100)              # 50
     assert by["BBB"]["shares"] == int(5000 / 110)              # 45
     assert by["AAA"]["extended"] is False and by["BBB"]["extended"] is True
+    assert by["AAA"]["stop_price"] == round(100.0 * 0.925, 2)  # computed stop carried through
 
     # % mode with no equity available -> every name skipped with a clear reason
     p_noeq, s_noeq = build_buy_plan(["AAA"], pl, mode="pct", amount=5.0, equity=None)
@@ -301,6 +303,174 @@ def test_build_buy_plan_sizing_modes():
         raise AssertionError("expected ValueError for unknown mode")
     except ValueError:
         pass
+
+
+def test_stop_is_valid():
+    """A protective sell-stop is valid only strictly below the reference price."""
+    from src.stock_screener.cockpit.trade import stop_is_valid
+    assert stop_is_valid(92.0, 100.0) is True
+    for bad in [(100.0, 100.0), (101.0, 100.0), (0.0, 100.0), (None, 100.0), (50.0, None)]:
+        assert stop_is_valid(*bad) is False, bad
+
+
+def test_build_buy_plan_attaches_stop():
+    """build_buy_plan carries the app-computed stop as stop_price, or None when absent/0."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan
+
+    def _payload(price, pivot, stop):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        lv = {"pivot": pivot, "buy_zone": (pivot, pivot * 1.05)}
+        if stop is not None:
+            lv["stop"] = stop
+        return {"df": df, "levels": lv}
+
+    pl = {"AAA": _payload(100.0, 100.0, 92.5),      # has a stop
+          "BBB": _payload(100.0, 100.0, None),      # no stop key in levels
+          "CCC": _payload(100.0, 100.0, 0.0)}       # zero -> invalid, becomes None
+    plan, _ = build_buy_plan(["AAA", "BBB", "CCC"], pl, mode="shares", amount=5)
+    by = {o["ticker"]: o for o in plan}
+    assert by["AAA"]["stop_price"] == 92.5
+    assert by["BBB"]["stop_price"] is None
+    assert by["CCC"]["stop_price"] is None
+
+
+def test_submit_buy_plan_stop_logic():
+    """submit_buy_plan against a fake Alpaca client: an already-held name becomes a stop-only
+    order that REPLACES its open stop; a fresh name becomes an OTO buy+stop; attach_stop=False
+    yields a naked buy (and skips held names); an invalid stop (>= price) is skipped, no order."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
+    from alpaca.trading.enums import OrderSide, OrderClass, OrderType
+
+    class _Acct:
+        equity = "100000"; cash = "100000"; account_number = "PA000123"
+
+    class _Pos:
+        def __init__(self, symbol, qty):
+            self.symbol, self.qty = symbol, qty
+
+    class _Asset:
+        tradable = True
+
+    class _Order:
+        def __init__(self, oid, symbol, otype):
+            self.id, self.symbol, self.type = oid, symbol, otype
+            self.side = OrderSide.SELL
+
+    class _Resp:
+        def __init__(self, oid):
+            self.id = oid
+
+    class FakeClient:
+        def __init__(self, positions=None, open_orders=None):
+            self._positions = positions or {}       # {sym: qty_str}
+            self._open = open_orders or {}          # {sym: [_Order, ...]}
+            self.submitted, self.cancelled, self._n = [], [], 0
+
+        def get_account(self):
+            return _Acct()
+
+        def get_all_positions(self):
+            return [_Pos(s, q) for s, q in self._positions.items()]
+
+        def get_asset(self, t):
+            return _Asset()
+
+        def get_orders(self, filter=None):
+            out = []
+            for s in (getattr(filter, "symbols", None) or []):
+                out.extend(self._open.get(s, []))
+            return out
+
+        def cancel_order_by_id(self, oid):
+            self.cancelled.append(str(oid))
+
+        def submit_order(self, order_data=None):
+            self.submitted.append(order_data)
+            self._n += 1
+            return _Resp(f"id-{self._n}")
+
+    def _entry(t, shares, price, stop):
+        return {"ticker": t, "shares": shares, "price": price, "pivot": price,
+                "est_value": round(shares * price, 2), "extended": False, "stop_price": stop}
+
+    def _run(plan, attach, fake):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (fake, True)
+        try:
+            return trade.submit_buy_plan(plan, attach_stop=attach)
+        finally:
+            trade._connect_paper = orig
+
+    # --- A: held name (40 sh, has an open stop) + a fresh name, attach on -----------------
+    fa = FakeClient(positions={"HELD": "40"},
+                    open_orders={"HELD": [_Order("old-1", "HELD", OrderType.STOP)]})
+    outA = {r["ticker"]: r for r in
+            _run([_entry("HELD", 10, 100.0, 95.0), _entry("NEW", 5, 50.0, 46.0)], True, fa)["results"]}
+    assert outA["HELD"]["status"] == "stop_only"
+    assert "old-1" in fa.cancelled                       # replaced the existing stop
+    sreq = [r for r in fa.submitted if isinstance(r, StopOrderRequest)][0]
+    assert sreq.symbol == "HELD" and int(sreq.qty) == 40 and sreq.side == OrderSide.SELL
+    assert float(sreq.stop_price) == 95.0                # full held qty, at the edited stop
+    assert outA["NEW"]["status"] == "submitted"
+    mreq = [r for r in fa.submitted if isinstance(r, MarketOrderRequest)][0]
+    assert mreq.order_class == OrderClass.OTO and mreq.side == OrderSide.BUY
+    assert int(mreq.qty) == 5 and float(mreq.stop_loss.stop_price) == 46.0
+
+    # --- B: attach OFF -> naked buy for a fresh name; held name skipped -------------------
+    fb = FakeClient()
+    outB = _run([_entry("NEW", 5, 50.0, 46.0)], False, fb)["results"][0]
+    assert outB["status"] == "submitted"
+    mb = [r for r in fb.submitted if isinstance(r, MarketOrderRequest)][0]
+    assert mb.order_class is None and mb.client_order_id.startswith("SEPAcockpit-")
+
+    fb2 = FakeClient(positions={"HELD": "40"})
+    outB2 = _run([_entry("HELD", 10, 100.0, 95.0)], False, fb2)["results"][0]
+    assert outB2["status"] == "skipped" and not fb2.submitted
+
+    # --- C: invalid stop (>= price), fresh name, attach on -> skipped, nothing submitted --
+    fc = FakeClient()
+    outC = _run([_entry("NEW", 5, 50.0, 55.0)], True, fc)["results"][0]
+    assert outC["status"] == "skipped" and not fc.submitted
+
+
+def test_trade_plan_preview_renders_stop_controls():
+    """With a trade plan seeded in session_state, the paper-trade preview renders the new
+    attach-stop toggle and a per-ticker editable stop number_input (keyed by the build nonce),
+    without raising — exercises the preview loop + stop_is_valid call path in app.py."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_plan_preview_renders_stop_controls (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with patch.object(scanmod, "run_scan", return_value=result):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = ["AAA"]          # non-empty -> trade section renders
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": [{"ticker": "AAA", "shares": 10, "price": 100.0, "pivot": 100.0,
+                      "est_value": 1000.0, "extended": False, "stop_price": 92.5}],
+            "skipped": [],
+            "account": {"account_number": "PA000123", "equity": 100000.0,
+                        "using_dedicated": True},
+            "build_ts": 1}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+
+    stops = [n for n in at.number_input if n.key == "stop_AAA_1"]
+    assert stops, "per-ticker stop number_input did not render"
+    assert stops[0].value == 92.5, f"stop should default to computed value, got {stops[0].value}"
 
 
 def test_sepa_guide_page_renders():

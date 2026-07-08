@@ -24,7 +24,7 @@ from src.stock_screener.cockpit.export import (  # noqa: E402
     parse_ticker_list, watchlist_list_csv, watchlist_ohlcv_csv)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
-    TradeUnavailable, build_buy_plan, fetch_account_summary, submit_buy_plan)
+    TradeUnavailable, build_buy_plan, fetch_account_summary, stop_is_valid, submit_buy_plan)
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
@@ -472,8 +472,13 @@ with st.sidebar:
                 _account = {"error": str(_e)}
             _plan, _skip = build_buy_plan(_watch, res.payloads, mode=_mode,
                                           amount=_amount, equity=_account.get("equity"))
+            # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a
+            # fresh Build re-seeds each stop to its computed default instead of Streamlit
+            # retaining a stale edited value from the previous plan.
+            _bn = st.session_state.get("trade_build_n", 0) + 1
+            st.session_state["trade_build_n"] = _bn
             st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
-                                              "account": _account}
+                                              "account": _account, "build_ts": _bn}
             st.session_state.pop("trade_result", None)
 
         _tp = st.session_state.get("trade_plan")
@@ -481,11 +486,31 @@ with st.sidebar:
             _plan, _skip = _tp["plan"], _tp["skipped"]
             if _plan:
                 _tot = sum(o["est_value"] for o in _plan)
-                st.caption(f"**{len(_plan)} BUY order(s)** · ~${_tot:,.0f} est.")
+                st.caption(f"**{len(_plan)} order(s)** · ~${_tot:,.0f} est.")
+                # Master switch: attach a protective sell-stop to each order. When off, buys go
+                # in naked and already-held names are skipped (no buy, no stop).
+                _attach = st.toggle(
+                    "Attach protective stop (sell-all, DAY)", value=True,
+                    key="trade_attach_stop",
+                    help="Places a stop-loss under each buy via an OTO order. If a name is "
+                         "already held, no buy is sent — only a fresh DAY stop that replaces "
+                         "any open stop on it. Edit each stop below (defaults to the "
+                         "app-computed stop).")
+                _nonce = _tp.get("build_ts")
                 for _o in _plan:
+                    _t = _o["ticker"]
                     _fl = " ⚠︎ extended" if _o["extended"] else ""
-                    st.caption(f"• **{_o['ticker']}** {_o['shares']} sh @ "
-                               f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}")
+                    _cA, _cB = st.columns([3, 2])
+                    _cA.caption(f"• **{_t}** {_o['shares']} sh @ "
+                                f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}")
+                    _cB.number_input(
+                        f"stop {_t}", min_value=0.0,
+                        value=float(_o["stop_price"]) if _o["stop_price"] else 0.0,
+                        step=0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
+                        label_visibility="collapsed", disabled=not _attach)
+                    if _attach and not stop_is_valid(
+                            st.session_state.get(f"stop_{_t}_{_nonce}"), _o["price"]):
+                        _cB.caption(":red[stop must be < price]")
                 if any(_o["extended"] for _o in _plan):
                     st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
                                "the real risk to your stop is larger.")
@@ -502,9 +527,13 @@ with st.sidebar:
                 _c1, _c2 = st.columns(2)
                 if _c1.button("✅ Submit (paper)", key="trade_submit",
                               type="primary", width="stretch"):
+                    # Merge each ticker's edited stop (session_state) into the plan entries.
+                    _final = [{**_o, "stop_price": st.session_state.get(
+                        f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"])} for _o in _plan]
                     with st.spinner("Submitting to Alpaca paper…"):
                         try:
-                            st.session_state["trade_result"] = submit_buy_plan(_plan)
+                            st.session_state["trade_result"] = submit_buy_plan(
+                                _final, attach_stop=_attach)
                         except TradeUnavailable as _e:
                             st.session_state["trade_result"] = {"error": str(_e)}
                     st.session_state.pop("trade_plan", None)
@@ -523,12 +552,13 @@ with st.sidebar:
             if _tr.get("error"):
                 st.error(f"Trade failed: {_tr['error']}")
             else:
-                _sub = [r for r in _tr["results"] if r["status"] == "submitted"]
-                st.success(f"Submitted {len(_sub)}/{len(_tr['results'])} order(s) to "
+                _act = [r for r in _tr["results"]
+                        if r["status"] in ("submitted", "stop_only")]
+                st.success(f"Actioned {len(_act)}/{len(_tr['results'])} order(s) on "
                            f"account …{str(_tr['account_number'])[-4:]} · "
                            f"equity ${_tr['equity']:,.0f}")
                 for _r in _tr["results"]:
-                    _ic = {"submitted": "✅", "skipped": "—",
+                    _ic = {"submitted": "✅", "stop_only": "🛑", "skipped": "—",
                            "failed": "⚠️"}.get(_r["status"], "•")
                     st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
