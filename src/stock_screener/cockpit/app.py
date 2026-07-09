@@ -801,6 +801,14 @@ with st.container(border=True):
     r2 = st.columns(2)
     r2[0].metric("Target", _usd(lv.get("target")), border=True)
     r2[1].metric("To pivot", pct_s, border=True)
+    # Risk from the pivot (buy point) to the stop — Minervini's 7-8% ideal / 10% hard max.
+    spp = lv.get("stop_pct_from_pivot")
+    if spp is not None:
+        _clamp = (" — capped at the 10% max (logical support sat lower; a base needing a wider "
+                  "stop is too loose to risk more than 10%)" if lv.get("stop_clamped") else "")
+        _mark = "✅" if spp <= 8.0 + 1e-9 else "⚠️"
+        st.caption(f"{_mark} Risk pivot → stop: **{spp:.1f}%** "
+                   f"(Minervini: 7–8% ideal, 10% hard max){_clamp}")
 
     # Step 4 has two OPPOSITE states, one after the other in time. The SAME two axes —
     # volume and volatility — flip from quiet to loud:

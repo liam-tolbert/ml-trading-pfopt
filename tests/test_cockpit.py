@@ -201,6 +201,34 @@ def test_earnings_date_plumbing():
     assert plan and plan[0]["earnings_in"] == 5
 
 
+def test_entry_levels_stop_clamped_to_pivot():
+    """The advisory stop is floored at 10% below the pivot (Minervini's hard max): a looser
+    engine stop is clamped up and flagged, a tighter one is kept, and the no-stop default is
+    7.5% below the pivot."""
+    bo = {"breakout_level": 100.0, "is_breakout": False, "volume_ratio": 1.0,
+          "volume_confirmed": False}
+    ph = {"week_52_high": 100.0}
+
+    # loose engine stop (20% below the pivot) -> clamped up to 90.0 (10% below), flagged
+    loose = scan_mod._entry_levels(95.0, bo, 80.0, ph)
+    assert loose["stop"] == 90.0 and loose["stop_clamped"] is True
+    assert abs(loose["stop_pct_from_pivot"] - 10.0) < 1e-9
+
+    # in-range stop (7% below) -> kept, not flagged
+    ok = scan_mod._entry_levels(99.0, bo, 93.0, ph)
+    assert ok["stop"] == 93.0 and ok["stop_clamped"] is False
+    assert abs(ok["stop_pct_from_pivot"] - 7.0) < 1e-9
+
+    # tighter stop (3% below) -> kept as-is; the clamp only bounds the loose side
+    tight = scan_mod._entry_levels(99.0, bo, 97.0, ph)
+    assert tight["stop"] == 97.0 and tight["stop_clamped"] is False
+
+    # no/invalid engine stop -> 7.5%-below-pivot default, within the max, not flagged
+    default = scan_mod._entry_levels(99.0, bo, None, ph)
+    assert default["stop"] == 92.5 and default["stop_clamped"] is False
+    assert default["stop"] < default["pivot"]               # never at/above the pivot
+
+
 def test_streamlit_app_renders_offline():
     """Execute app.py through Streamlit's AppTest with run_scan patched to a real,
     offline ScanResult (synthetic fixture). Verifies the whole UI render path —

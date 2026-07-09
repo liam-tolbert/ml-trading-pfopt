@@ -36,6 +36,11 @@ from .indicators import (relative_measured_volatility,
 # uptrends → cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
 from .vcp import detect_vcp
 
+# Minervini's stop is measured from the BUY POINT (pivot): 7-8% ideal, 10% hard max. The
+# advisory stop is floored this far below the pivot so a current-price-anchored engine stop
+# can't drift past the max-loss rule (see _entry_levels).
+MAX_STOP_FROM_PIVOT = 0.10
+
 
 @dataclass
 class ScanConfig:
@@ -110,17 +115,30 @@ def _days_to_earnings(f: Optional[dict],
 
 def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
                   phase_info: dict) -> dict:
-    """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else
-    the 52-week high (the line a breakout would clear)."""
+    """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else the
+    52-week high (the line a breakout would clear).
+
+    The stop is measured from the PIVOT (the intended buy point): Minervini's 7-8% ideal with a
+    10% hard max. The engine's ``calculate_stop_loss`` anchors to the *current* price and to
+    swing-low/50-SMA support, which — for a name still below its pivot — can sit well past 10%
+    below the pivot. We floor the advisory stop at ``MAX_STOP_FROM_PIVOT`` below the pivot so the
+    max-loss rule holds regardless (a tighter engine stop is kept as-is; ``stop_clamped`` records
+    whether the floor bound). This only tightens the advisory number — it never moves a real
+    order on its own."""
     pivot = breakout.get("breakout_level")
     if not pivot or pivot <= 0:
         pivot = phase_info.get("week_52_high") or cp
-    stop_price = stop if (stop and stop > 0 and stop < pivot) else pivot * 0.925
+    raw_stop = stop if (stop and stop > 0 and stop < pivot) else pivot * 0.925
+    floor = pivot * (1.0 - MAX_STOP_FROM_PIVOT)             # 10% below pivot = the hard max
+    stop_price = max(raw_stop, floor)
+    stop_clamped = raw_stop < floor
     pct_to_pivot = ((pivot - cp) / cp * 100.0) if cp else None
     return {
         "pivot": float(pivot),
         "buy_zone": (float(pivot), float(pivot) * 1.05),   # no chasing > +5%
-        "stop": float(stop_price),                          # ~7-8% below pivot
+        "stop": float(stop_price),                          # 7-8% below pivot, 10% hard floor
+        "stop_pct_from_pivot": ((pivot - stop_price) / pivot * 100.0) if pivot else None,
+        "stop_clamped": bool(stop_clamped),
         "target": float(pivot) * 1.225,                     # ~20-25% objective
         "breakout_today": bool(breakout.get("is_breakout")),
         "volume_ratio": float(breakout.get("volume_ratio", 1.0) or 1.0),
