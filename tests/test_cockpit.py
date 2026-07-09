@@ -656,6 +656,244 @@ def test_sepa_guide_page_renders():
         "guide page rendered no SEPA markdown"
 
 
+# --------------------------------------------------------------------------- #
+# Positions page (stop management)
+# --------------------------------------------------------------------------- #
+def _pos_fakes():
+    """Build (Client, _Pos, _Order) fakes for the positions/re-arm tests. The Client's
+    get_orders honors filter.symbols=None -> ALL open orders (the batched query rearm/fetch use);
+    _Pos carries the alpaca-py Position P&L attrs; _Order carries symbol/type/stop_price."""
+    from alpaca.trading.enums import OrderSide, OrderType
+
+    class _Acct:
+        equity = "50000"; cash = "10000"; account_number = "PA00SZOE"
+
+    class _Pos:
+        def __init__(self, symbol, qty, **kw):
+            self.symbol, self.qty = symbol, str(qty)
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    class _Order:
+        def __init__(self, oid, symbol, stop_price, otype=None):
+            self.id, self.symbol = oid, symbol
+            self.type = otype or OrderType.STOP
+            self.stop_price, self.side = stop_price, OrderSide.SELL
+
+    class _Resp:
+        def __init__(self, oid):
+            self.id = oid
+
+    class Client:
+        def __init__(self, positions, open_orders=None):
+            self._positions = positions
+            self._open = open_orders or {}
+            self.submitted, self.cancelled, self._n = [], [], 0
+
+        def get_account(self):
+            return _Acct()
+
+        def get_all_positions(self):
+            return list(self._positions)
+
+        def get_orders(self, filter=None):
+            syms = getattr(filter, "symbols", None)
+            out = []
+            if syms:
+                for s in syms:
+                    out.extend(self._open.get(s, []))
+            else:                                     # batched query: every open order
+                for lst in self._open.values():
+                    out.extend(lst)
+            return out
+
+        def cancel_order_by_id(self, oid):
+            self.cancelled.append(str(oid))
+
+        def submit_order(self, order_data=None):
+            self.submitted.append(order_data)
+            self._n += 1
+            return _Resp(f"id-{self._n}")
+
+    return Client, _Pos, _Order
+
+
+def test_rearm_gtc_stop_ratchet():
+    """rearm_stops drives the SHARED _rearm_gtc_stop helper: an existing higher stop is kept
+    (no order), a lower one is raised (cancel old + GTC at the new level), an equal one is kept,
+    a first-arm places a GTC stop, and a not-held ticker is skipped. Proves the extracted helper
+    preserves the ratchet semantics for the new caller."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.requests import StopOrderRequest
+    from alpaca.trading.enums import TimeInForce
+    Client, _Pos, _Order = _pos_fakes()
+
+    def run(client):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (client, True)
+        try:
+            return trade.rearm_stops([
+                {"ticker": "HELD", "stop_price": 95.0, "price": 100.0},
+                {"ticker": "NOPE", "stop_price": 40.0, "price": 50.0},   # not in the account
+            ])
+        finally:
+            trade._connect_paper = orig
+
+    # existing HIGHER stop (98) -> kept; NOPE not held -> skipped
+    c1 = Client([_Pos("HELD", 40)], {"HELD": [_Order("hi", "HELD", 98.0)]})
+    r1 = {x["ticker"]: x for x in run(c1)["results"]}
+    assert r1["HELD"]["status"] == "stop_kept" and r1["HELD"]["stop_price"] == 98.0
+    assert not c1.submitted and not c1.cancelled
+    assert r1["NOPE"]["status"] == "skipped"
+
+    # existing LOWER stop (90) -> raise: cancel old, place GTC at 95
+    c2 = Client([_Pos("HELD", 40)], {"HELD": [_Order("lo", "HELD", 90.0)]})
+    r2 = {x["ticker"]: x for x in run(c2)["results"]}
+    assert r2["HELD"]["status"] == "stop_only" and r2["HELD"]["stop_price"] == 95.0
+    assert "lo" in c2.cancelled
+    sreq = [o for o in c2.submitted if isinstance(o, StopOrderRequest)][0]
+    assert int(sreq.qty) == 40 and float(sreq.stop_price) == 95.0
+    assert sreq.time_in_force == TimeInForce.GTC
+
+    # existing EQUAL stop (95) -> kept, no churn
+    c3 = Client([_Pos("HELD", 40)], {"HELD": [_Order("eq", "HELD", 95.0)]})
+    r3 = {x["ticker"]: x for x in run(c3)["results"]}
+    assert r3["HELD"]["status"] == "stop_kept" and not c3.submitted and not c3.cancelled
+
+    # NO existing stop -> first-arm a GTC stop at 95
+    c4 = Client([_Pos("HELD", 40)], {})
+    r4 = {x["ticker"]: x for x in run(c4)["results"]}
+    assert r4["HELD"]["status"] == "stop_only" and r4["HELD"]["stop_price"] == 95.0
+
+
+def test_fetch_positions_offline():
+    """fetch_positions enriches Alpaca holdings with P&L, the in-force stop, 50-day SMA and
+    advisories — against a fake client + an offline price feed (no network)."""
+    import pandas as pd
+    from src.stock_screener.cockpit import trade, data_feed
+    Client, _Pos, _Order = _pos_fakes()
+
+    def _frame(closes, vols=None):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-07-08"), periods=len(closes))
+        vols = vols if vols is not None else [1000] * len(closes)
+        return pd.DataFrame({"Open": closes, "High": closes, "Low": closes,
+                             "Close": closes, "Volume": vols}, index=idx)
+
+    rising = [100 + i * 0.5 for i in range(60)]                 # ends 129.5, SMA below -> not below
+    falling = [60 - i * 0.25 for i in range(60)]               # ends 45.25, SMA above -> below_sma50
+    frames = {"AAA": _frame(rising), "BBB": _frame(falling, vols=[1000] * 59 + [3000])}
+
+    positions = [
+        _Pos("AAA", 10, avg_entry_price=100.0, current_price=130.0, market_value=1300.0,
+             cost_basis=1000.0, unrealized_pl=300.0, unrealized_plpc=0.30, lastday_price=128.0),
+        _Pos("BBB", 5, avg_entry_price=50.0, current_price=45.0, market_value=225.0,
+             cost_basis=250.0, unrealized_pl=-25.0, unrealized_plpc=-0.10, lastday_price=46.0),
+    ]
+    client = Client(positions, {"AAA": [_Order("s1", "AAA", 120.0)]})   # AAA has a stop, BBB none
+
+    orig_conn, orig_gmp = trade._connect_paper, data_feed.get_many_prices
+    trade._connect_paper = lambda: (client, True)
+    data_feed.get_many_prices = lambda syms, **kw: frames
+    try:
+        out = trade.fetch_positions()
+    finally:
+        trade._connect_paper, data_feed.get_many_prices = orig_conn, orig_gmp
+
+    acct = out["account"]
+    assert acct["positions_count"] == 2
+    assert abs(acct["total_unrealized_pl"] - 275.0) < 1e-9      # 300 + (-25)
+    by = {p["symbol"]: p for p in out["positions"]}
+    assert by["AAA"]["current_stop"] == 120.0 and by["AAA"]["has_stop"] is True
+    assert abs(by["AAA"]["gain_pct"] - 0.30) < 1e-9
+    assert by["AAA"]["sma_50"] is not None and by["AAA"]["below_sma50"] is False
+    assert by["BBB"]["has_stop"] is False
+    assert by["BBB"]["below_sma50"] is True                     # last close under its 50-day SMA
+    assert any("No protective stop" in a for a in by["BBB"]["advisories"])
+    assert any("50-day SMA" in a for a in by["BBB"]["advisories"])
+
+
+def test_suggest_stop():
+    """suggest_stop: each basis + auto selection by gain; floors at the in-force stop and (once
+    working) at breakeven; returns None when the result isn't below price (underwater)."""
+    from src.stock_screener.cockpit.trade import suggest_stop, INITIAL_STOP_PCT
+
+    # explicit bases
+    assert suggest_stop(avg_entry=100, current_price=130, sma_50=115, current_stop=None,
+                        gain_pct=0.30, basis="initial")[0] == round(100 * (1 - INITIAL_STOP_PCT), 2)
+    assert suggest_stop(avg_entry=100, current_price=130, sma_50=115, current_stop=None,
+                        gain_pct=0.30, basis="sma50")[0] == round(115 * 0.99, 2)
+
+    # auto picks by stage: fresh -> initial, working -> breakeven, well-in-profit -> sma50
+    assert suggest_stop(avg_entry=100, current_price=103, sma_50=98, current_stop=None,
+                        gain_pct=0.03, basis="auto")[1] == "initial"
+    assert suggest_stop(avg_entry=100, current_price=118, sma_50=110, current_stop=None,
+                        gain_pct=0.18, basis="auto")[1] == "breakeven"
+    assert suggest_stop(avg_entry=100, current_price=125, sma_50=115, current_stop=None,
+                        gain_pct=0.25, basis="auto")[1] == "sma50"
+
+    # never below the in-force stop
+    val, _ = suggest_stop(avg_entry=100, current_price=125, sma_50=90, current_stop=118,
+                          gain_pct=0.25, basis="sma50")
+    assert val == 118.0
+
+    # underwater / result not below price -> None (manual row)
+    val2, _ = suggest_stop(avg_entry=100, current_price=90, sma_50=None, current_stop=None,
+                           gain_pct=-0.10, basis="initial")
+    assert val2 is None
+
+
+def test_position_advisories():
+    """position_advisories emits exactly the four Minervini exit strings when applicable, and
+    nothing for a healthy, protected, sub-target position."""
+    from src.stock_screener.cockpit.trade import position_advisories
+
+    flagged = position_advisories({"has_stop": False, "gain_pct": 0.22, "below_sma50": True,
+                                   "volume_ratio": 1.8, "avg_entry": 100.0, "current_stop": None})
+    joined = " | ".join(flagged)
+    assert "No protective stop" in joined
+    assert "selling part into strength" in joined
+    assert "50-day SMA on heavy volume" in joined
+    assert "breakeven" in joined
+
+    clean = position_advisories({"has_stop": True, "gain_pct": 0.05, "below_sma50": False,
+                                 "volume_ratio": 1.0, "avg_entry": 100.0, "current_stop": 96.0})
+    assert clean == []
+
+
+def test_positions_page_renders():
+    """The Positions page loads and renders with an offline (patched) fetch_positions — no
+    network, no re-arm click (covered by the rearm unit test)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_positions_page_renders (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import trade
+
+    offline = {
+        "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
+                    "using_dedicated": True, "positions_count": 1, "total_unrealized_pl": 300.0},
+        "positions": [{
+            "symbol": "AAA", "qty": 10, "avg_entry": 100.0, "current_price": 130.0,
+            "market_value": 1300.0, "cost_basis": 1000.0, "unrealized_pl": 300.0,
+            "unrealized_plpc": 0.30, "lastday_price": 128.0, "current_stop": 120.0,
+            "has_stop": True, "sma_50": 115.0, "last_close": 130.0, "volume_ratio": 1.1,
+            "gain_pct": 0.30, "below_sma50": False,
+            "advisories": ["Up 30% — consider selling part into strength."],
+        }],
+    }
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
+    with patch.object(trade, "fetch_positions", return_value=offline):
+        at = AppTest.from_file(page, default_timeout=60)
+        at.run()
+    assert not at.exception, f"positions page raised: {at.exception}"
+    # The re-arm button only renders after the positions loop, so its presence proves the page
+    # rendered end-to-end with the offline holding (and didn't st.stop() early).
+    assert any("Re-arm" in str(getattr(b, "label", "")) for b in at.button), \
+        "positions page did not render the re-arm control"
+
+
 def test_get_universe_full_us_offline():
     """full_us branch: mocked nasdaqtrader payloads -> many normalized common-stock
     symbols with ETFs / test issues / warrants / dotted class shares filtered out, and

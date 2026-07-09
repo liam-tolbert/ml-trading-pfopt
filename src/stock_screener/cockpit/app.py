@@ -362,6 +362,11 @@ st.sidebar.caption("Mechanical Steps 1-2; you judge Steps 3-4.")
 st.sidebar.markdown(
     '<a href="SEPA_Guide" target="_blank">📖 Full SEPA method guide ↗</a>',
     unsafe_allow_html=True)
+# Positions / stop-management page (slug from `2_Positions.py`). Opens in a new tab like the
+# guide; the page loads its own account data, independent of this page's scan.
+st.sidebar.markdown(
+    '<a href="Positions" target="_blank">📊 Positions / stops ↗</a>',
+    unsafe_allow_html=True)
 with st.sidebar.popover("ℹ️ How to use this tool"):
     st.markdown(
         "1. **Check the market environment** banner — only push in a healthy tape.\n"
