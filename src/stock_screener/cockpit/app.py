@@ -457,13 +457,16 @@ with st.sidebar:
         # --- Paper-trade the watchlist via Alpaca (paper account only) --------------- #
         st.markdown("---")
         st.markdown("**⚡ Paper trade (Alpaca)**")
-        # How to size EACH name's market BUY — % of portfolio, raw $, or raw share count.
+        # How to size EACH name's market BUY — % of portfolio, raw $, raw share count, or
+        # risk-to-stop (Minervini's sizer).
         _mode_label = st.selectbox(
-            "Size each buy by", ["% of portfolio", "$ per name", "# shares"],
+            "Size each buy by", ["% of portfolio", "$ per name", "# shares", "Risk % to stop"],
             key="trade_mode",
-            help="Applied to EACH watchlisted name. '% of portfolio' = that % of your "
-                 "Alpaca equity per name; '$ per name' = that many dollars each; "
-                 "'# shares' = exactly that many shares each.")
+            help="Applied to EACH watchlisted name. '% of portfolio' = that % of your Alpaca "
+                 "equity per name; '$ per name' = that many dollars each; '# shares' = exactly "
+                 "that many shares each; 'Risk % to stop' = size so a stop-out costs that % of "
+                 "equity — shares = (equity × risk%) / (price − stop), Minervini's position "
+                 "sizer. Needs a stop on the name.")
         if _mode_label == "% of portfolio":
             _mode = "pct"
             _amount = st.number_input("% of equity per name", min_value=0.0, value=5.0,
@@ -474,11 +477,21 @@ with st.sidebar:
             _amount = st.number_input("$ per name", min_value=0.0, value=5000.0,
                                       step=500.0, key="trade_amt_dol")
             _size_note = f"~${_amount:,.0f} per name"
-        else:
+        elif _mode_label == "# shares":
             _mode = "shares"
             _amount = float(st.number_input("Shares per name", min_value=0, value=100,
                                             step=10, key="trade_amt_sh"))
             _size_note = f"{int(_amount)} shares per name"
+        else:                                    # Risk % to stop (Minervini position sizer)
+            _mode = "risk"
+            _amount = st.number_input("Risk % of equity per trade", min_value=0.0, value=1.0,
+                                      step=0.25, key="trade_amt_risk",
+                                      help="A stop-out costs about this % of equity. Note a "
+                                           "risk-sized position is roughly risk% ÷ stop-distance% "
+                                           "of equity — e.g. 1% risk with an 8% stop wants a "
+                                           "12.5% position, which the 10% single-order cap "
+                                           "clamps (realized risk then falls below target).")
+            _size_note = f"{_amount:.2f}% of equity risked to each stop"
         st.caption(f"Market BUYs: {_size_note}. Paper account only; whole shares, "
                    "each order still capped at 10% of equity.")
         if st.button("Build trade plan", key="trade_build", width="stretch"):
@@ -519,9 +532,12 @@ with st.sidebar:
                          "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
                          "below (defaults to the app-computed stop).")
                 _nonce = _tp.get("build_ts")
+                _eq = (_tp.get("account") or {}).get("equity")
                 for _o in _plan:
                     _t = _o["ticker"]
                     _fl = " ⚠︎ extended" if _o["extended"] else ""
+                    if _o.get("capped"):
+                        _fl += " ⚠︎ capped"
                     _ew = _earnings_flag(_o.get("earnings_in"))
                     _cA, _cB = st.columns([3, 2])
                     _cA.caption(f"• **{_t}** {_o['shares']} sh @ "
@@ -532,12 +548,22 @@ with st.sidebar:
                         value=float(_o["stop_price"]) if _o["stop_price"] else 0.0,
                         step=0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
                         label_visibility="collapsed", disabled=not _attach)
-                    if _attach and not stop_is_valid(
-                            st.session_state.get(f"stop_{_t}_{_nonce}"), _o["price"]):
+                    _edstop = st.session_state.get(f"stop_{_t}_{_nonce}", _o["stop_price"])
+                    if _attach and not stop_is_valid(_edstop, _o["price"]):
                         _cB.caption(":red[stop must be < price]")
+                    elif _attach and _eq and _edstop and _o["price"] > _edstop:
+                        # Live risk-to-stop for the CURRENT shares + (possibly edited) stop, so a
+                        # risk-sized position stays honest even after the stop is nudged (build
+                        # doesn't re-scale shares on an edit).
+                        _rusd = _o["shares"] * (_o["price"] - _edstop)
+                        _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
                 if any(_o["extended"] for _o in _plan):
                     st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
                                "the real risk to your stop is larger.")
+                if any(_o.get("capped") for _o in _plan):
+                    st.caption("⚠︎ *capped* = the risk-sized quantity hit the 10%-of-equity "
+                               "order cap and was clamped down, so the realized risk sits below "
+                               "your target. Lower the risk % or tighten the stop to fit.")
                 if any(_earnings_flag(_o.get("earnings_in")) for _o in _plan):
                     st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
                                f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "

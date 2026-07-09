@@ -1,11 +1,13 @@
 """Paper-trade the cockpit watchlist through Alpaca.
 
-Sizing matches the Step-4 position sizer exactly: for each name,
-``shares = floor((account $ × risk %) / (pivot − stop))`` — the same share count the
-sizer shows at the bottom of the page, using each name's own pivot and stop. Orders are
-plain market BUYs on the **paper** account (``alpaca_trader.connect()`` forces
-``paper=True``); the existing guardrails apply — a per-order floor of $50 and a cap of 10%
-of equity (an over-cap name is skipped, not fatal).
+Each name is sized by a chosen mode (see :func:`build_buy_plan`): a % of equity, a flat $
+amount, an explicit share count, or **risk-to-stop** —
+``shares = floor((equity × risk%) / (price − stop))``, Minervini's position sizer, so a
+stop-out costs ≈ risk% of the account (the idea the Step-4 panel shows, sized on the live
+fill price rather than the pivot). Orders are plain market BUYs on the **paper** account
+(``alpaca_trader.connect()`` forces ``paper=True``); the guardrails apply — a per-order
+floor of $50 (dollar-denominated modes) and a 10%-of-equity single-order cap (the risk mode
+clamps to it and flags ``capped``; the other modes skip an over-cap name — never fatal).
 
 The plan builder (:func:`build_buy_plan`) is pure and network-free so it's unit-tested;
 :func:`submit_buy_plan` is the thin side-effecting wrapper that talks to Alpaca and is
@@ -19,6 +21,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so the pure
                             # plan builder needn't import alpaca-py)
+MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-order cap as a
+                            # fraction of equity; the risk mode clamps to it (submit re-checks)
 
 # The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which
 # owns the shared ALPACA_API_KEY/SECRET pair). Each Alpaca paper account has its own key
@@ -100,7 +104,7 @@ def fetch_account_summary() -> dict:
     }
 
 
-SIZING_MODES = ("pct", "dollars", "shares")
+SIZING_MODES = ("pct", "dollars", "shares", "risk")
 
 
 def stop_is_valid(stop_price, price) -> bool:
@@ -120,19 +124,28 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
 
     * ``"pct"``     — ``amount`` % of the account ``equity`` per name (needs ``equity``);
     * ``"dollars"`` — ``amount`` dollars per name;
-    * ``"shares"``  — exactly ``amount`` (whole) shares per name.
+    * ``"shares"``  — exactly ``amount`` (whole) shares per name;
+    * ``"risk"``    — ``amount`` % of ``equity`` risked to the stop (needs ``equity`` + a stop):
+      ``shares = (equity × amount%) / (price − stop)`` — Minervini's position sizer, so a
+      stop-out costs ≈ ``amount``% of the account. Sized on the current price (the real fill),
+      not the pivot, so the risk figure is honest for the order actually sent.
 
     Returns ``(plan, skipped)``. Each plan entry has ticker / shares / price / pivot /
-    est_value / extended / stop_price; each skipped entry is ``{ticker, reason}``. A name is
-    skipped when it isn't in the current scan, has no current price, sizes to < 1 share, or
-    (for the two dollar-denominated modes) rounds to a notional under the $50 floor — the
-    ``"shares"`` mode is exempt from that floor since the count is explicit. ``extended`` flags
-    a price already above the no-chase buy zone (> pivot × 1.05); the caller surfaces it as a
-    warning rather than skipping. ``stop_price`` is the app-computed protective stop
-    (``levels["stop"]``, ~7-8% below pivot) or ``None`` if unavailable — the caller may edit it
-    before submit; it is never used for sizing here. ``earnings_in`` (calendar days to the next
-    scheduled report, from the scan payload; None = unknown) is carried through untouched so the
-    caller can warn about buying into an imminent report — advisory only, never a skip.
+    est_value / extended / stop_price / capped; each skipped entry is ``{ticker, reason}``. A
+    name is skipped when it isn't in the current scan, has no current price, sizes to < 1 share,
+    or (for every dollar-denominated mode — pct/dollars/risk) rounds to a notional under the $50
+    floor; the ``"shares"`` mode is exempt from that floor since the count is explicit. The
+    ``"risk"`` mode additionally skips a name with no stop, or a stop not below the price (a
+    non-positive risk-per-share). ``extended`` flags a price already above the no-chase buy zone
+    (> pivot × 1.05); the caller surfaces it as a warning rather than skipping. ``capped`` is
+    True only in ``"risk"`` mode when the risk-sized quantity would exceed the 10%-of-equity
+    single-order cap and was clamped down to it (so the realized risk falls BELOW the target —
+    the caller labels it); it's always False for the other modes. ``stop_price`` is the
+    app-computed protective stop (``levels["stop"]``, ~7-8% below pivot) or ``None`` if
+    unavailable — the caller may edit it before submit; note that editing it after build does
+    NOT re-scale a risk-sized quantity. ``earnings_in`` (calendar days to the next scheduled
+    report, from the scan payload; None = unknown) is carried through untouched so the caller
+    can warn about buying into an imminent report — advisory only, never a skip.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
@@ -151,6 +164,9 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             skipped.append({"ticker": t, "reason": "no current price"})
             continue
 
+        stop = lv.get("stop")            # read early — the risk mode sizes against it
+        capped = False
+
         if mode == "pct":
             if not equity or equity <= 0:
                 skipped.append({"ticker": t, "reason": "account equity unavailable"})
@@ -158,6 +174,23 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             shares = int((equity * amount / 100.0) / price)          # floor
         elif mode == "dollars":
             shares = int(amount / price)                             # floor
+        elif mode == "risk":
+            if not equity or equity <= 0:
+                skipped.append({"ticker": t, "reason": "account equity unavailable"})
+                continue
+            if not stop or stop <= 0:
+                skipped.append({"ticker": t, "reason": "no stop to risk-size against"})
+                continue
+            if stop >= price:
+                skipped.append({"ticker": t, "reason": "stop not below price — can't risk-size"})
+                continue
+            shares = int((equity * amount / 100.0) / (price - stop))  # floor
+            # Risk sizing yields position% ≈ risk% / stop-distance%, which routinely exceeds the
+            # 10% single-order cap (1% risk / 8% stop = 12.5%). Clamp to the cap rather than skip;
+            # the realized risk then sits below target and the caller flags it via ``capped``.
+            cap_shares = int(MAX_ORDER_PCT * equity / price)
+            if shares > cap_shares:
+                shares, capped = cap_shares, True
         else:                                                        # "shares"
             shares = int(amount)
 
@@ -172,12 +205,12 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
 
         bz = lv.get("buy_zone") or (None, None)
         pivot = bz[0]
-        stop = lv.get("stop")
         plan.append({
             "ticker": t, "shares": shares, "price": round(price, 2),
             "pivot": round(float(pivot), 2) if pivot else None,
             "est_value": round(est_value, 2),
             "extended": bool(bz[1] and price > bz[1]),
+            "capped": capped,
             "stop_price": round(float(stop), 2) if stop and stop > 0 else None,
             "earnings_in": payload.get("earnings_in"),
         })

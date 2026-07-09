@@ -329,11 +329,11 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
 
 def test_build_buy_plan_sizing_modes():
     """The paper-trade plan builder sizes each name by the chosen mode — % of equity,
-    $ per name, or an explicit share count — flags extended names, and skips ones that
-    round below 1 share, fall under the $50 floor (dollar modes only), lack equity for the
-    % mode, or aren't in the scan."""
+    $ per name, an explicit share count, or risk-to-stop — flags extended names, and skips
+    ones that round below 1 share, fall under the $50 floor (dollar modes only), lack equity
+    for the %/risk modes, or aren't in the scan."""
     import pandas as pd
-    from src.stock_screener.cockpit.trade import build_buy_plan, MIN_TRADE_USD
+    from src.stock_screener.cockpit.trade import build_buy_plan, MIN_TRADE_USD, MAX_ORDER_PCT
 
     def _payload(price, pivot, stop=None):
         idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
@@ -381,6 +381,33 @@ def test_build_buy_plan_sizing_modes():
         raise AssertionError("expected ValueError for unknown mode")
     except ValueError:
         pass
+
+    # --- risk mode: shares = (equity × risk%) / (price − stop), Minervini's sizer ----------
+    # price 100, stop 90 (10% away = $10/sh risk); 0.5% of $100k = $500 budget -> 50 sh.
+    # Notional $5,000 = 5% of equity, under the 10% cap -> not capped.
+    risk_ok = {"AAA": _payload(100.0, 100.0, stop=90.0)}
+    p_risk, _ = build_buy_plan(["AAA"], risk_ok, mode="risk", amount=0.5, equity=100_000.0)
+    assert p_risk[0]["shares"] == int(500 / 10)                # 50
+    assert p_risk[0]["capped"] is False
+    # real dollar risk to the stop is ~0.5% of equity, the whole point of the mode
+    assert abs(p_risk[0]["shares"] * (100.0 - 90.0) - 500.0) <= 100.0
+
+    # cap clamp: 1% risk with a 7.5% stop wants ~13.3% of equity -> clamped to the 10% cap.
+    risk_cap = {"AAA": _payload(100.0, 100.0)}                 # default stop 92.5 (7.5% away)
+    p_cap, _ = build_buy_plan(["AAA"], risk_cap, mode="risk", amount=1.0, equity=100_000.0)
+    assert p_cap[0]["capped"] is True
+    assert p_cap[0]["shares"] == int(MAX_ORDER_PCT * 100_000 / 100)   # 100 (the cap)
+    assert p_cap[0]["est_value"] <= MAX_ORDER_PCT * 100_000 + 1e-6
+
+    # risk mode skips: no equity, no stop, and a stop not below price
+    _, s_ne = build_buy_plan(["AAA"], risk_ok, mode="risk", amount=1.0, equity=None)
+    assert "equity" in s_ne[0]["reason"]
+    _, s_nostop = build_buy_plan(["AAA"], {"AAA": _payload(100.0, 100.0, stop=0.0)},
+                                 mode="risk", amount=1.0, equity=100_000.0)
+    assert "stop" in s_nostop[0]["reason"]
+    _, s_above = build_buy_plan(["AAA"], {"AAA": _payload(100.0, 100.0, stop=105.0)},
+                                mode="risk", amount=1.0, equity=100_000.0)
+    assert "below price" in s_above[0]["reason"]
 
 
 def test_stop_is_valid():
@@ -567,9 +594,13 @@ def test_trade_plan_preview_renders_stop_controls():
         at = AppTest.from_file(app_path, default_timeout=60)
         at.session_state["watchlist"] = ["AAA"]          # non-empty -> trade section renders
         at.session_state["trade_build_n"] = 1
+        at.session_state["trade_mode"] = "Risk % to stop"     # exercise the risk-mode UI branch
         at.session_state["trade_plan"] = {
-            "plan": [{"ticker": "AAA", "shares": 10, "price": 100.0, "pivot": 100.0,
-                      "est_value": 1000.0, "extended": False, "stop_price": 92.5}],
+            # capped=True exercises the ⚠︎ capped flag + footnote; the valid stop drives the
+            # live "risk to stop" caption.
+            "plan": [{"ticker": "AAA", "shares": 100, "price": 100.0, "pivot": 100.0,
+                      "est_value": 10000.0, "extended": False, "capped": True,
+                      "stop_price": 92.5, "earnings_in": None}],
             "skipped": [],
             "account": {"account_number": "PA000123", "equity": 100000.0,
                         "using_dedicated": True},
