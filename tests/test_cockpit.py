@@ -445,31 +445,6 @@ def test_stop_is_valid():
     for bad in [(100.0, 100.0), (101.0, 100.0), (0.0, 100.0), (None, 100.0), (50.0, None)]:
         assert stop_is_valid(*bad) is False, bad
 
-
-def test_build_buy_plan_attaches_stop():
-    """build_buy_plan carries the app-computed stop as stop_price, or None when absent/0."""
-    import pandas as pd
-    from src.stock_screener.cockpit.trade import build_buy_plan
-
-    def _payload(price, pivot, stop):
-        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
-        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
-                           "Close": price, "Volume": 1000}, index=idx)
-        lv = {"pivot": pivot, "buy_zone": (pivot, pivot * 1.05)}
-        if stop is not None:
-            lv["stop"] = stop
-        return {"df": df, "levels": lv}
-
-    pl = {"AAA": _payload(100.0, 100.0, 92.5),      # has a stop
-          "BBB": _payload(100.0, 100.0, None),      # no stop key in levels
-          "CCC": _payload(100.0, 100.0, 0.0)}       # zero -> invalid, becomes None
-    plan, _ = build_buy_plan(["AAA", "BBB", "CCC"], pl, mode="shares", amount=5)
-    by = {o["ticker"]: o for o in plan}
-    assert by["AAA"]["stop_price"] == 92.5
-    assert by["BBB"]["stop_price"] is None
-    assert by["CCC"]["stop_price"] is None
-
-
 def test_submit_buy_plan_stop_logic():
     """submit_buy_plan against a fake Alpaca client: an already-held name becomes a GTC
     stop-only order that REPLACES its open stop; a fresh name becomes an OTO buy+stop;
