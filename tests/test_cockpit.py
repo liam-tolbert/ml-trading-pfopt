@@ -416,12 +416,14 @@ def test_build_buy_plan_attaches_stop():
 
 
 def test_submit_buy_plan_stop_logic():
-    """submit_buy_plan against a fake Alpaca client: an already-held name becomes a stop-only
-    order that REPLACES its open stop; a fresh name becomes an OTO buy+stop; attach_stop=False
-    yields a naked buy (and skips held names); an invalid stop (>= price) is skipped, no order."""
+    """submit_buy_plan against a fake Alpaca client: an already-held name becomes a GTC
+    stop-only order that REPLACES its open stop; a fresh name becomes an OTO buy+stop;
+    attach_stop=False yields a naked buy (and skips held names); an invalid stop (>= price)
+    is skipped, no order. Cases D/E cover Minervini's never-lower-a-stop ratchet: an existing
+    HIGHER stop is kept (no order), a LOWER one is replaced upward."""
     from src.stock_screener.cockpit import trade
     from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
-    from alpaca.trading.enums import OrderSide, OrderClass, OrderType
+    from alpaca.trading.enums import OrderSide, OrderClass, OrderType, TimeInForce
 
     class _Acct:
         equity = "100000"; cash = "100000"; account_number = "PA000123"
@@ -434,9 +436,10 @@ def test_submit_buy_plan_stop_logic():
         tradable = True
 
     class _Order:
-        def __init__(self, oid, symbol, otype):
+        def __init__(self, oid, symbol, otype, stop_price=None):
             self.id, self.symbol, self.type = oid, symbol, otype
             self.side = OrderSide.SELL
+            self.stop_price = stop_price
 
     class _Resp:
         def __init__(self, oid):
@@ -483,7 +486,8 @@ def test_submit_buy_plan_stop_logic():
         finally:
             trade._connect_paper = orig
 
-    # --- A: held name (40 sh, has an open stop) + a fresh name, attach on -----------------
+    # --- A: held name (40 sh, open stop of UNKNOWN price) + a fresh name, attach on -------
+    # No readable stop_price -> can't ratchet -> replace with the new GTC stop.
     fa = FakeClient(positions={"HELD": "40"},
                     open_orders={"HELD": [_Order("old-1", "HELD", OrderType.STOP)]})
     outA = {r["ticker"]: r for r in
@@ -493,6 +497,7 @@ def test_submit_buy_plan_stop_logic():
     sreq = [r for r in fa.submitted if isinstance(r, StopOrderRequest)][0]
     assert sreq.symbol == "HELD" and int(sreq.qty) == 40 and sreq.side == OrderSide.SELL
     assert float(sreq.stop_price) == 95.0                # full held qty, at the edited stop
+    assert sreq.time_in_force == TimeInForce.GTC         # persistent, not DAY
     assert outA["NEW"]["status"] == "submitted"
     mreq = [r for r in fa.submitted if isinstance(r, MarketOrderRequest)][0]
     assert mreq.order_class == OrderClass.OTO and mreq.side == OrderSide.BUY
@@ -513,6 +518,32 @@ def test_submit_buy_plan_stop_logic():
     fc = FakeClient()
     outC = _run([_entry("NEW", 5, 50.0, 55.0)], True, fc)["results"][0]
     assert outC["status"] == "skipped" and not fc.submitted
+
+    # --- D: held name with an existing HIGHER stop -> ratchet HOLDS (kept, no order) -------
+    fd = FakeClient(positions={"HELD": "40"},
+                    open_orders={"HELD": [_Order("hi-1", "HELD", OrderType.STOP,
+                                                 stop_price=98.0)]})
+    outD = _run([_entry("HELD", 10, 100.0, 95.0)], True, fd)["results"][0]
+    assert outD["status"] == "stop_kept"
+    assert outD["stop_price"] == 98.0                    # kept the higher existing stop
+    assert not fd.submitted and not fd.cancelled         # nothing placed, nothing cancelled
+
+    # --- E: held name with an existing LOWER stop -> RAISE (cancel old, place GTC at new) --
+    fe = FakeClient(positions={"HELD": "40"},
+                    open_orders={"HELD": [_Order("lo-1", "HELD", OrderType.STOP,
+                                                 stop_price=90.0)]})
+    outE = _run([_entry("HELD", 10, 100.0, 95.0)], True, fe)["results"][0]
+    assert outE["status"] == "stop_only" and outE["stop_price"] == 95.0
+    assert "lo-1" in fe.cancelled                        # replaced the lower stop
+    ereq = [r for r in fe.submitted if isinstance(r, StopOrderRequest)][0]
+    assert float(ereq.stop_price) == 95.0 and ereq.time_in_force == TimeInForce.GTC
+
+    # --- F: held name, existing stop EQUAL to the new stop -> kept (no churn) --------------
+    ff = FakeClient(positions={"HELD": "40"},
+                    open_orders={"HELD": [_Order("eq-1", "HELD", OrderType.STOP,
+                                                 stop_price=95.0)]})
+    outF = _run([_entry("HELD", 10, 100.0, 95.0)], True, ff)["results"][0]
+    assert outF["status"] == "stop_kept" and not ff.submitted and not ff.cancelled
 
 
 def test_trade_plan_preview_renders_stop_controls():

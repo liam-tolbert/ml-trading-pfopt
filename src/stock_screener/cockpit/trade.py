@@ -184,28 +184,49 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     return plan, skipped
 
 
-def _cancel_open_sell_stops(client, ticker: str, *, GetOrdersRequest, QueryOrderStatus,
-                            OrderSide, OrderType) -> List[str]:
-    """Cancel this ticker's OPEN sell **stop** orders so a fresh one can replace them.
+def _open_sell_stops(client, ticker: str, *, GetOrdersRequest, QueryOrderStatus,
+                     OrderSide, OrderType) -> List:
+    """This ticker's OPEN sell **stop** orders (STOP / STOP_LIMIT / TRAILING_STOP).
 
-    Only STOP / STOP_LIMIT / TRAILING_STOP sells are cancelled — a manual limit sell is left
-    alone. Each cancel is independently guarded so one stuck order never blocks placing the new
-    stop. Alpaca returns a triggered OTO stop leg as its own top-level SELL order too, so this
-    flat query catches both standalone stops and prior OTO legs. Returns the cancelled ids.
+    A manual limit sell isn't a stop, so it's excluded. Alpaca surfaces a triggered OTO stop
+    leg as its own top-level SELL order too, so this flat query catches both standalone stops
+    and prior OTO legs. Returns the order objects (each carries a ``stop_price``) so the caller
+    can read the current stop level for the ratchet AND cancel them when raising.
     """
     stop_types = {OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
-    cancelled: List[str] = []
     try:
         opens = client.get_orders(filter=GetOrdersRequest(
             status=QueryOrderStatus.OPEN, side=OrderSide.SELL, symbols=[ticker]))
     except Exception:
-        return cancelled
+        return []
+    out = []
     for od in opens or []:
         if getattr(od, "symbol", None) != ticker:
             continue
         otype = getattr(od, "type", None) or getattr(od, "order_type", None)
-        if otype not in stop_types:
-            continue
+        if otype in stop_types:
+            out.append(od)
+    return out
+
+
+def _stop_price_of(order) -> Optional[float]:
+    """Best-effort read of an order's stop trigger price (alpaca-py ``Order.stop_price``) as a
+    float, or None if absent/unparseable. Real stops always carry one; None just means we
+    can't compare, so the caller falls back to replacing rather than ratcheting."""
+    v = getattr(order, "stop_price", None)
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cancel_orders(client, orders) -> List[str]:
+    """Cancel each order by id, independently guarded so one stuck order never blocks the rest.
+    Returns the cancelled ids."""
+    cancelled: List[str] = []
+    for od in orders or []:
         try:
             client.cancel_order_by_id(od.id)
             cancelled.append(str(getattr(od, "id", "?")))
@@ -221,17 +242,23 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
 
     Per name:
 
-    * **already held** in the account — no buy is sent; a DAY sell-stop for the WHOLE held
-      position is placed at ``stop_price``, first cancelling any open sell stop on it (replace).
-      Exempt from the $50 floor / 10%-cap since a protective stop is risk-reducing.
+    * **already held** in the account — no buy is sent; a **GTC** sell-stop protects the WHOLE
+      held position, managed as Minervini's one-way ratchet (never lower a stop, only raise it):
+      if no stop is open it's placed at ``stop_price``; if one already is, it's replaced only to
+      RAISE it — a would-be lower-or-equal stop is left untouched (result ``"stop_kept"``). GTC
+      so it persists across sessions instead of expiring each close. Exempt from the $50 floor /
+      10%-cap since a protective stop is risk-reducing.
     * **not held** — a market BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
       leg (the stop activates only after the buy fills, so it works even when the buy is queued
-      to the next open); without it, a plain market BUY.
+      to the next open). That OTO stop leg rides the market entry as a DAY order (Alpaca market
+      entries can't be GTC); it's promoted to a GTC ratcheted stop by the held-name path on the
+      next re-arm. Without ``attach_stop``, a plain market BUY.
 
     Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap (buys only).
     Returns ``{equity, cash, account_number, using_dedicated, results}`` where each result is
-    the plan entry plus a ``status`` ("submitted" / "stop_only" / "skipped" / "failed") and a
-    ``detail`` string. Raises :class:`TradeUnavailable` if alpaca-py or credentials are missing.
+    the plan entry plus a ``status`` ("submitted" / "stop_only" / "stop_kept" / "skipped" /
+    "failed") and a ``detail`` string. Raises :class:`TradeUnavailable` if alpaca-py or
+    credentials are missing.
     """
     client, using_dedicated = _connect_paper()          # paper=True enforced inside
     try:
@@ -263,30 +290,56 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
             continue
         try:
             if held_shares > 0:
-                # Already invested — (re)place a protective stop for the whole position, no buy.
+                # Already invested — manage a GTC protective stop for the whole position, no
+                # buy. Minervini's rule is a ONE-WAY RATCHET: never lower a stop, only raise it.
+                # A GTC stop persists across sessions, so we place it once and thereafter replace
+                # it only to move it UP. A re-arm that would compute a LOWER stop (e.g. the stock
+                # pulled back, dragging the recent-low/price-based stop down with it) is ignored,
+                # leaving the existing higher stop in force.
                 if not attach_stop:
                     results.append({**o, "status": "skipped",
                                     "detail": f"already held ({held_shares} sh); "
                                               "stop attach disabled"})
                     continue
-                if not stop_is_valid(stop, o["price"]):
-                    results.append({**o, "status": "skipped",
-                                    "detail": "no valid stop (must be > 0 and < current price)"})
-                    continue
-                cancelled = _cancel_open_sell_stops(
+                existing = _open_sell_stops(
                     client, t, GetOrdersRequest=GetOrdersRequest,
                     QueryOrderStatus=QueryOrderStatus, OrderSide=OrderSide, OrderType=OrderType)
+                prices = [p for p in (_stop_price_of(od) for od in existing) if p is not None]
+                cur = max(prices) if prices else None            # current stop level, if any
+                new_stop = round(float(stop), 2) if stop else None
+
+                if not stop_is_valid(new_stop, o["price"]):
+                    # New stop isn't below the price. If a valid stop is already in force the
+                    # position stays protected — keep it; otherwise there's nothing to place.
+                    if cur is not None:
+                        results.append({**o, "status": "stop_kept", "stop_price": cur,
+                                        "detail": f"kept existing stop @ {cur:.2f} "
+                                                  "(new stop not below price)"})
+                    else:
+                        results.append({**o, "status": "skipped",
+                                        "detail": "no valid stop (must be > 0 and < current price)"})
+                    continue
+
+                # Ratchet: only replace to RAISE the stop; a lower-or-equal one is kept.
+                if cur is not None and new_stop <= cur:
+                    results.append({**o, "status": "stop_kept", "stop_price": cur,
+                                    "detail": f"kept existing stop @ {cur:.2f} — "
+                                              f"not lowering to {new_stop:.2f}"})
+                    continue
+
+                _cancel_orders(client, existing)                 # replace the lower stop(s)
                 req = StopOrderRequest(
                     symbol=t, qty=held_shares, side=OrderSide.SELL,
-                    time_in_force=TimeInForce.DAY, stop_price=round(float(stop), 2),
+                    time_in_force=TimeInForce.GTC, stop_price=new_stop,
                     client_order_id=f"SEPAstop-{t}-{int(time.time() * 1000)}")
                 resp = client.submit_order(order_data=req)
-                detail = (f"stop-only: SELL {held_shares} @ {stop:.2f} "
+                verb = "raised" if cur is not None else "placed"
+                detail = (f"GTC stop {verb}: SELL {held_shares} @ {new_stop:.2f} "
                           f"(id {getattr(resp, 'id', '?')})")
-                if cancelled:
-                    detail += f"; replaced {len(cancelled)} open stop(s)"
+                if cur is not None:
+                    detail += f" (was {cur:.2f})"
                 results.append({**o, "status": "stop_only",
-                                "stop_price": round(float(stop), 2), "detail": detail})
+                                "stop_price": new_stop, "detail": detail})
                 continue
 
             # Not held — a market BUY, with an OTO protective stop when attach_stop is on.
@@ -300,6 +353,9 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
                     continue
+                # OTO = DAY (Alpaca market entries can't be GTC), so this initial stop leg is a
+                # DAY order; the held-name path promotes it to a persistent GTC ratcheted stop on
+                # the next re-arm once the fill shows up as a position.
                 req = MarketOrderRequest(
                     symbol=t, qty=o["shares"], side=OrderSide.BUY,
                     time_in_force=TimeInForce.DAY, order_class=OrderClass.OTO,

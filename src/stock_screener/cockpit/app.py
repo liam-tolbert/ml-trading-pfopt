@@ -509,12 +509,15 @@ with st.sidebar:
                 # Master switch: attach a protective sell-stop to each order. When off, buys go
                 # in naked and already-held names are skipped (no buy, no stop).
                 _attach = st.toggle(
-                    "Attach protective stop (sell-all, DAY)", value=True,
+                    "Attach protective stop (sell-all, GTC)", value=True,
                     key="trade_attach_stop",
-                    help="Places a stop-loss under each buy via an OTO order. If a name is "
-                         "already held, no buy is sent — only a fresh DAY stop that replaces "
-                         "any open stop on it. Edit each stop below (defaults to the "
-                         "app-computed stop).")
+                    help="Places a stop-loss under each buy via an OTO order (its stop leg rides "
+                         "the market buy as a DAY order, then becomes a persistent GTC stop on "
+                         "the next re-arm). If a name is already held, no buy is sent — a GTC "
+                         "stop protects the whole position and, per Minervini, only ever "
+                         "RATCHETS UP: a re-arm that would lower the stop is ignored and the "
+                         "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
+                         "below (defaults to the app-computed stop).")
                 _nonce = _tp.get("build_ts")
                 for _o in _plan:
                     _t = _o["ticker"]
@@ -579,13 +582,13 @@ with st.sidebar:
                 st.error(f"Trade failed: {_tr['error']}")
             else:
                 _act = [r for r in _tr["results"]
-                        if r["status"] in ("submitted", "stop_only")]
+                        if r["status"] in ("submitted", "stop_only", "stop_kept")]
                 st.success(f"Actioned {len(_act)}/{len(_tr['results'])} order(s) on "
                            f"account …{str(_tr['account_number'])[-4:]} · "
                            f"equity ${_tr['equity']:,.0f}")
                 for _r in _tr["results"]:
-                    _ic = {"submitted": "✅", "stop_only": "🛑", "skipped": "—",
-                           "failed": "⚠️"}.get(_r["status"], "•")
+                    _ic = {"submitted": "✅", "stop_only": "🛑", "stop_kept": "🔒",
+                           "skipped": "—", "failed": "⚠️"}.get(_r["status"], "•")
                     st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
