@@ -2,13 +2,47 @@
 
 The watchlist is just an ordered list of tickers the user has clicked together. These
 build the two downloadable CSVs: a decision list (the tickers plus their scan columns,
-in the user's chosen order) and a long-format OHLCV dump for those names.
+in the user's chosen order) and a long-format OHLCV dump for those names — plus
+save/load persistence so the list survives between app runs.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
+
+
+def save_watchlist(path, tickers: Sequence[str]) -> None:
+    """Persist the watchlist (an ordered, de-duped, upper-cased ticker list) to a JSON file.
+    Best-effort: a write failure is swallowed (the in-session list stays authoritative)."""
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        seen = list(dict.fromkeys(
+            s for s in (str(t).strip().upper() for t in tickers) if s))
+        p.write_text(json.dumps(seen), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def load_watchlist(path) -> List[str]:
+    """Load a persisted watchlist ticker list, de-duped in first-seen order. Returns ``[]``
+    when the file is missing, unreadable, corrupt, or not a JSON list of strings — so a bad
+    file never breaks app startup."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    out: List[str] = []
+    for t in data:
+        s = str(t).strip().upper()
+        if s and s not in out:
+            out.append(s)
+    return out
 
 
 def parse_ticker_list(text: str) -> List[str]:

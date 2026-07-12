@@ -19,9 +19,11 @@ if str(ROOT) not in sys.path:                       # so `from src.X import ...`
 
 import streamlit as st  # noqa: E402
 
+from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
-    parse_ticker_list, watchlist_list_csv, watchlist_ohlcv_csv)
+    load_watchlist, parse_ticker_list, save_watchlist, watchlist_list_csv,
+    watchlist_ohlcv_csv)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     TradeUnavailable, build_buy_plan, fetch_account_summary, stop_is_valid, submit_buy_plan)
@@ -292,37 +294,51 @@ def filter_table(df, key_prefix: str = "flt"):
 
 
 # --------------------------------------------------------------------------- #
-# Watchlist — a per-session shortlist you build by clicking, then export. The
-# canonical store is a plain ordered list in session_state (NOT a widget key), so
-# button callbacks and the multiselect can both mutate it without fighting over
-# widget ownership. It's the export that persists it — download the CSV to keep it.
+# Watchlist — a shortlist you build by clicking. The canonical store is a plain ordered
+# list in session_state (NOT a widget key), so button callbacks and the multiselect can
+# both mutate it without fighting over widget ownership. It is PERSISTED across runs to
+# `data/cockpit/watchlist.json`: `_wl()` loads it once per session, and every mutation
+# saves it back (the CSV/txt export still lets you keep a portable copy).
 # --------------------------------------------------------------------------- #
 def _wl() -> list:
-    return st.session_state.setdefault("watchlist", [])
+    if "watchlist" not in st.session_state:              # first access this session -> load from disk
+        st.session_state["watchlist"] = load_watchlist(cache.WATCHLIST_JSON)
+    return st.session_state["watchlist"]
 
 
-def _wl_add(ticker: str) -> None:
+def _wl_persist() -> None:
+    save_watchlist(cache.WATCHLIST_JSON, _wl())
+
+
+def _wl_add(ticker: str, persist: bool = True) -> None:
     wl = _wl()
     if ticker and ticker not in wl:
         wl.append(ticker)
+        if persist:                                      # bulk adders persist ONCE at the end
+            _wl_persist()
 
 
 def _wl_remove(ticker: str) -> None:
     wl = _wl()
     if ticker in wl:
         wl.remove(ticker)
+        _wl_persist()
 
 
 def _wl_clear() -> None:
     st.session_state["watchlist"] = []
+    _wl_persist()
 
 
 def _wl_add_from_picker() -> None:
     """Merge the bulk-add multiselect's picks into the watchlist, then clear the picker
     (resetting a widget's value is allowed inside its own on_change callback)."""
+    before = len(_wl())
     for t in st.session_state.get("wl_picker", []):
-        _wl_add(t)
+        _wl_add(t, persist=False)                        # persist once below, not per pick
     st.session_state["wl_picker"] = []
+    if len(_wl()) != before:
+        _wl_persist()
 
 
 def _wl_add_from_upload() -> None:
@@ -339,16 +355,23 @@ def _wl_add_from_upload() -> None:
         return
     before = len(_wl())
     for sym in parse_ticker_list(text):                  # commas OR whitespace/newlines
-        _wl_add(sym)
+        _wl_add(sym, persist=False)                      # persist once below, not per name
+    if len(_wl()) != before:
+        _wl_persist()
     st.session_state["_wl_upload_msg"] = (
         f"Added {len(_wl()) - before} new ticker(s) from {getattr(up, 'name', 'the file')}.")
 
 
 @st.cache_data(show_spinner=False)
-def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce):
+def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce, _force=False):
+    # `_force` is underscore-prefixed so Streamlit EXCLUDES it from the cache key — force=True and
+    # force=False share one memo entry, so a forced Re-scan doesn't fork the cache and a later
+    # filter change re-screens off the (force=False) 24h price cache instead of re-downloading.
+    # The body only runs on a genuine miss (new nonce / cleared cache / changed filter), using
+    # whatever `_force` was passed on that call; the Re-scan button sets it True for exactly its run.
     cfg = ScanConfig(min_criteria=min_criteria, min_rs=float(min_rs),
                      require_vcp=require_vcp, min_fundamental_score=min_fund)
-    return run_scan(universe=universe, cfg=cfg, force=bool(nonce and nonce % 2 == 0))
+    return run_scan(universe=universe, cfg=cfg, force=_force)
 
 
 # --------------------------------------------------------------------------- #
@@ -399,13 +422,19 @@ min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
 
 if "nonce" not in st.session_state:
     st.session_state.nonce = 1
+# `_force` is a per-run local, True ONLY on the run where Re-scan is clicked — so that click
+# always forces a real refetch (bumping nonce + clearing the memo makes it a cache miss), while
+# every other rerun leaves it False and reuses the cache. (Replaces the old `nonce % 2` parity
+# hack, which only force-refetched on every OTHER click.)
+_force = False
 if st.sidebar.button("🔄 Re-scan (refresh prices)"):
     st.session_state.nonce += 1
+    _force = True
     _cached_scan.clear()
 
 with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"):
     res = _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund,
-                       st.session_state.nonce)
+                       st.session_state.nonce, _force=_force)
 
 # --------------------------------------------------------------------------- #
 # Sidebar — Watchlist (build by clicking ⭐ on charts / the picker; export to keep).
@@ -422,8 +451,9 @@ with st.sidebar:
         "Add tickers", options=sorted(set(_all_tickers) | set(_watch)),
         key="wl_picker", on_change=_wl_add_from_picker,
         placeholder="Pick tickers to add…",
-        help="Add several at once, or click the ⭐ button next to any chart. "
-             "The list lives for this session — download it to keep it.")
+        help="Add several at once, or click the ⭐ button next to any chart. The list is "
+             "saved automatically and persists between sessions; the downloads below give "
+             "you a portable copy.")
     st.file_uploader(
         "Upload tickers (.txt)", type=["txt"], key="wl_upload",
         on_change=_wl_add_from_upload,
@@ -452,7 +482,8 @@ with st.sidebar:
             mime="text/plain", width="stretch",
             help="Just the tickers, comma-separated — the format the uploader above reads "
                  "back in.")
-        st.button("🗑 Clear watchlist", on_click=_wl_clear, width="stretch")
+        st.button("🗑 Clear watchlist", on_click=_wl_clear, width="stretch",
+                  help="Empties the list — including the saved copy on disk.")
         _missing = [t for t in _watch if t not in res.payloads]
         if _missing:
             st.caption(f"⚠︎ {', '.join(_missing)} not in the current scan — the list CSV "

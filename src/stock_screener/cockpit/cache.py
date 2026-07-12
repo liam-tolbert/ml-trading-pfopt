@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CACHE_DIR = ROOT / "data" / "cockpit"
 PRICES_DIR = CACHE_DIR / "prices"
 FUNDAMENTALS_DIR = CACHE_DIR / "fundamentals"
+WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (ticker list, across sessions)
 TICKERS_TXT = ROOT / "data" / "tickers.txt"
 
 

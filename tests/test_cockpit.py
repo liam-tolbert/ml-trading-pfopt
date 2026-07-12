@@ -238,11 +238,12 @@ def test_streamlit_app_renders_offline():
     except Exception as e:
         print(f"  SKIP test_streamlit_app_renders_offline (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
     import pandas as pd
 
-    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit import scan as scanmod, cache
     prices, spy, _ = _synthetic_slice()
 
     # Fundamentals WITH a near-term earnings date, so the populated Step-2 panel
@@ -261,9 +262,13 @@ def test_streamlit_app_renders_offline():
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
     # app.py does `from ...scan import run_scan`, resolved at script-exec time, so
     # patching the source attribute before .run() propagates into the app's namespace.
-    with patch.object(scanmod, "run_scan", return_value=result):
-        at = AppTest.from_file(app_path, default_timeout=60)
-        at.run()
+    # Redirect the persisted watchlist to a temp file so the test neither reads nor writes
+    # the real data/cockpit/watchlist.json.
+    with tempfile.TemporaryDirectory() as _tmp:
+        with patch.object(scanmod, "run_scan", return_value=result), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
     assert not at.exception, f"app raised: {at.exception}"
 
 
@@ -308,6 +313,27 @@ def test_watchlist_export_helpers():
     assert watchlist_ohlcv_csv([], payloads) == b""             # empty list -> empty bytes
 
 
+def test_watchlist_persistence():
+    """save_watchlist/load_watchlist round-trip the ticker list (upper-cased, de-duped,
+    first-seen order) via JSON, and load returns [] for missing/corrupt/non-list files."""
+    import tempfile
+    from pathlib import Path as _P
+    from src.stock_screener.cockpit.export import save_watchlist, load_watchlist
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _P(tmp) / "sub" / "watchlist.json"                 # parent dir created on save
+        assert load_watchlist(p) == []                         # missing file -> []
+        save_watchlist(p, ["nvda", "MSFT", "nvda", " aapl "])  # dedupe + upper + strip
+        assert p.exists()
+        assert load_watchlist(p) == ["NVDA", "MSFT", "AAPL"]
+        save_watchlist(p, [])                                  # clearing persists an empty list
+        assert load_watchlist(p) == []
+        p.write_text("{ not json", encoding="utf-8")           # corrupt -> [] (never raises)
+        assert load_watchlist(p) == []
+        p.write_text('{"a": 1}', encoding="utf-8")             # valid JSON, not a list -> []
+        assert load_watchlist(p) == []
+
+
 def test_parse_ticker_list():
     """The .txt-upload parser tokenizes on commas AND whitespace/newlines, upper-cases,
     drops blanks, and de-duplicates while preserving first-seen order."""
@@ -327,30 +353,38 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
     except Exception as e:
         print(f"  SKIP test_watchlist_add_button_and_download (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit import scan as scanmod, cache
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
     assert len(result.candidates) >= 1
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    with patch.object(scanmod, "run_scan", return_value=result):
-        at = AppTest.from_file(app_path, default_timeout=60)
-        at.run()
-        assert not at.exception, f"app raised: {at.exception}"
-        # the sidebar's _wl() setdefaults the key, so it exists and starts empty
-        assert list(at.session_state["watchlist"]) == [], "watchlist should start empty"
+    # Redirect the persisted watchlist to a fresh temp file: the app neither reads the real
+    # data/cockpit/watchlist.json nor clobbers it when the add click persists.
+    with tempfile.TemporaryDirectory() as _tmp:
+        with patch.object(scanmod, "run_scan", return_value=result), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+            # _wl() loads from the (nonexistent) temp file on first access -> starts empty
+            assert list(at.session_state["watchlist"]) == [], "watchlist should start empty"
 
-        toggle = [b for b in at.button if b.key == "wl_toggle"]
-        assert toggle, "watchlist add/remove button missing"
-        toggle[0].click().run()
-        assert not at.exception, f"app raised after add: {at.exception}"
+            toggle = [b for b in at.button if b.key == "wl_toggle"]
+            assert toggle, "watchlist add/remove button missing"
+            toggle[0].click().run()
+            assert not at.exception, f"app raised after add: {at.exception}"
 
-    wl = list(at.session_state["watchlist"])
-    assert len(wl) == 1, f"expected 1 watchlisted ticker, got {wl}"
-    assert wl[0] in result.payloads
+            wl = list(at.session_state["watchlist"])
+            assert len(wl) == 1, f"expected 1 watchlisted ticker, got {wl}"
+            assert wl[0] in result.payloads
+            # the add persisted to the temp file -> loading it back returns the same ticker
+            from src.stock_screener.cockpit.export import load_watchlist
+            assert load_watchlist(cache.WATCHLIST_JSON) == wl, "add did not persist to disk"
     # With a non-empty watchlist the sidebar builds both download buttons; that it reran
     # without raising (asserted above) means the CSV builders ran cleanly on real payloads.
 
@@ -436,6 +470,17 @@ def test_build_buy_plan_sizing_modes():
     _, s_above = build_buy_plan(["AAA"], {"AAA": _payload(100.0, 100.0, stop=105.0)},
                                 mode="risk", amount=1.0, equity=100_000.0)
     assert "below price" in s_above[0]["reason"]
+
+    # stop_price carry-through (folded in from the former test_build_buy_plan_attaches_stop):
+    # a computed positive stop is carried (asserted above); a levels dict with no 'stop' key, or a
+    # non-positive stop, yields stop_price None.
+    _df = _payload(100.0, 100.0)["df"]
+    edge = {"NOSTOP": {"df": _df, "levels": {"pivot": 100.0, "buy_zone": (100.0, 105.0)}},
+            "ZERO": _payload(100.0, 100.0, stop=0.0)}
+    p_edge, _ = build_buy_plan(["NOSTOP", "ZERO"], edge, mode="shares", amount=5)
+    by_edge = {o["ticker"]: o for o in p_edge}
+    assert by_edge["NOSTOP"]["stop_price"] is None            # no stop key -> None
+    assert by_edge["ZERO"]["stop_price"] is None              # stop 0 -> None
 
 
 def test_stop_is_valid():
