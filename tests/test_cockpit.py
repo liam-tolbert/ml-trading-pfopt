@@ -914,6 +914,205 @@ def test_positions_page_renders():
         "positions page did not render the re-arm control"
 
 
+# --------------------------------------------------------------------------- #
+# Trade journal ("know your numbers")
+# --------------------------------------------------------------------------- #
+def test_build_trade_journal():
+    """Fills group into position episodes (flat → long → flat = one closed trade): scale-ins
+    average, partial sells stay open, a re-entry starts a NEW episode, an orphan sell is
+    recorded as unmatched, and the SEPA tag on any fill marks the whole episode."""
+    from src.stock_screener.cockpit.trade import build_trade_journal
+
+    def F(sym, side, qty, price, t, coid=""):
+        return {"symbol": sym, "side": side, "qty": qty, "price": price, "time": t,
+                "client_order_id": coid}
+
+    fills = [
+        # WIN: two-lot entry (only the first is tagged), one full exit -> closed episode
+        F("WIN", "buy", 10, 100.0, "2026-06-01", "SEPAoto-WIN-1"),
+        F("WIN", "buy", 10, 110.0, "2026-06-03"),
+        F("WIN", "sell", 20, 120.0, "2026-06-11", "SEPAstop-WIN-2"),
+        # ...then a re-entry weeks later -> a SECOND, separate episode, still open
+        F("WIN", "buy", 5, 130.0, "2026-06-20"),
+        # LOSS: untagged (manual) round trip
+        F("LOSS", "buy", 5, 50.0, "2026-06-02"),
+        F("LOSS", "sell", 5, 45.0, "2026-06-05"),
+        # OPEN: partial sell -> episode stays open with realized-so-far P&L
+        F("OPEN", "buy", 10, 20.0, "2026-06-04", "SEPAcockpit-OPEN-1"),
+        F("OPEN", "sell", 4, 30.0, "2026-06-09"),
+        # ORPH: sell with no prior buy in the history -> unmatched, never guessed at
+        F("ORPH", "sell", 3, 10.0, "2026-06-05"),
+    ]
+    # input order must not matter — the builder sorts by fill time
+    j = build_trade_journal(list(reversed(fills)))
+
+    closed = {t["symbol"]: t for t in j["closed"]}
+    assert set(closed) == {"WIN", "LOSS"}, sorted(closed)
+    w = closed["WIN"]
+    assert w["shares"] == 20 and abs(w["avg_entry"] - 105.0) < 1e-9
+    assert abs(w["avg_exit"] - 120.0) < 1e-9
+    assert abs(w["pl"] - 300.0) < 1e-9                       # 2400 - 2100
+    assert abs(w["pl_pct"] - 300.0 / 2100.0) < 1e-9
+    assert w["hold_days"] == 10 and w["n_fills"] == 3
+    assert w["tagged"] is True                               # entry tag marks the episode
+    lo = closed["LOSS"]
+    assert abs(lo["pl"] - (-25.0)) < 1e-9 and lo["hold_days"] == 3
+    assert lo["tagged"] is False
+
+    opens = {t["symbol"]: t for t in j["open"]}
+    assert set(opens) == {"WIN", "OPEN"}, sorted(opens)      # the re-entry is its own episode
+    assert opens["WIN"]["shares_open"] == 5 and abs(opens["WIN"]["realized_pl"]) < 1e-9
+    o = opens["OPEN"]
+    assert o["shares_open"] == 6 and o["tagged"] is True
+    assert abs(o["realized_pl"] - 40.0) < 1e-9               # 4 sold at 30 vs avg cost 20
+
+    assert len(j["unmatched_sells"]) == 1
+    assert j["unmatched_sells"][0]["symbol"] == "ORPH"
+
+    # junk fills (qty/price <= 0, unknown side) are ignored, never a raise
+    junk = [F("AAA", "buy", 0, 100.0, "2026-06-01"), F("AAA", "hold", 5, 100.0, "2026-06-02"),
+            F("AAA", "buy", 5, 0.0, "2026-06-03")]
+    j2 = build_trade_journal(junk)
+    assert j2["closed"] == [] and j2["open"] == [] and j2["unmatched_sells"] == []
+
+
+def test_journal_stats():
+    """journal_stats: batting counts wins over ALL closed (scratches included), expectancy is
+    the mean per-trade P&L%, and every ratio degrades to None on an empty side."""
+    from src.stock_screener.cockpit.trade import journal_stats
+
+    def T(pl, pl_pct, hold):
+        return {"pl": pl, "pl_pct": pl_pct, "hold_days": hold}
+
+    s = journal_stats([T(100.0, 0.10, 10), T(200.0, 0.20, 20),
+                       T(-50.0, -0.10, 5), T(0.0, 0.0, 2)])
+    assert s["n"] == 4 and s["wins"] == 2 and s["losses"] == 1 and s["scratches"] == 1
+    assert abs(s["batting_avg"] - 0.5) < 1e-9
+    assert abs(s["avg_win_pct"] - 0.15) < 1e-9
+    assert abs(s["avg_loss_pct"] - (-0.10)) < 1e-9
+    assert abs(s["win_loss_ratio"] - 1.5) < 1e-9
+    assert abs(s["expectancy_pct"] - 0.05) < 1e-9            # (0.10+0.20-0.10+0)/4
+    assert abs(s["total_pl"] - 250.0) < 1e-9
+    assert abs(s["avg_hold_days_win"] - 15.0) < 1e-9
+    assert abs(s["avg_hold_days_loss"] - 5.0) < 1e-9
+
+    empty = journal_stats([])
+    assert empty["n"] == 0 and empty["total_pl"] == 0.0
+    for k in ("batting_avg", "avg_win_pct", "avg_loss_pct", "win_loss_ratio",
+              "expectancy_pct", "avg_hold_days_win", "avg_hold_days_loss"):
+        assert empty[k] is None, k
+
+    # all-winner history: the loss side is None, ratio undefined, batting 1.0
+    allwin = journal_stats([T(10.0, 0.05, 3)])
+    assert allwin["batting_avg"] == 1.0
+    assert allwin["avg_loss_pct"] is None and allwin["win_loss_ratio"] is None
+
+
+def test_fetch_order_fills_offline():
+    """fetch_order_fills pages through the closed-order history with until= (exclusive),
+    drops never-filled orders, normalizes sides/qty/price, and returns fills oldest-first —
+    against a fake client with the page size patched down to force pagination."""
+    import datetime as _dt
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.enums import OrderSide
+
+    def _ts(day):
+        return _dt.datetime(2026, 6, day, 15, 0, tzinfo=_dt.timezone.utc)
+
+    class _O:
+        def __init__(self, oid, symbol, side, fqty, fprice, day, coid=""):
+            self.id, self.symbol, self.side = oid, symbol, side
+            self.filled_qty, self.filled_avg_price = fqty, fprice
+            self.submitted_at = self.filled_at = _ts(day)
+            self.client_order_id = coid
+
+    class FakeClient:
+        def __init__(self, orders):
+            self._orders = sorted(orders, key=lambda o: o.submitted_at, reverse=True)
+
+        def get_account(self):
+            class _A:
+                equity = "50000"; cash = "10000"; account_number = "PA00SZOE"
+            return _A()
+
+        def get_orders(self, filter=None):
+            until = getattr(filter, "until", None)
+            limit = getattr(filter, "limit", None) or 500
+            out = [o for o in self._orders
+                   if until is None or o.submitted_at < until]     # Alpaca until = exclusive
+            return out[:limit]
+
+    orders = [
+        _O("1", "AAA", OrderSide.BUY, "10", "100.0", 1, "SEPAoto-AAA-1"),
+        _O("2", "AAA", OrderSide.SELL, "10", "111.0", 8, "SEPAstop-AAA-2"),
+        _O("3", "BBB", OrderSide.BUY, "5", "20.0", 3, "SEPAcockpit-BBB-3"),
+        _O("4", "CCC", OrderSide.BUY, "0", None, 4),               # cancelled, no fill -> drop
+        _O("5", "DDD", "sell", "2", "30.0", 5),                    # plain-string side works too
+    ]
+    fake = FakeClient(orders)
+    orig_conn, orig_lim = trade._connect_paper, trade._ORDERS_PAGE_LIMIT
+    trade._connect_paper = lambda: (fake, True)
+    trade._ORDERS_PAGE_LIMIT = 2                                    # force several pages
+    try:
+        out = trade.fetch_order_fills()
+    finally:
+        trade._connect_paper, trade._ORDERS_PAGE_LIMIT = orig_conn, orig_lim
+
+    assert out["account"]["account_number"] == "PA00SZOE"
+    assert out["account"]["using_dedicated"] is True
+    fills = out["fills"]
+    assert [f["order_id"] for f in fills] == ["1", "3", "5", "2"], \
+        [f["order_id"] for f in fills]                              # oldest-first, "4" dropped
+    assert all(f["side"] in ("buy", "sell") for f in fills)
+    assert fills[0]["side"] == "buy" and fills[-1]["side"] == "sell"
+    assert isinstance(fills[0]["qty"], float) and fills[0]["qty"] == 10.0
+    assert fills[0]["price"] == 100.0
+    assert fills[0]["client_order_id"] == "SEPAoto-AAA-1"
+
+    # the round trip these fills describe closes cleanly through the journal builder
+    j = trade.build_trade_journal(fills)
+    assert {t["symbol"] for t in j["closed"]} == {"AAA"}
+    assert abs(j["closed"][0]["pl"] - 110.0) < 1e-9
+
+
+def test_journal_page_renders():
+    """The Journal page loads and renders its stats tiles + tables with an offline (patched)
+    fetch_order_fills — no network."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_journal_page_renders (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import trade
+
+    offline = {
+        "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
+                    "using_dedicated": True},
+        "fills": [
+            {"symbol": "AAA", "side": "buy", "qty": 10.0, "price": 100.0,
+             "time": "2026-06-01T14:30:00Z", "order_id": "1",
+             "client_order_id": "SEPAoto-AAA-1"},
+            {"symbol": "AAA", "side": "sell", "qty": 10.0, "price": 111.0,
+             "time": "2026-06-10T14:30:00Z", "order_id": "2",
+             "client_order_id": "SEPAstop-AAA-2"},
+            {"symbol": "BBB", "side": "buy", "qty": 5.0, "price": 20.0,
+             "time": "2026-06-05T14:30:00Z", "order_id": "3",
+             "client_order_id": "SEPAcockpit-BBB-3"},
+        ],
+    }
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "3_Journal.py")
+    with patch.object(trade, "fetch_order_fills", return_value=offline):
+        at = AppTest.from_file(page, default_timeout=60)
+        at.run()
+    assert not at.exception, f"journal page raised: {at.exception}"
+    labels = [str(getattr(m, "label", "")) for m in at.metric]
+    assert any("Batting" in x for x in labels), f"stats tiles missing: {labels}"
+    # 1 closed winner out of 1 -> batting 100%; the open BBB episode must not enter the stats
+    batting = [m for m in at.metric if "Batting" in str(getattr(m, "label", ""))][0]
+    assert str(batting.value) == "100%", batting.value
+
+
 def test_get_universe_full_us_offline():
     """full_us branch: mocked nasdaqtrader payloads -> many normalized common-stock
     symbols with ETFs / test issues / warrants / dotted class shares filtered out, and

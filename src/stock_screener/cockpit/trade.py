@@ -673,3 +673,224 @@ def rearm_stops(targets: List[dict]) -> dict:
             results.append({**tgt, "status": "failed", "detail": str(e)})
     return {"equity": equity, "cash": cash, "account_number": account_number,
             "using_dedicated": using_dedicated, "results": results}
+
+
+# --------------------------------------------------------------------------- #
+# Trade journal — "know your numbers" (Think & Trade Like a Champion)
+# --------------------------------------------------------------------------- #
+SEPA_TAG_PREFIXES = ("SEPAoto-", "SEPAstop-", "SEPAcockpit-")
+_ORDERS_PAGE_LIMIT = 500        # Alpaca's max order-history page size
+_MAX_ORDER_PAGES = 40           # pagination ceiling (40 × 500 = 20k orders), not a real limit
+
+
+def _fill_time(fill: dict):
+    """A fill's timestamp as a tz-aware UTC ``pd.Timestamp``. Missing/unparseable times map
+    to epoch 0 so undated fills sort first deterministically instead of raising."""
+    import pandas as pd
+    t = pd.to_datetime(fill.get("time"), utc=True, errors="coerce")
+    return t if pd.notna(t) else pd.Timestamp(0, tz="UTC")
+
+
+def build_trade_journal(fills: List[dict]) -> dict:
+    """Reconstruct round-trip trades from raw order fills. Pure — no network.
+
+    ``fills``: ``{symbol, side ("buy"/"sell"), qty, price, time, client_order_id}`` dicts
+    (:func:`fetch_order_fills` produces them; any time parseable by pandas works). Fills are
+    sorted by time and grouped per symbol into POSITION EPISODES — flat → long → flat closes
+    one trade — so scale-ins and partial sells aggregate into a single round trip (avg entry
+    vs avg exit), which is what the "know your numbers" stats count as ONE trade.
+
+    Returns ``{"closed": [...], "open": [...], "unmatched_sells": [...]}``:
+
+    * ``closed`` — fully-exited episodes: ``{symbol, entry_date, exit_date, hold_days,
+      shares, avg_entry, avg_exit, cost, proceeds, pl, pl_pct, n_fills, tagged}``
+      (``pl_pct`` is a fraction of cost, like the positions page's ``gain_pct``);
+    * ``open`` — episodes still holding shares: ``{symbol, entry_date, shares_open,
+      avg_entry, realized_pl, n_fills, tagged}`` — ``realized_pl`` books partial sells at
+      the episode's average cost; open episodes are EXCLUDED from the closed-trade stats;
+    * ``unmatched_sells`` — a sell fill (or the excess part of one) with no prior buy in
+      the supplied history (pre-history / transferred shares): recorded, never guessed at.
+
+    ``tagged`` is True when ANY fill in the episode carries a cockpit client_order_id
+    (``SEPA_TAG_PREFIXES``) — the entry tag alone is enough, because a triggered OTO stop
+    leg exits under an Alpaca-generated id, not the parent's SEPA one.
+    """
+    eps = 1e-9
+    by_sym: Dict[str, List[dict]] = {}
+    for f in sorted(fills, key=_fill_time):
+        sym = f.get("symbol")
+        if sym:
+            by_sym.setdefault(sym, []).append(f)
+
+    closed: List[dict] = []
+    open_eps: List[dict] = []
+    unmatched: List[dict] = []
+    for sym in sorted(by_sym):
+        ep = None                                       # the in-flight episode, if any
+        for f in by_sym[sym]:
+            try:
+                qty = float(f.get("qty") or 0.0)
+                price = float(f.get("price") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0 or price <= 0:
+                continue
+            side = str(f.get("side", "")).lower()
+            tagged = str(f.get("client_order_id") or "").startswith(SEPA_TAG_PREFIXES)
+            t = _fill_time(f)
+
+            if side == "buy":
+                if ep is None:
+                    ep = {"entry": t, "buy_qty": 0.0, "buy_cost": 0.0, "sell_qty": 0.0,
+                          "proceeds": 0.0, "open": 0.0, "n": 0, "tagged": False}
+                ep["buy_qty"] += qty
+                ep["buy_cost"] += qty * price
+                ep["open"] += qty
+                ep["n"] += 1
+                ep["tagged"] = ep["tagged"] or tagged
+            elif side == "sell":
+                if ep is None or ep["open"] <= eps:
+                    unmatched.append({"symbol": sym, "qty": qty, "price": price, "time": t,
+                                      "client_order_id": f.get("client_order_id", "")})
+                    continue
+                matched = min(qty, ep["open"])
+                if qty - matched > eps:                 # the excess has nothing to close
+                    unmatched.append({"symbol": sym, "qty": qty - matched, "price": price,
+                                      "time": t,
+                                      "client_order_id": f.get("client_order_id", "")})
+                ep["sell_qty"] += matched
+                ep["proceeds"] += matched * price
+                ep["open"] -= matched
+                ep["n"] += 1
+                ep["tagged"] = ep["tagged"] or tagged
+                if ep["open"] <= eps:                   # flat again -> one closed round trip
+                    pl = ep["proceeds"] - ep["buy_cost"]
+                    closed.append({
+                        "symbol": sym, "entry_date": ep["entry"], "exit_date": t,
+                        "hold_days": max((t - ep["entry"]).days, 0),
+                        "shares": ep["buy_qty"],
+                        "avg_entry": ep["buy_cost"] / ep["buy_qty"],
+                        "avg_exit": ep["proceeds"] / ep["sell_qty"],
+                        "cost": ep["buy_cost"], "proceeds": ep["proceeds"],
+                        "pl": pl, "pl_pct": pl / ep["buy_cost"],
+                        "n_fills": ep["n"], "tagged": ep["tagged"],
+                    })
+                    ep = None
+        if ep is not None and ep["open"] > eps:
+            avg_cost = ep["buy_cost"] / ep["buy_qty"]
+            open_eps.append({
+                "symbol": sym, "entry_date": ep["entry"], "shares_open": ep["open"],
+                "avg_entry": avg_cost,
+                "realized_pl": ep["proceeds"] - avg_cost * ep["sell_qty"],
+                "n_fills": ep["n"], "tagged": ep["tagged"],
+            })
+    return {"closed": closed, "open": open_eps, "unmatched_sells": unmatched}
+
+
+def journal_stats(closed: List[dict]) -> dict:
+    """Minervini's "know your numbers" from :func:`build_trade_journal` closed trades. Pure.
+
+    Returns ``{n, wins, losses, scratches, batting_avg, avg_win_pct, avg_loss_pct,
+    win_loss_ratio, expectancy_pct, total_pl, avg_hold_days_win, avg_hold_days_loss}``.
+    Percent fields are FRACTIONS (0.15 = +15%). ``batting_avg`` = wins / all closed
+    (a $0 scratch counts against the average but is neither win nor loss);
+    ``expectancy_pct`` = mean ``pl_pct`` across ALL closed trades, i.e. batting × avg win
+    + (1 − batting) × avg loss with scratches at 0 — the per-trade edge that gates
+    progressive exposure. Every ratio degrades to ``None`` (never raises) when its inputs
+    are empty, so a fresh account renders as "—" rather than a crash."""
+    def _mean(xs):
+        return sum(xs) / len(xs) if xs else None
+
+    n = len(closed)
+    wins = [t for t in closed if t["pl"] > 0]
+    losses = [t for t in closed if t["pl"] < 0]
+    avg_win = _mean([t["pl_pct"] for t in wins])
+    avg_loss = _mean([t["pl_pct"] for t in losses])
+    return {
+        "n": n, "wins": len(wins), "losses": len(losses),
+        "scratches": n - len(wins) - len(losses),
+        "batting_avg": (len(wins) / n) if n else None,
+        "avg_win_pct": avg_win, "avg_loss_pct": avg_loss,
+        "win_loss_ratio": (avg_win / abs(avg_loss)) if (avg_win is not None and avg_loss)
+                          else None,
+        "expectancy_pct": _mean([t["pl_pct"] for t in closed]),
+        "total_pl": sum(t["pl"] for t in closed),
+        "avg_hold_days_win": _mean([t["hold_days"] for t in wins]),
+        "avg_hold_days_loss": _mean([t["hold_days"] for t in losses]),
+    }
+
+
+def fetch_order_fills() -> dict:
+    """Pull the cockpit account's FULL closed-order history from Alpaca and normalize the
+    filled ones into the fill dicts :func:`build_trade_journal` consumes.
+
+    Pages backwards through ``GetOrdersRequest(status=CLOSED)`` using ``until`` = the
+    oldest ``submitted_at`` seen (Alpaca's ``until`` is exclusive, so pages don't overlap;
+    orders are deduped by id anyway as cheap insurance). Orders that never filled
+    (cancelled/expired, ``filled_qty`` 0) are dropped; partial fills are kept at their
+    ``filled_qty`` × ``filled_avg_price``. Returns ``{"account": {account_number, equity,
+    cash, using_dedicated}, "fills": [...]}`` with fills sorted oldest-first. Raises
+    :class:`TradeUnavailable` on missing package/credentials."""
+    client, using_dedicated = _connect_paper()
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+    except ImportError as e:
+        raise TradeUnavailable(str(e)) from e
+    try:
+        from alpaca.common.enums import Sort
+        direction = Sort.DESC                          # newest-first pages; until walks back
+    except Exception:
+        direction = None                               # older alpaca-py: server default (desc)
+
+    acct = client.get_account()
+    account = {
+        "account_number": getattr(acct, "account_number", "?"),
+        "equity": float(acct.equity), "cash": float(acct.cash),
+        "using_dedicated": using_dedicated,
+    }
+
+    orders: List = []
+    until = None
+    for _ in range(_MAX_ORDER_PAGES):
+        kw = {"status": QueryOrderStatus.CLOSED, "limit": _ORDERS_PAGE_LIMIT}
+        if direction is not None:
+            kw["direction"] = direction
+        if until is not None:
+            kw["until"] = until
+        page = list(client.get_orders(filter=GetOrdersRequest(**kw)) or [])
+        orders.extend(page)
+        if len(page) < _ORDERS_PAGE_LIMIT:
+            break
+        stamps = [s for s in (getattr(o, "submitted_at", None) for o in page)
+                  if s is not None]
+        nxt = min(stamps) if stamps else None
+        if nxt is None or (until is not None and nxt >= until):
+            break                                      # no progress -> stop, don't spin
+        until = nxt
+
+    fills: List[dict] = []
+    seen = set()
+    for o in orders:
+        oid = str(getattr(o, "id", "") or "")
+        if oid and oid in seen:
+            continue
+        seen.add(oid)
+        sym = getattr(o, "symbol", None)
+        qty = _attr_float(o, "filled_qty")
+        price = _attr_float(o, "filled_avg_price")
+        if not sym or not qty or qty <= 0 or not price or price <= 0:
+            continue
+        raw_side = getattr(o, "side", "")
+        side = str(getattr(raw_side, "value", raw_side)).lower()
+        side = "buy" if "buy" in side else ("sell" if "sell" in side else None)
+        if side is None:
+            continue
+        fills.append({
+            "symbol": sym, "side": side, "qty": qty, "price": price,
+            "time": getattr(o, "filled_at", None) or getattr(o, "submitted_at", None),
+            "order_id": oid,
+            "client_order_id": str(getattr(o, "client_order_id", "") or ""),
+        })
+    fills.sort(key=_fill_time)
+    return {"account": account, "fills": fills}
