@@ -522,6 +522,13 @@ with st.sidebar:
         # --- Paper-trade the watchlist via Alpaca (paper account only) --------------- #
         st.markdown("---")
         st.markdown("**⚡ Paper trade (Alpaca)**")
+        # Regime at the point of action (§6.5 item 6): the CAUTION banner lives at the top
+        # of the page, but the finger is HERE — repeat the one line that matters when the
+        # tape says don't press new buys.
+        if not res.regime.get("should_generate_buys"):
+            st.caption(":orange[**⚠︎ CAUTION tape** — the market regime advises against "
+                       "NEW buys (most breakouts fail in a weak tape). Managing stops is "
+                       "fine; think twice before submitting fresh entries.]")
         # How to size EACH name's market BUY — % of portfolio, raw $, raw share count, or
         # risk-to-stop (Minervini's sizer).
         _mode_label = st.selectbox(
