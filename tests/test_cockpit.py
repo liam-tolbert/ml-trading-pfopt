@@ -266,7 +266,8 @@ def test_streamlit_app_renders_offline():
     # the real data/cockpit/watchlist.json.
     with tempfile.TemporaryDirectory() as _tmp:
         with patch.object(scanmod, "run_scan", return_value=result), \
-                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"):
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
             at = AppTest.from_file(app_path, default_timeout=60)
             at.run()
     assert not at.exception, f"app raised: {at.exception}"
@@ -283,19 +284,26 @@ def test_watchlist_export_helpers():
     cand = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"],
                          "tier": ["A", "B", "A"], "pivot": [10.0, 20.0, 30.0]})
 
-    # list CSV: order follows the watchlist (BBB before AAA); a stale pick (ZZZ, not in
-    # the scan) still appears so nothing the user chose is silently lost.
-    csv = watchlist_list_csv(cand, ["BBB", "AAA", "ZZZ"],
-                             columns=["ticker", "tier", "pivot"]).decode()
+    # list CSV takes ENTRIES (dicts and/or bare strings): order follows the watchlist
+    # (BBB before AAA); a stale pick (ZZZ, not in the scan) still appears so nothing the
+    # user chose is silently lost; the frozen-pivot metadata columns always ride along.
+    ents = [{"ticker": "BBB", "judged_pivot": 19.5, "date_added": "2026-07-12",
+             "pivot_source": "judged", "note": "n1"},
+            "AAA",                                             # bare string still accepted
+            {"ticker": "ZZZ"}]
+    csv = watchlist_list_csv(cand, ents, columns=["ticker", "tier", "pivot"]).decode()
     lines = csv.strip().splitlines()
-    assert lines[0] == "ticker,tier,pivot"
+    assert lines[0] == "ticker,tier,pivot,judged_pivot,date_added,pivot_source,note"
     order = [ln.split(",")[0] for ln in lines[1:]]
     assert order == ["BBB", "AAA", "ZZZ"], order
-    assert lines[1].startswith("BBB,B,20.0")
+    assert lines[1].startswith("BBB,B,20.0,19.5,2026-07-12,judged,n1")
+    assert lines[2].split(",")[3] == ""                        # unfrozen -> empty judged_pivot
 
-    # empty candidates -> ticker-only fallback (never raises)
+    # empty candidates -> ticker-only rows + (empty) metadata columns (never raises)
     empty = watchlist_list_csv(pd.DataFrame(), ["AAA", "BBB"]).decode()
-    assert empty.strip().splitlines() == ["ticker", "AAA", "BBB"]
+    elines = empty.strip().splitlines()
+    assert elines[0] == "ticker,judged_pivot,date_added,pivot_source,note"
+    assert [ln.split(",")[0] for ln in elines[1:]] == ["AAA", "BBB"]
 
     # OHLCV CSV: two names stacked, Date + Ticker lead, present names only
     idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=5)
@@ -314,24 +322,106 @@ def test_watchlist_export_helpers():
 
 
 def test_watchlist_persistence():
-    """save_watchlist/load_watchlist round-trip the ticker list (upper-cased, de-duped,
-    first-seen order) via JSON, and load returns [] for missing/corrupt/non-list files."""
+    """save_watchlist/load_watchlist round-trip ENTRY DICTS (ticker upper/strip, de-duped
+    first-seen); a legacy string-array file migrates to unfrozen entries at load; load
+    returns [] for missing/corrupt/non-list files."""
+    import json as _json
     import tempfile
     from pathlib import Path as _P
-    from src.stock_screener.cockpit.export import save_watchlist, load_watchlist
+    from src.stock_screener.cockpit.export import (save_watchlist, load_watchlist,
+                                                   make_entry)
 
     with tempfile.TemporaryDirectory() as tmp:
         p = _P(tmp) / "sub" / "watchlist.json"                 # parent dir created on save
         assert load_watchlist(p) == []                         # missing file -> []
-        save_watchlist(p, ["nvda", "MSFT", "nvda", " aapl "])  # dedupe + upper + strip
+
+        # bare strings coerce to unfrozen entries: dedupe + upper + strip preserved
+        save_watchlist(p, ["nvda", "MSFT", "nvda", " aapl "])
         assert p.exists()
-        assert load_watchlist(p) == ["NVDA", "MSFT", "AAPL"]
+        got = load_watchlist(p)
+        assert [e["ticker"] for e in got] == ["NVDA", "MSFT", "AAPL"]
+        assert all(e["judged_pivot"] is None and e["pivot_source"] is None for e in got)
+
+        # entry dicts round-trip the frozen-pivot metadata (pivot rounded to cents)
+        ents = [make_entry("ebay", 34.119, date_added="2026-07-12",
+                           pivot_source="judged", note="clean base"),
+                make_entry("BAP")]
+        save_watchlist(p, ents)
+        got2 = load_watchlist(p)
+        assert got2[0] == {"ticker": "EBAY", "judged_pivot": 34.12,
+                           "date_added": "2026-07-12", "pivot_source": "judged",
+                           "note": "clean base"}
+        assert got2[1]["ticker"] == "BAP" and got2[1]["judged_pivot"] is None
+
         save_watchlist(p, [])                                  # clearing persists an empty list
         assert load_watchlist(p) == []
+
+        # LEGACY file on disk (raw string array) -> migrated in memory, file untouched
+        p.write_text(_json.dumps(["EBAY", "BAP"]), encoding="utf-8")
+        legacy = load_watchlist(p)
+        assert [e["ticker"] for e in legacy] == ["EBAY", "BAP"]
+        assert all(e["judged_pivot"] is None for e in legacy)
+
         p.write_text("{ not json", encoding="utf-8")           # corrupt -> [] (never raises)
         assert load_watchlist(p) == []
         p.write_text('{"a": 1}', encoding="utf-8")             # valid JSON, not a list -> []
         assert load_watchlist(p) == []
+
+
+def test_watchlist_entry_normalization():
+    """make_entry/_coerce_entry: ticker case/strip, float()-coerced pivot (np.float64 in,
+    plain json-safe float out), bad pivots -> None, pivot_source only sticks alongside a
+    valid pivot, junk elements dropped."""
+    import numpy as np
+    from src.stock_screener.cockpit.export import make_entry, _coerce_entry
+
+    e = make_entry(" ebay ", np.float64(34.119), date_added="2026-07-12",
+                   pivot_source="judged", note=None)
+    assert e == {"ticker": "EBAY", "judged_pivot": 34.12, "date_added": "2026-07-12",
+                 "pivot_source": "judged", "note": ""}
+    assert type(e["judged_pivot"]) is float                    # not np.float64 (json-safe)
+
+    assert make_entry("") is None and make_entry(None) is None
+    for bad in (0, -3, "garbage", float("nan"), None):
+        assert make_entry("AAA", bad)["judged_pivot"] is None, bad
+    # pivot_source never sticks without a valid pivot, or with an unknown source name
+    assert make_entry("AAA", None, pivot_source="judged")["pivot_source"] is None
+    assert make_entry("AAA", 10.0, pivot_source="bogus")["pivot_source"] is None
+    assert make_entry("AAA", 10.0, pivot_source="auto")["pivot_source"] == "auto"
+
+    assert _coerce_entry("bap")["ticker"] == "BAP"             # legacy bare string
+    assert _coerce_entry({"ticker": "x", "judged_pivot": 5})["judged_pivot"] == 5.0
+    assert _coerce_entry(42) is None and _coerce_entry(None) is None
+
+
+def test_watchlist_tickers_projection():
+    """watchlist_tickers projects mixed dict/str input to ordered unique upper tickers."""
+    from src.stock_screener.cockpit.export import watchlist_tickers
+    mixed = [{"ticker": "EBAY", "judged_pivot": 34.12}, "bap", {"ticker": "ebay"},
+             42, "", {"ticker": "PECO"}]
+    assert watchlist_tickers(mixed) == ["EBAY", "BAP", "PECO"]
+    assert watchlist_tickers([]) == [] and watchlist_tickers(None) == []
+
+
+def test_watchlist_legacy_migration_roundtrip():
+    """A legacy string-array file loads as unfrozen entries (the load itself never writes);
+    saving what was loaded rewrites the file in the dict schema; re-loading is idempotent."""
+    import json as _json
+    import tempfile
+    from pathlib import Path as _P
+    from src.stock_screener.cockpit.export import load_watchlist, save_watchlist
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _P(tmp) / "watchlist.json"
+        p.write_text(_json.dumps(["EBAY", "BAP", "PECO", "EIX"]), encoding="utf-8")
+        ents = load_watchlist(p)
+        assert [e["ticker"] for e in ents] == ["EBAY", "BAP", "PECO", "EIX"]
+        assert isinstance(_json.loads(p.read_text(encoding="utf-8"))[0], str), \
+            "load must not rewrite the file"
+        save_watchlist(p, ents)                                # first mutation-persist
+        raw = _json.loads(p.read_text(encoding="utf-8"))
+        assert isinstance(raw[0], dict) and raw[0]["ticker"] == "EBAY"
+        assert load_watchlist(p) == ents                       # idempotent
 
 
 def test_parse_ticker_list():
@@ -367,7 +457,8 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
     # data/cockpit/watchlist.json nor clobbers it when the add click persists.
     with tempfile.TemporaryDirectory() as _tmp:
         with patch.object(scanmod, "run_scan", return_value=result), \
-                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"):
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
             at = AppTest.from_file(app_path, default_timeout=60)
             at.run()
             assert not at.exception, f"app raised: {at.exception}"
@@ -380,9 +471,17 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
             assert not at.exception, f"app raised after add: {at.exception}"
 
             wl = list(at.session_state["watchlist"])
-            assert len(wl) == 1, f"expected 1 watchlisted ticker, got {wl}"
-            assert wl[0] in result.payloads
-            # the add persisted to the temp file -> loading it back returns the same ticker
+            assert len(wl) == 1, f"expected 1 watchlisted entry, got {wl}"
+            ent = wl[0]
+            assert ent["ticker"] in result.payloads
+            # end-to-end freeze: the ⭐ add froze the charted payload's pivot as the
+            # judged trigger level, stamped today
+            import datetime as _dt
+            _pv = result.payloads[ent["ticker"]]["levels"]["pivot"]
+            assert ent["judged_pivot"] == round(float(_pv), 2), (ent, _pv)
+            assert ent["pivot_source"] == "judged"
+            assert ent["date_added"] == _dt.date.today().isoformat()
+            # the add persisted to the temp file -> loading it back returns the same entry
             from src.stock_screener.cockpit.export import load_watchlist
             assert load_watchlist(cache.WATCHLIST_JSON) == wl, "add did not persist to disk"
     # With a non-empty watchlist the sidebar builds both download buttons; that it reran
@@ -640,7 +739,9 @@ def test_trade_plan_preview_renders_stop_controls():
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
     with patch.object(scanmod, "run_scan", return_value=result):
         at = AppTest.from_file(app_path, default_timeout=60)
-        at.session_state["watchlist"] = ["AAA"]          # non-empty -> trade section renders
+        at.session_state["watchlist"] = [                # non-empty -> trade section renders
+            {"ticker": "AAA", "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""}]
         at.session_state["trade_build_n"] = 1
         at.session_state["trade_mode"] = "Risk % to stop"     # exercise the risk-mode UI branch
         at.session_state["trade_plan"] = {
@@ -1209,6 +1310,300 @@ def test_incremental_price_cache_appends_delta():
             assert any("start" in c for c in calls), "must try incremental first"
             assert any("period" in c for c in calls), "divergence must trigger a full refetch"
             assert len(got2) == 20 and got2["Close"].iloc[0] == 50.0
+
+
+# --------------------------------------------------------------------------- #
+# Nightly EOD trigger check (triggers.py — pure)
+# --------------------------------------------------------------------------- #
+def _trigger_frame(end, closes, vols=None):
+    """Daily OHLCV ending exactly at ``end`` for deterministic stale-bar checks."""
+    import pandas as pd
+    idx = pd.bdate_range(end=pd.Timestamp(end), periods=len(closes))
+    vols = vols if vols is not None else [1000] * len(closes)
+    return pd.DataFrame({"Open": closes, "High": [c * 1.01 for c in closes],
+                         "Low": [c * 0.99 for c in closes], "Close": closes,
+                         "Volume": vols}, index=idx)
+
+
+def test_check_triggers_pure():
+    """The nightly gate: close above the FROZEN pivot on >=1.5x 50-day volume, today's bar
+    only. Flat volume blocks a trigger, extended (> pivot*1.05) files under don't-chase
+    even when price+volume cleared, a stale bar never fires, below-pivot is a watch, and
+    the earnings flag + summary lists come through."""
+    from src.stock_screener.cockpit.export import make_entry
+    from src.stock_screener.cockpit.triggers import check_one, check_triggers
+
+    TODAY = "2026-07-10"                                    # a Friday
+    flat = [100.0] * 60
+    spike_vol = [1000] * 59 + [3000]                        # 3x the prior 50-day average
+
+    def E(t, pivot):
+        return make_entry(t, pivot, date_added="2026-07-01", pivot_source="judged")
+
+    # (a) close 100 > pivot 98 on 3x volume, bar dated today -> TRIGGERED
+    r = check_one(E("TRG", 98.0), _trigger_frame(TODAY, flat, spike_vol), None, today=TODAY)
+    assert r["status"] == "triggered" and r["triggered"] is True, r
+    assert r["close_above_pivot"] and r["volume_confirmed"] and not r["stale"]
+    assert abs(r["volume_ratio_50"] - 3.0) < 1e-9
+    assert abs(r["pct_from_pivot"] - (100.0 / 98.0 - 1) * 100) < 0.01
+
+    # (b) same but flat volume -> price cleared, volume didn't -> watch, not triggered
+    r2 = check_one(E("NOV", 98.0), _trigger_frame(TODAY, flat), None, today=TODAY)
+    assert r2["status"] == "watch" and r2["triggered"] is False
+    assert r2["close_above_pivot"] is True and r2["volume_confirmed"] is False
+
+    # (c) extended: close 100 vs pivot 90 (+11%) on volume -> don't chase beats triggered
+    r3 = check_one(E("EXT", 90.0), _trigger_frame(TODAY, flat, spike_vol), None, today=TODAY)
+    assert r3["status"] == "extended" and r3["extended"] is True
+
+    # (d) stale bar (run date is the next business day) -> never fires
+    r4 = check_one(E("STL", 98.0), _trigger_frame(TODAY, flat, spike_vol), None,
+                   today="2026-07-13")
+    assert r4["status"] == "stale" and r4["stale"] is True and r4["triggered"] is False
+
+    # (e) below the pivot -> watch, negative distance
+    r5 = check_one(E("BLW", 105.0), _trigger_frame(TODAY, flat), None, today=TODAY)
+    assert r5["status"] == "watch" and r5["pct_from_pivot"] < 0
+
+    # earnings flag rides in from the fundamentals dict (10 days out -> soon)
+    r6 = check_one(E("ERN", 98.0), _trigger_frame(TODAY, flat),
+                   {"next_earnings": "2026-07-20"}, today=TODAY)
+    assert r6["earnings_in"] == 10 and r6["earnings_soon"] is True
+
+    # full report: summary buckets by STATUS; missing frame -> no_data; spy note present
+    entries = [E("TRG", 98.0), E("EXT", 90.0), E("BLW", 105.0),
+               make_entry("GONE"), make_entry("UNF")]      # GONE: no frame; UNF: no pivot
+    prices = {"TRG": _trigger_frame(TODAY, flat, spike_vol),
+              "EXT": _trigger_frame(TODAY, flat, spike_vol),
+              "BLW": _trigger_frame(TODAY, flat),
+              "UNF": _trigger_frame(TODAY, flat)}
+    spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
+    rep = check_triggers(entries, prices, spy=spy, today=TODAY)
+    s = rep["summary"]
+    assert s["n"] == 5
+    assert s["triggered"] == ["TRG"] and s["extended"] == ["EXT"]
+    assert s["no_data"] == ["GONE"] and s["no_pivot"] == ["UNF"]
+    assert rep["all_stale"] is False and rep["date"] == TODAY
+    assert rep["spy"] is not None and "phase" in rep["spy"]
+
+    # all-stale run (holiday): report still builds, flagged, nothing triggered
+    rep2 = check_triggers([E("TRG", 98.0)], {"TRG": _trigger_frame(TODAY, flat, spike_vol)},
+                          today="2026-07-13")
+    assert rep2["all_stale"] is True and rep2["summary"]["triggered"] == []
+
+
+def test_freeze_missing_pivots():
+    """Freeze-on-first-sight: an unfrozen entry with a >=200-row frame gets the scan-chain
+    pivot recorded (source 'auto', dated the run day) WITHOUT mutating the input; a short
+    frame stays unfrozen (-> no_pivot at check time); a judged entry is never touched."""
+    from src.stock_screener.cockpit.export import make_entry
+    from src.stock_screener.cockpit.triggers import (check_one, compute_scan_pivot,
+                                                     freeze_missing_pivots)
+
+    TODAY = "2026-07-10"
+    up = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)])   # 260-row uptrend
+    short = _trigger_frame(TODAY, [100.0] * 60)                          # < 200 rows
+    prices = {"UP": up, "SHORT": short}
+
+    expected = compute_scan_pivot(up)
+    assert expected and 0 < expected <= float(up["High"].max()) * 1.05
+    assert compute_scan_pivot(short) is None                # too short -> None, no raise
+    assert compute_scan_pivot(None) is None
+
+    entries = [make_entry("UP"), make_entry("SHORT"),
+               make_entry("HELD", 55.5, date_added="2026-07-01", pivot_source="judged")]
+    out, frozen = freeze_missing_pivots(entries, prices, today=TODAY)
+
+    assert frozen == ["UP"]
+    by = {e["ticker"]: e for e in out}
+    assert by["UP"]["judged_pivot"] == round(expected, 2)
+    assert by["UP"]["pivot_source"] == "auto" and by["UP"]["date_added"] == TODAY
+    assert by["SHORT"]["judged_pivot"] is None              # couldn't compute -> unchanged
+    assert by["HELD"] == entries[2]                         # judged entry untouched
+    assert entries[0]["judged_pivot"] is None, "input entries must not be mutated"
+
+    # a still-unfrozen entry evaluates to no_pivot (skipped), never a crash
+    r = check_one(by["SHORT"], short, None, today=TODAY)
+    assert r["status"] == "no_pivot" and r["triggered"] is False
+
+    # REGRESSION (the EBAY 118.98-vs-111.86 bug): an auto-frozen pivot must equal the
+    # pivot the APP shows for the same frame — compute_scan_pivot must replicate
+    # screen_universe's chain INCLUDING detect_vcp; without the VCP arg, detect_breakout
+    # yields no level and the pivot silently falls back to the (higher) 52-week high.
+    prices_syn, spy_syn, _ = _synthetic_slice()
+    res = screen_universe(list(prices_syn), prices_syn, spy_syn, get_fundamentals=None,
+                          cfg=ScanConfig(min_rs=0.0))
+    assert len(res.payloads), "no synthetic candidates to check"
+    for t in list(res.payloads)[:5]:
+        pl = res.payloads[t]
+        got = compute_scan_pivot(pl["df"])
+        assert got is not None and abs(got - pl["levels"]["pivot"]) < 1e-6, \
+            (t, got, pl["levels"]["pivot"])
+
+
+def test_trigger_report_roundtrip():
+    """save_trigger_report/load_latest_trigger_report: dated files, newest parseable wins,
+    a corrupt newest file falls back to the older one, missing dir -> None."""
+    import tempfile
+    from src.stock_screener.cockpit.triggers import (format_report,
+                                                     load_latest_trigger_report,
+                                                     save_trigger_report)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "triggers"
+        assert load_latest_trigger_report(d) is None        # missing dir -> None
+        r1 = {"schema": 1, "date": "2026-07-09", "names": [], "summary": {"n": 0}}
+        r2 = {"schema": 1, "date": "2026-07-10", "names": [], "summary": {"n": 0}}
+        p1 = save_trigger_report(r1, d)
+        assert p1.name == "triggers_2026-07-09.json" and p1.exists()
+        save_trigger_report(r2, d)
+        assert load_latest_trigger_report(d)["date"] == "2026-07-10"
+        # corrupt the newest -> the loader falls back to the older parseable file
+        (d / "triggers_2026-07-11.json").write_text("{ not json", encoding="utf-8")
+        assert load_latest_trigger_report(d)["date"] == "2026-07-10"
+        # the console renderer never chokes on a minimal report (ASCII path)
+        assert "EOD TRIGGER CHECK" in format_report(r2)
+
+
+def test_eod_trigger_cli_offline():
+    """The CLI end-to-end, in-process and offline: patched data feed + temp watchlist/
+    report paths. main() returns 0, writes the dated report, and AUTO-FREEZES the
+    unfrozen entry's pivot back into watchlist.json; --no-write leaves both untouched."""
+    import json as _json
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import cache, eod_trigger
+    from src.stock_screener.cockpit.export import load_watchlist, save_watchlist
+
+    TODAY = "2026-07-10"
+    up = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)])
+    spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
+
+    def fake_prices(tickers, **kw):
+        assert kw.get("max_age_days") == 0.0, "nightly run must use the top-up path"
+        return {t: (spy if t == "SPY" else up) for t in tickers}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wl = Path(tmp) / "watchlist.json"
+        trg = Path(tmp) / "triggers"
+        save_watchlist(wl, ["UPUP"])                       # one legacy, unfrozen name
+        with patch.object(cache, "WATCHLIST_JSON", wl), \
+                patch.object(cache, "TRIGGERS_DIR", trg), \
+                patch.object(eod_trigger.data_feed, "get_many_prices", fake_prices), \
+                patch.object(eod_trigger.data_feed, "get_fundamentals",
+                             lambda t, **kw: {"next_earnings": "2026-07-20"}):
+            # --no-write: report printed only, nothing lands on disk
+            assert eod_trigger.main(["--date", TODAY, "--no-write"]) == 0
+            assert not trg.exists() or not list(trg.glob("*.json"))
+            assert load_watchlist(wl)[0]["judged_pivot"] is None
+
+            # real run: report written, pivot auto-frozen into the watchlist file
+            assert eod_trigger.main(["--date", TODAY]) == 0
+            rep = _json.loads((trg / f"triggers_{TODAY}.json").read_text(encoding="utf-8"))
+            assert rep["date"] == TODAY and rep["summary"]["n"] == 1
+            assert rep["summary"]["auto_frozen"] == ["UPUP"]
+            assert rep["names"][0]["earnings_in"] == 10
+            ent = load_watchlist(wl)[0]
+            assert ent["judged_pivot"] and ent["pivot_source"] == "auto"
+            assert rep["names"][0]["judged_pivot"] == ent["judged_pivot"]
+
+
+def test_trigger_report_sidebar_renders():
+    """The app's sidebar surfaces the latest trigger report (canned file in a temp
+    TRIGGERS_DIR): the date and a triggered name appear in the rendered output."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trigger_report_sidebar_renders (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    from src.stock_screener.cockpit.triggers import save_trigger_report
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+
+    canned = {
+        "schema": 1, "date": "2026-07-10",
+        "spy": {"phase": 2, "phase_name": "Stage 2 - Advancing", "trend": "Bullish"},
+        "all_stale": False,
+        "names": [
+            {"ticker": "TRGX", "status": "triggered", "judged_pivot": 34.12,
+             "pivot_source": "judged", "close": 35.0, "volume_ratio_50": 2.1,
+             "triggered": True, "earnings_soon": True, "earnings_in": 12},
+            {"ticker": "AUTX", "status": "watch", "judged_pivot": 50.0,
+             "pivot_source": "auto", "close": 48.0, "volume_ratio_50": 0.9},
+            {"ticker": "NOPX", "status": "no_pivot"},      # sparse row must render too
+        ],
+        "summary": {"n": 3, "triggered": ["TRGX"], "extended": [], "stale": [],
+                    "earnings_soon": ["TRGX"], "no_data": [], "no_pivot": ["NOPX"],
+                    "auto_frozen": []},
+    }
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        trg = Path(_tmp) / "triggers"
+        save_trigger_report(canned, trg)
+        with patch.object(scanmod, "run_scan", return_value=result), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", trg):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+    assert not at.exception, f"app raised: {at.exception}"
+    rendered = " ".join(str(getattr(m, "value", ""))
+                        for m in list(at.markdown) + list(getattr(at, "caption", [])))
+    assert "2026-07-10" in rendered, "report date not rendered"
+    assert "TRGX" in rendered and "triggered" in rendered, "triggered name not rendered"
+
+
+def test_get_many_prices_max_age_days():
+    """The new ``max_age_days`` knob on get_many_prices: a 3-day-old parquet is served
+    as-is under ``max_age_days=7`` (yfinance never touched), but leaves the gate under the
+    1.0 default and goes through the incremental top-up — where a failed fetch degrades to
+    the untouched cache instead of raising. Offline (mocked yfinance + temp PRICES_DIR)."""
+    import os
+    import tempfile
+    import time as _time
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize() - pd.Timedelta(days=3),
+                         periods=60)
+    closes = [100.0 + i for i in range(60)]
+    cached = pd.DataFrame({"Open": closes, "High": [c + 1 for c in closes],
+                           "Low": [c - 1 for c in closes], "Close": closes,
+                           "Volume": [1000] * 60}, index=idx)
+
+    calls = []
+
+    def fake_download(*a, **kw):
+        calls.append(kw)
+        return pd.DataFrame()                              # failed/empty fetch
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        with patch.object(dfeed, "PRICES_DIR", pdir), patch("yfinance.download",
+                                                            fake_download):
+            path = pdir / "AAPL.parquet"
+            cached.to_parquet(path)
+            old = _time.time() - 3 * 86400                 # mtime: 3 days old
+            os.utime(path, (old, old))
+
+            # relaxed gate: served straight from the cache, no network attempt
+            got = dfeed.get_many_prices(["AAPL"], max_age_days=7.0, pause=0, retries=0)
+            assert not calls, "cache hit must not touch yfinance"
+            assert len(got["AAPL"]) == 60
+
+            # default gate (1.0): leaves the gate -> incremental top-up attempted; the
+            # empty fetch degrades to the untouched cache (no raise, no data loss)
+            got2 = dfeed.get_many_prices(["AAPL"], pause=0, retries=0)
+            assert calls, "default gate should attempt the incremental fetch"
+            assert len(got2["AAPL"]) == 60
+            assert float(got2["AAPL"]["Close"].iloc[-1]) == float(cached["Close"].iloc[-1])
 
 
 def _lin_series(segments, start=100.0):

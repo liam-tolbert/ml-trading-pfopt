@@ -9,5 +9,4 @@ __pycache__/
 .env
 *.json
 *.md
-scripts/
 data/wrds/

@@ -13,13 +13,15 @@ ROOT = Path(__file__).resolve().parents[3]
 CACHE_DIR = ROOT / "data" / "cockpit"
 PRICES_DIR = CACHE_DIR / "prices"
 FUNDAMENTALS_DIR = CACHE_DIR / "fundamentals"
-WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (ticker list, across sessions)
+WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (entry dicts, across sessions)
+TRIGGERS_DIR = CACHE_DIR / "triggers"           # nightly EOD trigger reports + run log
 TICKERS_TXT = ROOT / "data" / "tickers.txt"
 
 
 def ensure_dirs() -> None:
     PRICES_DIR.mkdir(parents=True, exist_ok=True)
     FUNDAMENTALS_DIR.mkdir(parents=True, exist_ok=True)
+    TRIGGERS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def age_days(path: Path) -> float:

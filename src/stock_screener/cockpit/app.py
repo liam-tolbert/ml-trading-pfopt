@@ -10,6 +10,7 @@ entry levels. You are the judge — the tool only does the mechanical filtering.
 """
 from __future__ import annotations
 
+import datetime
 import sys
 from pathlib import Path
 
@@ -22,11 +23,12 @@ import streamlit as st  # noqa: E402
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
-    load_watchlist, parse_ticker_list, save_watchlist, watchlist_list_csv,
-    watchlist_ohlcv_csv)
+    load_watchlist, make_entry, parse_ticker_list, save_watchlist, watchlist_list_csv,
+    watchlist_ohlcv_csv, watchlist_tickers)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     TradeUnavailable, build_buy_plan, fetch_account_summary, stop_is_valid, submit_buy_plan)
+from src.stock_screener.cockpit.triggers import load_latest_trigger_report  # noqa: E402
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
@@ -294,11 +296,14 @@ def filter_table(df, key_prefix: str = "flt"):
 
 
 # --------------------------------------------------------------------------- #
-# Watchlist — a shortlist you build by clicking. The canonical store is a plain ordered
-# list in session_state (NOT a widget key), so button callbacks and the multiselect can
-# both mutate it without fighting over widget ownership. It is PERSISTED across runs to
-# `data/cockpit/watchlist.json`: `_wl()` loads it once per session, and every mutation
-# saves it back (the CSV/txt export still lets you keep a portable copy).
+# Watchlist — a shortlist you build by clicking. The canonical store is an ordered list of
+# ENTRY DICTS {ticker, judged_pivot, date_added, pivot_source, note} in session_state (NOT
+# a widget key), so button callbacks and the multiselect can both mutate it without
+# fighting over widget ownership. `judged_pivot` is the FROZEN trigger level: the ⭐ add
+# freezes the pivot you're looking at ("judged"); picker/.txt adds are unfrozen until the
+# 📌 button or the nightly EOD check ("auto") freezes one. PERSISTED across runs to
+# `data/cockpit/watchlist.json`: `_wl()` loads it once per session (migrating a legacy
+# ticker-string file), and every mutation saves it back.
 # --------------------------------------------------------------------------- #
 def _wl() -> list:
     if "watchlist" not in st.session_state:              # first access this session -> load from disk
@@ -306,22 +311,47 @@ def _wl() -> list:
     return st.session_state["watchlist"]
 
 
+def _wl_tickers() -> list:
+    return watchlist_tickers(_wl())
+
+
+def _wl_entry(ticker: str):
+    return next((e for e in _wl() if isinstance(e, dict) and e.get("ticker") == ticker), None)
+
+
 def _wl_persist() -> None:
     save_watchlist(cache.WATCHLIST_JSON, _wl())
 
 
-def _wl_add(ticker: str, persist: bool = True) -> None:
-    wl = _wl()
-    if ticker and ticker not in wl:
-        wl.append(ticker)
+def _wl_add(ticker: str, judged_pivot=None, note: str = "", persist: bool = True) -> None:
+    entry = make_entry(ticker, judged_pivot, date_added=datetime.date.today().isoformat(),
+                       pivot_source="judged" if judged_pivot else None, note=note)
+    if entry and entry["ticker"] not in _wl_tickers():   # present ticker -> no-op (📌 re-freezes)
+        _wl().append(entry)
         if persist:                                      # bulk adders persist ONCE at the end
             _wl_persist()
 
 
+def _wl_freeze(ticker: str, pivot) -> None:
+    """The 📌 button: freeze/update an EXISTING entry's judged pivot to the level on the
+    chart right now (pivot_source "judged" — your call overrides an auto-frozen one).
+    date_added moves to today, the date of this pivot decision; the note is kept."""
+    probe = make_entry(ticker, pivot)                    # normalizes + validates the pivot
+    ent = _wl_entry(str(ticker or "").strip().upper())
+    if probe is None or probe["judged_pivot"] is None or ent is None:
+        return
+    ent["judged_pivot"] = probe["judged_pivot"]
+    ent["date_added"] = datetime.date.today().isoformat()
+    ent["pivot_source"] = "judged"
+    _wl_persist()
+
+
 def _wl_remove(ticker: str) -> None:
     wl = _wl()
-    if ticker in wl:
-        wl.remove(ticker)
+    kept = [e for e in wl
+            if (e.get("ticker") if isinstance(e, dict) else e) != ticker]
+    if len(kept) != len(wl):
+        st.session_state["watchlist"] = kept
         _wl_persist()
 
 
@@ -434,11 +464,12 @@ with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"
 with st.sidebar:
     st.markdown("---")
     _watch = _wl()
+    _watch_t = _wl_tickers()
     st.markdown(f"### ⭐ Watchlist ({len(_watch)})")
     _all_tickers = (res.candidates["ticker"].tolist()
                     if res.candidates is not None and len(res.candidates) else [])
     st.multiselect(
-        "Add tickers", options=sorted(set(_all_tickers) | set(_watch)),
+        "Add tickers", options=sorted(set(_all_tickers) | set(_watch_t)),
         key="wl_picker", on_change=_wl_add_from_picker,
         placeholder="Pick tickers to add…",
         help="Add several at once, or click the ⭐ button next to any chart. The list is "
@@ -454,27 +485,35 @@ with st.sidebar:
     if _up_msg:
         st.caption(_up_msg)
     if _watch:
-        st.caption(", ".join(_watch))
+        # TICKER 34.12 = frozen judged pivot · (a) = machine-frozen · \* = not frozen yet
+        st.caption(" · ".join(
+            (f"{e['ticker']} {e['judged_pivot']:.2f}"
+             + (" (a)" if e.get("pivot_source") == "auto" else ""))
+            if e.get("judged_pivot") else f"{e['ticker']}\\*"
+            for e in _watch))
+        if any(not e.get("judged_pivot") or e.get("pivot_source") == "auto" for e in _watch):
+            st.caption("\\* no frozen pivot yet — the nightly EOD check freezes one on "
+                       "first sight · (a) = auto-frozen; chart it and 📌 to judge your own.")
         _d1, _d2 = st.columns(2)
         _d1.download_button(
             "⬇ List (CSV)",
             watchlist_list_csv(res.candidates, _watch, DISPLAY_ORDER),
             file_name="watchlist.csv", mime="text/csv", width="stretch",
-            help="Your shortlist with its decision columns (tier, pivot, stop, target, …), "
-                 "in the order you added them.")
+            help="Your shortlist with its decision columns (tier, pivot, stop, target, …) "
+                 "plus the frozen judged_pivot/date/source, in the order you added them.")
         _d2.download_button(
-            "⬇ OHLCV (CSV)", watchlist_ohlcv_csv(_watch, res.payloads),
+            "⬇ OHLCV (CSV)", watchlist_ohlcv_csv(_watch_t, res.payloads),
             file_name="watchlist_ohlcv.csv", mime="text/csv", width="stretch",
             help="Daily Open/High/Low/Close/Volume for every watchlisted name, stacked "
                  "long-format with a Ticker column.")
         st.download_button(
-            "⬇ Names (.txt)", ",".join(_watch), file_name="watchlist.txt",
+            "⬇ Names (.txt)", ",".join(_watch_t), file_name="watchlist.txt",
             mime="text/plain", width="stretch",
             help="Just the tickers, comma-separated — the format the uploader above reads "
                  "back in.")
         st.button("🗑 Clear watchlist", on_click=_wl_clear, width="stretch",
                   help="Empties the list — including the saved copy on disk.")
-        _missing = [t for t in _watch if t not in res.payloads]
+        _missing = [t for t in _watch_t if t not in res.payloads]
         if _missing:
             st.caption(f"⚠︎ {', '.join(_missing)} not in the current scan — the list CSV "
                        "keeps the ticker only and the OHLCV omits it. Re-scan the universe "
@@ -528,7 +567,7 @@ with st.sidebar:
                 _account = fetch_account_summary()
             except TradeUnavailable as _e:
                 _account = {"error": str(_e)}
-            _plan, _skip = build_buy_plan(_watch, res.payloads, mode=_mode,
+            _plan, _skip = build_buy_plan(_watch_t, res.payloads, mode=_mode,
                                           amount=_amount, equity=_account.get("equity"))
             # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a
             # fresh Build re-seeds each stop to its computed default instead of Streamlit
@@ -644,6 +683,39 @@ with st.sidebar:
                     st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
+
+    # --- Last nightly EOD trigger check (written by scripts/eod_trigger.bat) --------- #
+    # Read-only surface: plain captions, every field via .get() so a hand-edited or
+    # older-schema report renders degraded instead of crashing the sidebar.
+    _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
+    if _rep:
+        st.markdown("---")
+        st.markdown(f"**🔔 EOD triggers — {_rep.get('date', '?')}**")
+        if _rep.get("all_stale"):
+            st.caption("💤 No new bar on the report date (weekend/holiday?) — "
+                       "no trigger can fire from a stale bar.")
+        _ticons = {"triggered": "🔔", "extended": "⬆", "watch": "👀", "stale": "💤",
+                   "no_pivot": "⚠", "no_data": "⚠"}
+        for _n in _rep.get("names", []):
+            _st = _n.get("status", "?")
+            _pv, _cl = _n.get("judged_pivot"), _n.get("close")
+            _vr = _n.get("volume_ratio_50")
+            _bits = [f"{_ticons.get(_st, '•')} **{_n.get('ticker', '?')}** {_st}"]
+            if _cl is not None and _pv:
+                _bits.append(f"{_cl:,.2f} vs pivot {_pv:,.2f}"
+                             + (" (a)" if _n.get("pivot_source") == "auto" else ""))
+            if _vr is not None:
+                _bits.append(f"vol {_vr:.1f}×")
+            if _n.get("earnings_soon"):
+                _bits.append(f"⚠ earnings in {_n.get('earnings_in')}d")
+            st.caption(" · ".join(_bits))
+        if _rep.get("summary", {}).get("triggered"):
+            st.caption("🔔 Triggered = closed above the frozen pivot on ≥1.5× 50-day "
+                       "volume — judge it (chart + fuel), then buy at/near the next "
+                       "open if it holds up.")
+    else:
+        st.caption("No EOD trigger report yet — schedule scripts/eod_trigger.bat "
+                   "(HANDOFF §6.14) for a nightly watchlist trigger check.")
 
 # --------------------------------------------------------------------------- #
 # Regime banner
@@ -770,13 +842,35 @@ with colSide:
     # Step 3 — chart controls (the chart itself renders in colChart on the left).
     with st.container(border=True):
         st.markdown(f"### {pick}")
-        # Add/remove the charted name to the export watchlist (the "judge it → keep it" flow).
-        if pick in _wl():
+        # Add/remove the charted name to the watchlist (the "judge it → keep it" flow).
+        # Adding from the chart FREEZES the pivot you're judging right now; the 📌 button
+        # below re-freezes an existing entry (e.g. picker-added, auto-frozen, or drifted).
+        _app_pivot = payload.get("levels", {}).get("pivot")
+        if pick in _wl_tickers():
             st.button(f"✓ In watchlist — remove {pick}", key="wl_toggle",
                       on_click=_wl_remove, args=(pick,), width="stretch")
+            _ent = _wl_entry(pick)
+            _frozen = _ent.get("judged_pivot") if _ent else None
+            if _app_pivot and (_frozen is None or abs(_frozen - _app_pivot) >= 0.005
+                               or (_ent or {}).get("pivot_source") == "auto"):
+                st.button(f"📌 Freeze pivot @ {_app_pivot:,.2f}", key="wl_freeze",
+                          on_click=_wl_freeze, args=(pick, _app_pivot), width="stretch",
+                          help="Locks THIS level as the nightly trigger pivot for this name "
+                               "(the detected pivot drifts as new bars arrive; your judged "
+                               "level overrides an auto-frozen one). Freeze again anytime "
+                               "to update it."
+                          + (f" Currently frozen @ {_frozen:,.2f}"
+                             f" ({(_ent or {}).get('pivot_source') or '?'})."
+                             if _frozen else ""))
+            elif _frozen:
+                st.caption(f"📌 pivot frozen @ {_frozen:,.2f} "
+                           f"({(_ent or {}).get('date_added') or '—'}, judged)")
         else:
             st.button(f"⭐ Add {pick} to watchlist", key="wl_toggle", type="primary",
-                      on_click=_wl_add, args=(pick,), width="stretch")
+                      on_click=_wl_add, args=(pick,),
+                      kwargs={"judged_pivot": _app_pivot}, width="stretch",
+                      help="Adds the name AND freezes the current pivot as your judged "
+                           "trigger level (shown in Step 4).")
         st.markdown(step_badge("Step 3", "Judge the VCP"))
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
         weekly = st.checkbox("Weekly view", value=False)

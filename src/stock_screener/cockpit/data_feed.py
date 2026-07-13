@@ -356,6 +356,7 @@ def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
 
 
 def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = False,
+                    max_age_days: float = 1.0,
                     chunk: int = 100, max_workers: int = 6,  # max_workers kept for API compat
                     pause: float = 0.5, retries: int = 2, incremental: bool = True,
                     overlap_days: int = 5, max_gap_days: int = 10,
@@ -367,10 +368,13 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     chunks, with inter-batch pauses + retry/backoff so a large universe doesn't get
     rate-limited into silently-dropped batches.
 
-    Caching is incremental: a fresh (<1d) parquet is used as-is; a cache with a small
-    recent gap is topped up with only the bars since its last date (one shared ``start``
-    across the batch); everything else (no cache, or a gap > ``max_gap_days``) gets a full
-    ``lookback`` refetch, which also re-baselines auto-adjusted history.
+    Caching is incremental: a fresh (< ``max_age_days``) parquet is used as-is; a cache
+    with a small recent gap is topped up with only the bars since its last date (one
+    shared ``start`` across the batch); everything else (no cache, or a gap >
+    ``max_gap_days``) gets a full ``lookback`` refetch, which also re-baselines
+    auto-adjusted history. ``max_age_days=0`` sends every cached name through the cheap
+    incremental top-up (the nightly EOD path — gets the finalized close without the full
+    2y refetch that ``force=True`` would do); the 1.0 default preserves the old behavior.
     """
     ensure_dirs()
     syms = [normalize(t) for t in tickers]
@@ -380,7 +384,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     today = pd.Timestamp.today().normalize()
     for sym in syms:
         path = PRICES_DIR / f"{sym}.parquet"
-        if not force and age_days(path) <= 1.0:
+        if not force and age_days(path) <= max_age_days:
             try:
                 out[sym] = pd.read_parquet(path)
                 continue
