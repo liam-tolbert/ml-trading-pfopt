@@ -382,11 +382,24 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     full_fetch: List[str] = []                 # need full period=lookback (cold / re-baseline)
     incr: Dict[str, tuple] = {}                # sym -> (cached_df, last_date)
     today = pd.Timestamp.today().normalize()
+    total = len(syms)
+    done = 0
+
+    def _emit(sym: str) -> None:
+        nonlocal done
+        done += 1
+        if progress:
+            progress(done, total, sym)
+
+    # Cache-served names EMIT too: on a warm cache (e.g. after the nightly prewarm) nearly
+    # every name lands here, and reading thousands of parquets takes real wall-clock — the
+    # old silent branch made the progress bar first appear, already full, at the very end.
     for sym in syms:
         path = PRICES_DIR / f"{sym}.parquet"
         if not force and age_days(path) <= max_age_days:
             try:
                 out[sym] = pd.read_parquet(path)
+                _emit(sym)
                 continue
             except Exception:
                 pass
@@ -405,15 +418,6 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 full_fetch.append(sym)         # too-stale -> full refetch (re-baseline)
         else:
             full_fetch.append(sym)
-
-    total = len(syms)
-    done = len(out)
-
-    def _emit(sym: str) -> None:
-        nonlocal done
-        done += 1
-        if progress:
-            progress(done, total, sym)
 
     if full_fetch or incr:
         import yfinance as yf

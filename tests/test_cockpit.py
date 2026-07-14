@@ -264,13 +264,29 @@ def test_streamlit_app_renders_offline():
     # patching the source attribute before .run() propagates into the app's namespace.
     # Redirect the persisted watchlist to a temp file so the test neither reads nor writes
     # the real data/cockpit/watchlist.json.
+    # run_scan fake that actually DRIVES the progress callback — the live-crash pattern:
+    # in-scan st.progress calls into an outside slot, then a second (memoized) rerun. Under
+    # @st.cache_data this died with CacheReplayClosureError on the rerun (element replay
+    # into a vanished block); the session-state memo must survive it, calling the scan once.
+    calls = {"n": 0}
+
+    def _fake_scan(*a, progress=None, **kw):
+        calls["n"] += 1
+        if progress:
+            for i in (1, 20, 40):
+                progress(i, 40, "SYN")
+        return result
+
     with tempfile.TemporaryDirectory() as _tmp:
-        with patch.object(scanmod, "run_scan", return_value=result), \
+        with patch.object(scanmod, "run_scan", side_effect=_fake_scan), \
                 patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
                 patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
             at = AppTest.from_file(app_path, default_timeout=60)
             at.run()
-    assert not at.exception, f"app raised: {at.exception}"
+            assert not at.exception, f"app raised: {at.exception}"
+            at.run()                                     # rerun -> memo hit, no replay
+    assert not at.exception, f"app raised on the memoized rerun: {at.exception}"
+    assert calls["n"] == 1, f"scan should run once and memoize, ran {calls['n']}x"
 
 
 def test_watchlist_export_helpers():
@@ -1750,7 +1766,7 @@ def test_rmv_gate_vetoes_below_pivot_only():
     # at the pivot mid-breakout the RMV burst must NOT veto a valid structure
     assert vh["is_vcp"] is True, (vh["rmv"], vh["pattern_details"])
     assert vh["rmv"] > vc["rmv"], (vh["rmv"], vc["rmv"])
-    assert vh["tier"] == "A", (vh["tier"], vh["tier_reason"])
+    assert vh["tier"] == "A", (vh["tier"], vh["pattern_details"])
 
 
 def _ohlc_series(segments, start=100.0, band=0.01):
@@ -1778,8 +1794,8 @@ def test_vcp_multi_threshold_sees_quiet_taper_after_loud_history():
                        (10, 141.5), (8, 152), (8, 145.2), (8, 152.5),
                        (8, 147.2), (8, 153), (8, 149.2), (6, 156)])
     v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
-    assert v["is_vcp"] is True, (v["tier"], v["tier_reason"], v["pattern_details"])
-    assert v["tier"] == "A", (v["tier"], v["tier_reason"])
+    assert v["is_vcp"] is True, (v["tier"], v["pattern_details"])
+    assert v["tier"] == "A", (v["tier"], v["pattern_details"])
     assert v["contraction_count"] >= 3, v["pattern_details"]
 
 
@@ -1791,8 +1807,8 @@ def test_vcp_finds_tight_final_leg_after_wide_start():
     df = _ohlc_series([(60, 150), (12, 120), (12, 148), (10, 133), (10, 147),
                        (8, 137), (10, 145)])
     v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
-    assert v["is_vcp"] is True, (v["tier"], v["tier_reason"], v["pattern_details"])
-    assert v["tier"] == "A", (v["tier"], v["tier_reason"])
+    assert v["is_vcp"] is True, (v["tier"], v["pattern_details"])
+    assert v["tier"] == "A", (v["tier"], v["pattern_details"])
     depths = [c["drawdown_pct"] for c in v["contractions"]]
     assert depths[-1] < 10.0, depths
 
@@ -1805,7 +1821,7 @@ def test_vcp_two_day_spike_is_not_a_base():
     df = _ohlc_series([(150, 250), (1, 225), (1, 248)])
     v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
     assert v["is_vcp"] is False, v["pattern_details"]
-    assert v["tier"] == "C", (v["tier"], v["tier_reason"])
+    assert v["tier"] == "C", (v["tier"], v["pattern_details"])
 
 
 def test_vcp_deal_pinned_stock_is_dead_tape():
@@ -1820,8 +1836,8 @@ def test_vcp_deal_pinned_stock_is_dead_tape():
                          "Volume": 50_000}, index=flat_idx)
     df = pd.concat([df, flat])
     v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
-    assert v["tier"] == "C", (v["tier"], v["tier_reason"])
-    assert "Dead tape" in v["tier_reason"], v["tier_reason"]
+    assert v["tier"] == "C", (v["tier"], v["pattern_details"])
+    assert "Dead tape" in v["pattern_details"], v["pattern_details"]
 
 
 def test_vcp_extended_breakout_is_watch_not_review():
@@ -1832,9 +1848,10 @@ def test_vcp_extended_breakout_is_watch_not_review():
     df = _ohlc_series([(60, 150), (10, 138), (8, 149), (8, 141.8), (8, 150),
                        (8, 145.5), (15, 175)])
     v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
-    assert v["tier"] == "B", (v["tier"], v["tier_reason"])
-    assert "extended" in v["tier_reason"].lower() or "past the pivot" in v["tier_reason"], \
-        v["tier_reason"]
+    assert v["tier"] == "B", (v["tier"], v["pattern_details"])
+    # extended = a VALID pattern demoted to watch (tier_reason text removed 2026-07-13; the
+    # is_vcp True + tier B pair is what distinguishes "extended" from "still forming")
+    assert v["is_vcp"] is True, (v["tier"], v["pattern_details"])
 
 
 def test_vcp_benchmark_200_charts():
@@ -1857,7 +1874,7 @@ def test_vcp_benchmark_200_charts():
         r = detect_vcp(df, float(df["Close"].iloc[-1]), {})
         tiers[t] = r["tier"]
         if lab["label"] == "YES" and r["tier"] == "C":
-            misses.append((t, r["tier_reason"]))
+            misses.append((t, r["pattern_details"]))
 
     yes = [t for t, v in LABELS.items() if v["label"] == "YES"]
     n_a = sum(1 for t in tiers if tiers[t] == "A")

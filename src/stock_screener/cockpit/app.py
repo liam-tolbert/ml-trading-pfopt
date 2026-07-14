@@ -111,7 +111,7 @@ two axes flip from quiet to loud:
   scheduled **earnings report** — with no profit cushion, an earnings gap can blow
   straight through the stop. (Minervini holds through earnings only with a cushion.)
 - Set the **7–8% stop immediately** and never lower it.
-- First target ~**20–25%**; trail with the 50-day SMA once well in profit.
+- First target **+25%** above the pivot; trail with the 50-day SMA once well in profit.
 - **Size** so a stop-out costs ~1% of the account (set Account $ / Risk %).
 
 These levels are advisory — place the order in your broker.
@@ -137,7 +137,6 @@ READABLE_COLS = {
     "vcp": "VCP detected",
     "num_contractions": "# Contractions",
     "vcp_quality": "VCP quality (0-100)",
-    "tier_reason": "Tier reason",
     "breakout_today": "Breakout today",
     "vol_confirmed": "Vol confirmed",
     "pct_to_pivot": "Distance to pivot (%)",
@@ -165,16 +164,13 @@ COL_HELP = {
     "tier": "Review tier (recall-first): A = valid tightening base in/near the buy zone — "
             "review these. B = watch: base still forming, or valid but extended past the "
             "buy zone; never hidden. C = safely skipped (dead tape / no pullbacks / stale "
-            "base) — the reason is in 'Tier reason'. Benchmarked on 200 hand-labeled "
-            "charts: zero real setups landed in C.",
+            "base). Benchmarked on 200 hand-labeled charts: zero real setups landed in C.",
     "vcp": "A valid Volatility Contraction Pattern was detected: 2–6 progressively tighter "
            "pullbacks, the last one tight (≤12%), with price near its 52-week high.",
     "num_contractions": "Number of peak→trough pullbacks in the current base. Minervini's "
                         "range is 2–6.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
                    "+ near-high 20 + base length 10). Shown even when VCP is False.",
-    "tier_reason": "Why the detector placed the name in its tier — every exclusion or "
-                   "demotion is auditable, nothing is silently hidden.",
     "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
                       "confirmed' for the volume side).",
     "vol_confirmed": "True when the latest-day volume is ≥ 1.5× its 20-day average — the "
@@ -183,7 +179,7 @@ COL_HELP = {
                     "negative = already above/extended.",
     "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
     "stop": "Advisory stop-loss, ~7–8% below the pivot.",
-    "target": "First objective, ~+22.5% above the pivot (the 20–25% zone).",
+    "target": "First objective, +25% above the pivot.",
 }
 
 # The table's four decision groups, in display order. This drives BOTH the column
@@ -193,8 +189,7 @@ COL_HELP = {
 COL_GROUPS = [
     ("Identify", ["ticker", "price"]),
     ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
-    ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
-                              "tier_reason"]),
+    ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
                                "pct_to_pivot", "pivot", "stop", "target"]),
 ]
@@ -392,16 +387,27 @@ def _wl_add_from_upload() -> None:
         f"Added {len(_wl()) - before} new ticker(s) from {getattr(up, 'name', 'the file')}.")
 
 
-@st.cache_data(show_spinner=False)
-def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce, _force=False):
-    # `_force` is underscore-prefixed so Streamlit EXCLUDES it from the cache key — force=True and
-    # force=False share one memo entry, so a forced Re-scan doesn't fork the cache and a later
-    # filter change re-screens off the (force=False) 24h price cache instead of re-downloading.
-    # The body only runs on a genuine miss (new nonce / cleared cache / changed filter), using
-    # whatever `_force` was passed on that call; the Re-scan button sets it True for exactly its run.
+def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce,
+                 _force=False, _progress=None):
+    # Hand-rolled SESSION-STATE memo, deliberately NOT @st.cache_data: cache_data RECORDS
+    # any st element emitted inside the cached function and REPLAYS it on every cache hit —
+    # the progress bar drawn into an outside st.empty() slot made every post-scan rerun die
+    # with CacheReplayClosureError (the replayed element's target block no longer exists).
+    # A plain memo has no replay machinery, so the in-scan progress callback is legal.
+    # `_force`/`_progress` stay OUT of the key — force=True/False share one entry, so a
+    # forced Re-scan doesn't fork the memo and a later filter change re-screens off the
+    # 24h price cache instead of re-downloading. The body only runs on a genuine miss
+    # (new nonce / popped memo / changed filter); Re-scan pops the memo + sets _force=True.
+    key = (universe, int(min_criteria), float(min_rs), bool(require_vcp),
+           int(min_fund), int(nonce))
+    memo = st.session_state.get("_scan_memo")
+    if memo is not None and memo[0] == key:
+        return memo[1]
     cfg = ScanConfig(min_criteria=min_criteria, min_rs=float(min_rs),
                      require_vcp=require_vcp, min_fundamental_score=min_fund)
-    return run_scan(universe=universe, cfg=cfg, force=_force)
+    res = run_scan(universe=universe, cfg=cfg, force=_force, progress=_progress)
+    st.session_state["_scan_memo"] = (key, res)
+    return res
 
 
 # --------------------------------------------------------------------------- #
@@ -450,11 +456,31 @@ _force = False
 if st.sidebar.button("🔄 Re-scan (refresh prices)"):
     st.session_state.nonce += 1
     _force = True
-    _cached_scan.clear()
+    st.session_state.pop("_scan_memo", None)
+
+# Price-fetch progress (the multi-minute part of a cold scan). On a memo hit the scan body
+# never runs, so the bar simply never appears; the slot is cleared right after. (Safe only
+# because _cached_scan is a plain session-state memo — under @st.cache_data these in-scan
+# element calls would be recorded and replayed on hits: CacheReplayClosureError.)
+_prog_slot = st.empty()
+
+
+def _scan_progress(done, total, label):
+    # `label` arrives phase-prefixed from run_scan ("Prices · AAPL" / "Screening · AAPL");
+    # the bar walks 0→100% once per phase. Throttled: one repaint per ~25 names.
+    if done % 25 and done != total:
+        return
+    try:
+        _prog_slot.progress(min(done / max(total, 1), 1.0),
+                            text=f"{label} — {done}/{total}")
+    except Exception:                             # progress must never kill a scan
+        pass
+
 
 with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"):
     res = _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund,
-                       st.session_state.nonce, _force=_force)
+                       st.session_state.nonce, _force=_force, _progress=_scan_progress)
+_prog_slot.empty()
 
 # --------------------------------------------------------------------------- #
 # Sidebar — Watchlist (build by clicking ⭐ on charts / the picker; export to keep).

@@ -171,7 +171,8 @@ def _empty(reason: str) -> Dict[str, any]:
         'contraction_quality': 0.0, 'volume_quality': 0.0, 'base_length_weeks': 0.0,
         'breakout_volume_ratio': 1.0, 'near_52w_high': False,
         'distance_from_52w_high_pct': 100.0, 'rmv': 100.0, 'pattern_details': reason,
-        'tier': 'C', 'tier_reason': reason, 'pivot_price': None, 'zz_threshold': None,
+        'tier': 'C', 'zz_threshold': None,
+        # 'pivot_price': None,        # export dropped 2026-07-13 (no consumer) — see _detect_at
     }
 
 
@@ -324,35 +325,20 @@ def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: floa
     is_vcp = structure_ok and rmv_ok
 
     # ---- Review tier (recall-first: C is ONLY for safe, can't-be-a-setup exclusions) ---- #
+    # tier_reason audit strings removed 2026-07-13 (user: unused overhead once the column
+    # left the UI). Each branch's comment preserves the old reason wording — re-attach a
+    # string here if a consumer ever wants the audit text back.
     if n == 0:
-        tier, tier_reason = 'C', 'No pullbacks found — nothing resembling a base'
+        tier = 'C'          # no pullbacks found — nothing resembling a base
     elif not fresh:
-        tier, tier_reason = 'C', f'Stale base: newest pullback {leg_age_weeks:.0f} weeks old'
+        tier = 'C'          # stale base: newest pullback {leg_age_weeks:.0f} weeks old
     elif is_vcp and in_buy_zone:
-        tier, tier_reason = 'A', 'Valid tightening base in/near the buy zone'
+        tier = 'A'          # valid tightening base in/near the buy zone
     elif is_vcp:
-        gap = (current_price / pivot_price - 1) * 100.0
-        if gap > 0:
-            tier, tier_reason = 'B', f'Valid pattern but +{gap:.0f}% past the pivot — extended'
-        else:
-            tier, tier_reason = 'B', (f'Valid base shape but price {gap:.0f}% below the '
-                                      f'pivot — falling away, not coiling')
+        tier = 'B'          # valid pattern but extended past / fallen away from the pivot
     else:
-        if n < min_contractions:
-            why = f'Only {n} pullback(s) so far — base may still be forming'
-        elif not near_high:
-            why = f'{dist_high:.0f}% below the 52-week high — no nearby pivot'
-        elif not long_enough:
-            why = f'Base only {base_length_weeks:.1f} weeks long — forming'
-        elif not final_tight:
-            why = f'Final pullback {depths[-1]:.1f}% — not tight yet'
-        elif contraction_quality < TIGHTEN_MIN_PCT:
-            why = f'Pullbacks not tightening (quality {contraction_quality:.0f})'
-        elif not rmv_ok:
-            why = f'Base not quiet yet below the pivot (RMV {rmv_now:.0f})'
-        else:
-            why = 'Base not fully formed'
-        tier, tier_reason = 'B', why
+        tier = 'B'          # base still forming (few legs / far from the 52-wk high /
+        #                     too short / final leg not tight / not tightening / loud tape)
 
     # Quality 0-100 (same weighting as the vendored detector, so the app help text holds).
     q = 0.0
@@ -368,8 +354,6 @@ def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: floa
     if n >= min_contractions:
         sizes = ' → '.join(f"{d:.1f}%" for d in depths[-4:])
         pattern_details = f"{n} contractions: {sizes}"
-    elif tier == 'C':
-        pattern_details = tier_reason
     else:
         pattern_details = f"Only {n} contraction(s) detected (need {min_contractions}+)"
 
@@ -387,9 +371,11 @@ def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: floa
         'rmv': round(rmv_now, 1),
         'pattern_details': pattern_details,
         'tier': tier,
-        'tier_reason': tier_reason,
-        'pivot_price': round(pivot_price, 2) if pivot_price else None,
         'zz_threshold': round(float(thr), 4),
+        # pivot_price is NOT exported (dropped 2026-07-13, no consumer) — but the
+        # calculation above stays LIVE: in_buy_zone / below_pivot / the A-vs-B tier split
+        # all hang off it. Un-comment to expose it again:
+        # 'pivot_price': round(pivot_price, 2) if pivot_price else None,
     }
 
 
@@ -400,7 +386,9 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     ``detect_vcp_pattern`` — same return schema (``is_vcp``, ``vcp_quality``,
     ``contractions`` with number/peak_date/trough_date/peak_price/trough_price/
     drawdown_pct/volume_ratio/duration_days, ``contraction_count`` …) plus the review
-    ``tier`` ('A'/'B'/'C'), ``tier_reason``, ``pivot_price`` and ``zz_threshold``.
+    ``tier`` ('A'/'B'/'C') and ``zz_threshold``. (``tier_reason`` audit strings and the
+    ``pivot_price`` export were dropped 2026-07-13 — the pivot is still computed
+    internally for the buy-zone/extended tier split; see ``_detect_at``.)
 
     ``thr`` is the ZigZag reversal size. Leave it ``None`` (default) to run at up to four
     thresholds — long-history, recent-window (~2 months), an extra-tight 0.7× recent, and

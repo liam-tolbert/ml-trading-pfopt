@@ -139,7 +139,7 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
         "stop": float(stop_price),                          # 7-8% below pivot, 10% hard floor
         "stop_pct_from_pivot": ((pivot - stop_price) / pivot * 100.0) if pivot else None,
         "stop_clamped": bool(stop_clamped),
-        "target": float(pivot) * 1.225,                     # ~20-25% objective
+        "target": float(pivot) * 1.25,                      # +25% objective (user-locked)
         "breakout_today": bool(breakout.get("is_breakout")),
         "volume_ratio": float(breakout.get("volume_ratio", 1.0) or 1.0),
         "volume_confirmed": bool(breakout.get("volume_confirmed", False)),  # vol >= 1.5x avg
@@ -150,11 +150,15 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
 def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                     spy: pd.DataFrame,
                     get_fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
-                    cfg: Optional[ScanConfig] = None) -> ScanResult:
+                    cfg: Optional[ScanConfig] = None,
+                    progress: Optional[Callable[[int, int, str], None]] = None) -> ScanResult:
     """Run the SEPA funnel over already-fetched price frames (deterministic/offline).
 
     ``prices``: {ticker -> daily OHLCV}. ``spy``: SPY daily OHLCV.
     ``get_fundamentals``: optional callable run only on Step-1 passers (cheap).
+    ``progress``: optional ``(done, total, ticker)`` callback, called once per name —
+    on a warm cache THIS loop (phase/VCP detection over the whole universe) is the
+    multi-minute part of a scan, so it reports progress just like the price fetch.
     """
     cfg = cfg or ScanConfig()
     errors: List[str] = []
@@ -166,7 +170,9 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     rows: List[dict] = []
     payloads: Dict[str, dict] = {}
 
-    for t in tickers:
+    for _i, t in enumerate(tickers, 1):
+        if progress:
+            progress(_i, len(tickers), t)
         df = prices.get(t)
         if df is None or len(df) < cfg.min_history_rows:
             continue
@@ -231,7 +237,6 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "vcp": bool(vcp.get("is_vcp")),
                 "num_contractions": int(vcp.get("contraction_count", 0) or 0),
                 "vcp_quality": round(float(vcp.get("vcp_quality", 0) or 0), 0),
-                "tier_reason": vcp.get("tier_reason", ""),
                 "breakout_today": levels["breakout_today"],
                 "vol_confirmed": levels["volume_confirmed"],
                 "pct_to_pivot": _fmt(levels["pct_to_pivot"]),
@@ -291,7 +296,14 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     spy = data_feed.get_spy(force=force)
     if spy is None or len(spy) < 200:
         raise RuntimeError("Could not fetch SPY benchmark data (needed for RS/regime).")
+    # Two sequential progress phases share the one (done, total, label) callback; the label
+    # prefix tells the UI which phase the bar is walking through.
+    _p_fetch = (None if progress is None
+                else lambda d, t, s: progress(d, t, f"Prices · {s}"))
+    _p_screen = (None if progress is None
+                 else lambda d, t, s: progress(d, t, f"Screening · {s}"))
     prices = data_feed.get_many_prices(tickers, max_workers=max_workers,
-                                       force=force, progress=progress)
+                                       force=force, progress=_p_fetch)
     return screen_universe(list(prices.keys()), prices, spy,
-                           get_fundamentals=data_feed.get_fundamentals, cfg=cfg)
+                           get_fundamentals=data_feed.get_fundamentals, cfg=cfg,
+                           progress=_p_screen)
