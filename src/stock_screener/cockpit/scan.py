@@ -64,16 +64,34 @@ class ScanResult:
 
 # --------------------------------------------------------------------------- #
 def _rs_ratings(prices: Dict[str, pd.DataFrame], period: int) -> Dict[str, int]:
-    """IBD-style RS rating: percentile-rank trailing `period`-day return across the
-    whole scanned universe, mapped to 1-99."""
-    rets = {}
+    """IBD-style RS rating, 1-99: percentile-rank a WEIGHTED multi-horizon return blend
+    across the whole scanned universe (was: plain 6-mo return percentile).
+
+    Horizons derive from ``period`` (the ~6-mo leg, 126 trading days by default):
+    3-mo = period/2 at DOUBLE weight (IBD's recent-strength emphasis), then 6-mo, 9-mo
+    and 12-mo at single weight — the classic ``2·r3 + r6 + r9 + r12`` blend. The weighted
+    MEAN (sum / weights-used) is ranked rather than the raw sum so young listings can be
+    scored on the legs they actually have: a name missing the 9/12-mo legs competes on
+    its 3+6-mo strength instead of dropping out (the old inclusion rule — at least
+    ``period`` bars of history — is unchanged; for full-history names the mean is the
+    IBD sum / 5, which ranks identically)."""
+    horizons = ((max(1, period // 2), 2.0), (period, 1.0),
+                (period * 3 // 2, 1.0), (period * 2, 1.0))
+    scores = {}
     for t, df in prices.items():
         c = df["Close"]
-        if len(c) > period and c.iloc[-1 - period] > 0:
-            rets[t] = float(c.iloc[-1] / c.iloc[-1 - period] - 1.0)
-    if not rets:
+        if len(c) <= period or c.iloc[-1 - period] <= 0:
+            continue                                     # the 6-mo leg is mandatory
+        num = den = 0.0
+        for look, w in horizons:
+            if len(c) > look and c.iloc[-1 - look] > 0:
+                num += w * float(c.iloc[-1] / c.iloc[-1 - look] - 1.0)
+                den += w
+        if den > 0:
+            scores[t] = num / den
+    if not scores:
         return {}
-    pr = pd.Series(rets).rank(pct=True) * 99.0
+    pr = pd.Series(scores).rank(pct=True) * 99.0
     return {t: int(round(v)) for t, v in pr.items()}
 
 

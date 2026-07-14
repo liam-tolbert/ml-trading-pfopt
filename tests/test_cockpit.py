@@ -125,6 +125,38 @@ def test_build_chart_returns_figure_with_expected_traces():
                build_chart(ticker, df, lookback_days=90).data) >= 3
 
 
+def test_rs_ratings_ibd_weighted():
+    """The RS rating is an IBD-style weighted multi-horizon percentile (2×3mo + 6mo + 9mo
+    + 12mo): a smaller move concentrated in the last 3 months outranks a bigger move that
+    happened a year ago (recency counts double); a young name (≥6mo history) is rated on
+    the legs it has; a <6mo name is excluded."""
+    import pandas as pd
+    from src.stock_screener.cockpit.scan import _rs_ratings
+
+    def frame(closes):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=len(closes))
+        return pd.DataFrame({"Close": closes}, index=idx)
+
+    n = 260                                              # > 12mo of bars
+    # RECENT: +20% entirely inside the last ~3 months -> EVERY window sees it (they nest),
+    # so the blend is the full +20%
+    recent = [100.0] * (n - 60) + [100.0 + 20.0 * (i + 1) / 60 for i in range(60)]
+    # STALE: +25% a year ago, dead flat since -> only the 12-mo leg still sees (part of)
+    # it -> blend ≈ +4%
+    stale = [100.0 + 25.0 * (i + 1) / 55 for i in range(55)] + [125.0] * (n - 55)
+    # YOUNG: 140 bars (6-mo leg exists, 9/12-mo don't), +10% in the last 3 months
+    young = [100.0] * 80 + [100.0 + 10.0 * (i + 1) / 60 for i in range(60)]
+    prices = {"RECENT": frame(recent), "STALE": frame(stale),
+              "YOUNG": frame(young), "FLAT": frame([100.0] * n),
+              "SHORT": frame([100.0] * 100)}             # < 6mo -> no rating
+
+    rs = _rs_ratings(prices, 126)
+    assert "SHORT" not in rs and set(rs) == {"RECENT", "STALE", "YOUNG", "FLAT"}
+    # recency weighting: RECENT's +20% (all in 3mo) beats STALE's bigger-but-old +25%
+    assert rs["RECENT"] > rs["YOUNG"] > rs["STALE"] > rs["FLAT"], rs
+    assert all(0 <= v <= 99 for v in rs.values())
+
+
 def test_step2_summary_logic():
     s = scan_mod._step2_summary(None)
     assert s["score"] == 0 and s["available"] is False

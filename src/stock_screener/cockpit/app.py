@@ -64,8 +64,8 @@ trend-template criteria: price above stacked **50 > 150 > 200-day SMAs**, 200-da
 ≥1 month, **≥30% above the 52-wk low**, **within 25% of the 52-wk high**, confirmed Stage 2.
 This is *eligibility, not a buy signal.*
 
-- **RS** = relative-strength rating (percentile of 6-mo return vs the scanned set);
-  Minervini wants **70+**.
+- **RS** = relative-strength rating (IBD-style weighted blend of 3/6/9/12-mo returns,
+  recent 3-mo counted double, percentiled vs the scanned set); Minervini wants **70+**.
 - Tighten further in the sidebar: raise **min RS** or require a VCP.
 - Sort by `fund_score` / `rs`, then **click a row** to study the chart.
 """
@@ -149,8 +149,9 @@ READABLE_COLS = {
 COL_HELP = {
     "ticker": "Stock symbol. Click a row to chart it.",
     "price": "Latest close price.",
-    "rs": "Relative-strength rating 1–99: percentile of the trailing ~6-mo return vs the "
-          "scanned universe. Minervini wants 70+.",
+    "rs": "Relative-strength rating 1–99: IBD-style weighted return blend (2×3-mo + 6-mo "
+          "+ 9-mo + 12-mo — recent strength counts double), percentiled vs the scanned "
+          "universe. Minervini wants 70+.",
     "fund_score": "Step-2 fundamental checks passed (0–4): revenue ≥20%, EPS ≥20%, EPS "
                   "accelerating, margins expanding.",
     "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
@@ -442,7 +443,8 @@ if universe == "full_us":
 min_criteria = 8  # full Minervini trend template — all 8 criteria required (no 7/8)
 st.sidebar.caption("Gate: full **8/8** trend template")
 min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,
-                           help="IBD-style percentile of trailing 6-mo return vs the scanned universe")
+                           help="IBD-style weighted multi-horizon return percentile "
+                                "(2×3-mo + 6-mo + 9-mo + 12-mo) vs the scanned universe")
 require_vcp = st.sidebar.checkbox("VCP only (hint filter)", value=False)
 min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
 
