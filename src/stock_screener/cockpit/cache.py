@@ -13,14 +13,16 @@ ROOT = Path(__file__).resolve().parents[3]
 CACHE_DIR = ROOT / "data" / "cockpit"
 PRICES_DIR = CACHE_DIR / "prices"
 FUNDAMENTALS_DIR = CACHE_DIR / "fundamentals"
+EDGAR_DIR = CACHE_DIR / "edgar"                 # SEC XBRL backfill cache (per-ticker JSON)
 WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (entry dicts, across sessions)
-TRIGGERS_DIR = CACHE_DIR / "triggers"           # nightly EOD trigger reports + run log
+TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports + run log (half-hourly)
 TICKERS_TXT = ROOT / "data" / "tickers.txt"
 
 
 def ensure_dirs() -> None:
     PRICES_DIR.mkdir(parents=True, exist_ok=True)
     FUNDAMENTALS_DIR.mkdir(parents=True, exist_ok=True)
+    EDGAR_DIR.mkdir(parents=True, exist_ok=True)
     TRIGGERS_DIR.mkdir(parents=True, exist_ok=True)
 
 

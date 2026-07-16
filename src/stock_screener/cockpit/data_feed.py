@@ -21,7 +21,7 @@ from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 
-from .cache import (CACHE_DIR, FUNDAMENTALS_DIR, PRICES_DIR, TICKERS_TXT,
+from .cache import (CACHE_DIR, EDGAR_DIR, FUNDAMENTALS_DIR, PRICES_DIR, TICKERS_TXT,
                     age_days, ensure_dirs)
 
 # A stable, maintained constituents CSV (no API key); Wikipedia is the fallback.
@@ -591,6 +591,171 @@ def _next_earnings_date(tk) -> Optional[str]:
         return None
 
 
+def _last_earnings_surprise(tk) -> Optional[float]:
+    """Most recent reported EPS surprise %, from ``yf.Ticker.earnings_dates`` (the
+    'Surprise(%)' column; future/unreported rows are NaN and drop out). None on any
+    miss — never raises."""
+    try:
+        ed = tk.earnings_dates
+        if ed is None or getattr(ed, "empty", True):
+            return None
+        col = next((c for c in ed.columns if "surprise" in str(c).lower()), None)
+        if col is None:
+            return None
+        s = ed[col].dropna()
+        if not len(s):
+            return None
+        return float(s.sort_index().iloc[-1])          # newest REPORTED quarter
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# SEC EDGAR XBRL backfill — real YoY history where yfinance's ~4 quarters run out,
+# plus annual EPS growth and 3-quarter acceleration that yfinance can never provide.
+# Company-facts API (no key; SEC fair-use ~10 req/s with a contact User-Agent).
+# --------------------------------------------------------------------------- #
+EDGAR_UA = {"User-Agent": "ml-trading-pfopt cockpit (treblotmail@gmail.com)"}
+EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+# Fallback tag chains (same as the repo's Main.ipynb EDGAR pipeline).
+EDGAR_REVENUE_TAGS = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+                      "SalesRevenueNet")
+EDGAR_EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
+
+
+def _edgar_get_json(url: str) -> Optional[dict]:
+    try:
+        import requests
+        time.sleep(0.12)                               # stay politely under 10 req/s
+        r = requests.get(url, headers=EDGAR_UA, timeout=30)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def _edgar_cik(sym: str) -> Optional[int]:
+    """Ticker -> SEC CIK via the company_tickers.json map (one cached download, ~monthly).
+    Tries the dash form we normalize to AND the SEC's dot form (BRK-B vs BRK.B)."""
+    path = EDGAR_DIR / "company_tickers.json"
+    data = None
+    if age_days(path) <= 30.0:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+    if data is None:
+        data = _edgar_get_json(EDGAR_TICKERS_URL)
+        if data is None:
+            return None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data), encoding="utf-8")
+        except Exception:
+            pass
+    wanted = {sym.upper(), sym.upper().replace("-", ".")}
+    try:
+        for row in data.values():
+            if str(row.get("ticker", "")).upper() in wanted:
+                return int(row["cik_str"])
+    except Exception:
+        return None
+    return None
+
+
+def _edgar_series(facts: dict, tags, unit_keys) -> tuple:
+    """``(quarterly, annual)`` lists of ``(end_Timestamp, value)`` from the first us-gaap
+    tag with usable data. Quarterly = filing duration 60-120 days, annual = 300-400 days
+    (10-K YTD/other durations are dropped). Duplicate period-ends keep the LATEST 'filed'
+    (amended figures win). Ascending by period end."""
+    gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+    for tag in tags:
+        units = (gaap.get(tag) or {}).get("units") or {}
+        entries = None
+        for uk in unit_keys:
+            if units.get(uk):
+                entries = units[uk]
+                break
+        if not entries:
+            continue
+        q: dict = {}
+        a: dict = {}
+        for e in entries:
+            try:
+                dur = (pd.Timestamp(e["end"]) - pd.Timestamp(e["start"])).days
+                end = pd.Timestamp(e["end"])
+                val = float(e["val"])
+            except Exception:
+                continue
+            bucket = q if 60 <= dur <= 120 else (a if 300 <= dur <= 400 else None)
+            if bucket is None:
+                continue
+            filed = str(e.get("filed") or "")
+            if end not in bucket or filed >= bucket[end][0]:
+                bucket[end] = (filed, val)
+        if q or a:
+            return (sorted((k, v[1]) for k, v in q.items()),
+                    sorted((k, v[1]) for k, v in a.items()))
+    return [], []
+
+
+def _edgar_yoy_series(quarterly) -> list:
+    """``[(end, yoy_pct)]`` — each quarter vs the one ~a year earlier (330-400 days back;
+    date-matched rather than a fixed 4-step lag, so a missing quarter can't misalign the
+    comparison)."""
+    out = []
+    for i, (end, val) in enumerate(quarterly):
+        prior = next((v for e2, v in reversed(quarterly[:i])
+                      if 330 <= (end - e2).days <= 400), None)
+        g = _pct(val, prior)
+        if g is not None:
+            out.append((end, g))
+    return out
+
+
+def _edgar_backfill(sym: str) -> Optional[dict]:
+    """EDGAR-derived growth metrics for one ticker, cached weekly (like fundamentals):
+    quarterly revenue/EPS YoY (+prev), annual FY EPS growth, and a 3-quarter EPS
+    acceleration flag. None when the ticker has no CIK / no usable facts (foreign
+    listings, funds) — the caller just keeps its yfinance numbers."""
+    ensure_dirs()
+    path = EDGAR_DIR / f"{sym}.json"
+    if age_days(path) <= 7.0:
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    cik = _edgar_cik(sym)
+    facts = _edgar_get_json(EDGAR_FACTS_URL.format(cik=cik)) if cik is not None else None
+    if facts is None:
+        if path.exists():                              # fetch failed -> stale cache
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+        return None
+    eps_q, eps_fy = _edgar_series(facts, EDGAR_EPS_TAGS, ("USD/shares",))
+    rev_q, _rev_fy = _edgar_series(facts, EDGAR_REVENUE_TAGS, ("USD",))
+    eps_g = _edgar_yoy_series(eps_q)
+    rev_g = _edgar_yoy_series(rev_q)
+    out = {
+        "revenue_yoy": _jsonable(rev_g[-1][1]) if rev_g else None,
+        "revenue_yoy_prev": _jsonable(rev_g[-2][1]) if len(rev_g) >= 2 else None,
+        "eps_yoy": _jsonable(eps_g[-1][1]) if eps_g else None,
+        "eps_yoy_prev": _jsonable(eps_g[-2][1]) if len(eps_g) >= 2 else None,
+        "eps_fy_yoy": (_jsonable(_pct(eps_fy[-1][1], eps_fy[-2][1]))
+                       if len(eps_fy) >= 2 else None),
+        "eps_accel_3q": (bool(eps_g[-1][1] > eps_g[-2][1] > eps_g[-3][1])
+                         if len(eps_g) >= 3 else None),
+    }
+    try:
+        path.write_text(json.dumps(out), encoding="utf-8")
+    except Exception:
+        pass
+    return out
+
+
 def _fetch_fundamentals(sym: str) -> Optional[dict]:
     """Quarterly growth/margin metrics from yfinance (no cache). Keys are None when a
     metric can't be computed (yfinance often exposes only ~4 quarters, so YoY may be
@@ -625,6 +790,7 @@ def _fetch_fundamentals(sym: str) -> Optional[dict]:
     out = {k: _jsonable(v) for k, v in out.items()}
     # A date string, so added AFTER the float coercion (which would None it out).
     out["next_earnings"] = _next_earnings_date(tk)
+    out["last_surprise_pct"] = _last_earnings_surprise(tk)
     return out
 
 
@@ -639,15 +805,26 @@ def get_fundamentals(ticker: str, force: bool = False,
     if not force and age_days(path) <= max_age_days:
         try:
             cached = json.loads(path.read_text())
-            # Schema upgrade: caches written before the earnings-date field lack the
-            # key entirely — refetch those once so the column fills without waiting
-            # out the weekly staleness. (A present-but-None value stays cached.)
-            if "next_earnings" in cached:
+            # Schema upgrade: caches written before the earnings-date / surprise-and-
+            # EDGAR fields lack those keys entirely — refetch those once so the new
+            # columns fill without waiting out the weekly staleness. (A present-but-None
+            # value stays cached.)
+            if "next_earnings" in cached and "last_surprise_pct" in cached:
                 return cached
         except Exception:
             pass
     out = _fetch_fundamentals(sym)
     if out is not None:
+        # SEC EDGAR backfill: yfinance values WIN when present; EDGAR fills the Nones
+        # (deep YoY history) and contributes its own keys (FY EPS growth, 3q accel).
+        # Any failure leaves the yfinance dict untouched.
+        try:
+            ed = _edgar_backfill(sym)
+        except Exception:
+            ed = None
+        for k, v in (ed or {}).items():
+            if out.get(k) is None and v is not None:
+                out[k] = v
         try:
             path.write_text(json.dumps(out))
         except Exception:

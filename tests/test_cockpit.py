@@ -127,6 +127,119 @@ def test_build_chart_returns_figure_with_expected_traces():
                build_chart(ticker, df, lookback_days=90).data) >= 3
 
 
+def test_edgar_backfill_parsing():
+    """The SEC EDGAR backfill: quarterly vs annual bucketing by filing duration, amended
+    filings winning by 'filed' date, the revenue tag fallback chain, date-matched YoY
+    math, FY EPS growth and the 3-quarter acceleration flag — against canned
+    company-facts JSON, fully offline (mocked requests + temp EDGAR_DIR)."""
+    import tempfile
+    from unittest.mock import MagicMock, patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    def q(end, val, filed="2026-01-01", days=91):
+        start = (pd.Timestamp(end) - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+        return {"start": start, "end": end, "val": val, "filed": filed}
+
+    # 9 quarters of diluted EPS; the newest quarter has an AMENDED duplicate (later
+    # 'filed' wins). Two FY (annual, ~365d duration) rows.
+    eps_entries = [
+        q("2024-03-31", 1.00), q("2024-06-30", 1.00), q("2024-09-30", 1.00),
+        q("2024-12-31", 1.00), q("2025-03-31", 1.05), q("2025-06-30", 1.15),
+        q("2025-09-30", 1.30), q("2025-12-31", 1.50),
+        q("2026-03-31", 1.20, filed="2026-04-20"),
+        q("2026-03-31", 1.47, filed="2026-05-05"),          # amended -> wins
+        q("2025-12-31", 4.90, days=365), q("2024-12-31", 4.00, days=365),  # FY rows
+    ]
+    # Revenue only under the FALLBACK tag (no 'Revenues' key at all).
+    rev_entries = [q("2025-03-31", 100.0), q("2026-03-31", 130.0)]
+    facts = {"facts": {"us-gaap": {
+        "EarningsPerShareDiluted": {"units": {"USD/shares": eps_entries}},
+        "RevenueFromContractWithCustomerExcludingAssessedTax":
+            {"units": {"USD": rev_entries}},
+    }}}
+    cik_map = {"0": {"cik_str": 123456, "ticker": "TSTX", "title": "Test Co"}}
+
+    def fake_get(url, headers=None, timeout=0):
+        r = MagicMock()
+        r.raise_for_status.return_value = None
+        r.json.return_value = cik_map if "company_tickers" in url else facts
+        return r
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(dfeed, "EDGAR_DIR", Path(tmp)), \
+                patch("requests.get", fake_get), patch("time.sleep", lambda s: None):
+            out = dfeed._edgar_backfill("TSTX")
+            # cached: a second call must not refetch (poison the network to prove it)
+            with patch("requests.get", side_effect=AssertionError("refetched!")):
+                again = dfeed._edgar_backfill("TSTX")
+    assert again == out
+
+    # YoY math off the AMENDED 2026-03-31 value: 1.47 vs 1.05 -> +40%
+    assert abs(out["eps_yoy"] - 40.0) < 1e-6, out
+    # prev quarter: 1.50 vs 1.00 -> +50%
+    assert abs(out["eps_yoy_prev"] - 50.0) < 1e-6
+    # 3q acceleration: +40% (amended) vs +50% -> NOT strictly accelerating
+    assert out["eps_accel_3q"] is False
+    # FY growth: 4.90 vs 4.00 -> +22.5%
+    assert abs(out["eps_fy_yoy"] - 22.5) < 1e-6
+    # revenue via the fallback tag: 130 vs 100 -> +30%
+    assert abs(out["revenue_yoy"] - 30.0) < 1e-6
+    assert out["revenue_yoy_prev"] is None                  # only one matched pair
+
+
+def test_fundamentals_surprise_and_edgar_merge():
+    """(a) _last_earnings_surprise reads the newest REPORTED Surprise(%) row (future NaN
+    rows drop); (b) get_fundamentals merges the EDGAR backfill: yfinance values WIN,
+    EDGAR fills the Nones and adds its own keys; the merged dict is what gets cached;
+    (c) a pre-surprise-era cache (missing the new key) triggers one upgrade refetch."""
+    import json as _json
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    # (a) surprise parsing, incl. a future unreported row
+    class _Tk:
+        earnings_dates = pd.DataFrame(
+            {"EPS Estimate": [1.0, 1.1, 1.2], "Surprise(%)": [4.0, 6.5, float("nan")]},
+            index=pd.to_datetime(["2026-01-15", "2026-04-16", "2026-07-20"]))
+
+    assert dfeed._last_earnings_surprise(_Tk()) == 6.5
+
+    class _TkNone:
+        earnings_dates = None
+
+    assert dfeed._last_earnings_surprise(_TkNone()) is None
+
+    # (b) + (c) merge & cache behavior with both fetchers patched
+    yf_dict = {"revenue_yoy": None, "eps_yoy": 33.0, "eps_yoy_prev": None,
+               "operating_margin": 20.0, "next_earnings": "2026-08-01",
+               "last_surprise_pct": 6.5}
+    ed_dict = {"revenue_yoy": 12.0, "eps_yoy": 99.0, "eps_yoy_prev": 8.0,
+               "eps_fy_yoy": 22.5, "eps_accel_3q": True}
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(dfeed, "FUNDAMENTALS_DIR", Path(tmp)), \
+                patch.object(dfeed, "_fetch_fundamentals", lambda s: dict(yf_dict)), \
+                patch.object(dfeed, "_edgar_backfill", lambda s: dict(ed_dict)):
+            out = dfeed.get_fundamentals("TSTX")
+            assert out["revenue_yoy"] == 12.0             # EDGAR fills the None
+            assert out["eps_yoy"] == 33.0                 # yfinance wins when present
+            assert out["eps_yoy_prev"] == 8.0
+            assert out["eps_fy_yoy"] == 22.5 and out["eps_accel_3q"] is True
+            cached = _json.loads((Path(tmp) / "TSTX.json").read_text())
+            assert cached == out                          # the MERGED dict is cached
+
+            # (c) an old-schema cache (no last_surprise_pct) forces one refetch
+            (Path(tmp) / "OLD.json").write_text(
+                _json.dumps({"revenue_yoy": 1.0, "next_earnings": None}))
+            out2 = dfeed.get_fundamentals("OLD")
+            assert "last_surprise_pct" in out2 and out2["eps_fy_yoy"] == 22.5
+
+
 def test_rs_ratings_ibd_weighted():
     """The RS rating is an IBD-style weighted multi-horizon percentile (2×3mo + 6mo + 9mo
     + 12mo): a smaller move concentrated in the last 3 months outranks a bigger move that

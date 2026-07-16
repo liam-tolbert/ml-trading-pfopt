@@ -882,6 +882,19 @@ with colSide:
                         else f" ({-ei}d ago)" if ei < 0 else f" (in {ei}d)")
                 warn = " ⚠️" if _earnings_flag(ei) else ""
                 st.markdown(f"**Earnings:** {ne}{when}{warn}")
+            # EDGAR-backfilled depth + the last reported surprise (yfinance can't provide
+            # FY growth or 3-quarter acceleration — see data_feed._edgar_backfill).
+            _fy, _acc, _sp = (f.get("eps_fy_yoy"), f.get("eps_accel_3q"),
+                              f.get("last_surprise_pct"))
+            _extra = []
+            if _fy is not None:
+                _extra.append(f"**FY EPS:** {_fy:+.1f}%")
+            if _acc is not None:
+                _extra.append("3q accel ✅" if _acc else "3q accel —")
+            if _sp is not None:
+                _extra.append(f"surprise {_sp:+.1f}%")
+            if _extra:
+                st.markdown(" · ".join(_extra))
             checks = s2.get("checks", {})
             st.markdown(" ".join(
                 f"{'✅' if checks.get(k) else '—'} {lbl}"
