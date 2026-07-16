@@ -1359,6 +1359,20 @@ def test_incremental_price_cache_appends_delta():
             assert any("period" in c for c in calls), "divergence must trigger a full refetch"
             assert len(got2) == 20 and got2["Close"].iloc[0] == 50.0
 
+    # (c) TODAY's bar is PROVISIONAL while the session runs — its close moving between
+    # intraday fetches is NOT a split, so it must never re-baseline (the merge still takes
+    # the newest bar); the SAME divergence on a settled prior day still re-baselines.
+    tidx = pd.DatetimeIndex(list(pd.bdate_range(end=today - pd.Timedelta(days=3),
+                                                periods=9)) + [today])
+    base = _ohlcv(tidx, [100.0] * 10)
+    moved_today = _ohlcv(pd.DatetimeIndex([today]), [107.0])       # +7% vs cached today-bar
+    m, full = dfeed._merge_incremental(base, moved_today, "2y")
+    assert full is False, "a moving TODAY bar must not trigger a re-baseline"
+    assert float(m.loc[today, "Close"]) == 107.0                   # newest provisional bar wins
+    moved_prior = _ohlcv(pd.DatetimeIndex([tidx[-2]]), [55.0])     # settled day -> real split
+    _, full2 = dfeed._merge_incremental(base, moved_prior, "2y")
+    assert full2 is True, "divergence on a settled day must still re-baseline"
+
 
 # --------------------------------------------------------------------------- #
 # Nightly EOD trigger check (triggers.py — pure)
@@ -1388,12 +1402,23 @@ def test_check_triggers_pure():
     def E(t, pivot):
         return make_entry(t, pivot, date_added="2026-07-01", pivot_source="judged")
 
-    # (a) close 100 > pivot 98 on 3x volume, bar dated today -> TRIGGERED
-    r = check_one(E("TRG", 98.0), _trigger_frame(TODAY, flat, spike_vol), None, today=TODAY)
+    # (a) close 100 > pivot 98 on 3x volume, bar dated today -> TRIGGERED. After the
+    # close (16:30) the session is fully elapsed, so pace == the plain 50-day ratio.
+    r = check_one(E("TRG", 98.0), _trigger_frame(TODAY, flat, spike_vol), None,
+                  today=TODAY, now=f"{TODAY} 16:30")
     assert r["status"] == "triggered" and r["triggered"] is True, r
     assert r["close_above_pivot"] and r["volume_confirmed"] and not r["stale"]
     assert abs(r["volume_ratio_50"] - 3.0) < 1e-9
+    assert abs(r["volume_pace"] - 3.0) < 1e-9            # elapsed=1.0 -> pace == ratio
     assert abs(r["pct_from_pivot"] - (100.0 / 98.0 - 1) * 100) < 0.01
+
+    # intraday pace: at 12:45 half the 09:30-16:00 session has elapsed -> the same
+    # volume reads at DOUBLE pace ("running hot for the time of day"); the gate is
+    # untouched (still the plain ratio).
+    r_mid = check_one(E("TRG", 98.0), _trigger_frame(TODAY, flat, spike_vol), None,
+                      today=TODAY, now=f"{TODAY} 12:45")
+    assert abs(r_mid["volume_pace"] - 6.0) < 1e-9        # 3.0 / 0.5
+    assert r_mid["triggered"] is True                    # gate = actual ratio, not pace
 
     # (b) same but flat volume -> price cleared, volume didn't -> watch, not triggered
     r2 = check_one(E("NOV", 98.0), _trigger_frame(TODAY, flat), None, today=TODAY)
@@ -1404,10 +1429,12 @@ def test_check_triggers_pure():
     r3 = check_one(E("EXT", 90.0), _trigger_frame(TODAY, flat, spike_vol), None, today=TODAY)
     assert r3["status"] == "extended" and r3["extended"] is True
 
-    # (d) stale bar (run date is the next business day) -> never fires
+    # (d) stale bar (run date is the next business day) -> never fires, and pace is
+    # meaningless off a stale bar -> None
     r4 = check_one(E("STL", 98.0), _trigger_frame(TODAY, flat, spike_vol), None,
-                   today="2026-07-13")
+                   today="2026-07-13", now="2026-07-13 12:00")
     assert r4["status"] == "stale" and r4["stale"] is True and r4["triggered"] is False
+    assert r4["volume_pace"] is None
 
     # (e) below the pivot -> watch, negative distance
     r5 = check_one(E("BLW", 105.0), _trigger_frame(TODAY, flat), None, today=TODAY)
@@ -1426,18 +1453,25 @@ def test_check_triggers_pure():
               "BLW": _trigger_frame(TODAY, flat),
               "UNF": _trigger_frame(TODAY, flat)}
     spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
-    rep = check_triggers(entries, prices, spy=spy, today=TODAY)
+    rep = check_triggers(entries, prices, spy=spy, today=TODAY, now=f"{TODAY} 11:00")
     s = rep["summary"]
     assert s["n"] == 5
     assert s["triggered"] == ["TRG"] and s["extended"] == ["EXT"]
     assert s["no_data"] == ["GONE"] and s["no_pivot"] == ["UNF"]
     assert rep["all_stale"] is False and rep["date"] == TODAY
     assert rep["spy"] is not None and "phase" in rep["spy"]
+    assert rep["intraday"] is True                       # fresh bar + mid-session run
 
-    # all-stale run (holiday): report still builds, flagged, nothing triggered
+    # the same report generated after the close is NOT intraday (settled bar)
+    rep_eod = check_triggers(entries, prices, spy=spy, today=TODAY, now=f"{TODAY} 16:30")
+    assert rep_eod["intraday"] is False
+
+    # all-stale run (holiday): report still builds, flagged, nothing triggered, and a
+    # mid-session clock does NOT make a stale-bar report "intraday"
     rep2 = check_triggers([E("TRG", 98.0)], {"TRG": _trigger_frame(TODAY, flat, spike_vol)},
-                          today="2026-07-13")
+                          today="2026-07-13", now="2026-07-13 12:00")
     assert rep2["all_stale"] is True and rep2["summary"]["triggered"] == []
+    assert rep2["intraday"] is False
 
 
 def test_freeze_missing_pivots():
@@ -1510,7 +1544,7 @@ def test_trigger_report_roundtrip():
         (d / "triggers_2026-07-11.json").write_text("{ not json", encoding="utf-8")
         assert load_latest_trigger_report(d)["date"] == "2026-07-10"
         # the console renderer never chokes on a minimal report (ASCII path)
-        assert "EOD TRIGGER CHECK" in format_report(r2)
+        assert "TRIGGER CHECK" in format_report(r2)
 
 
 def test_eod_trigger_cli_offline():
@@ -1576,12 +1610,14 @@ def test_trigger_report_sidebar_renders():
 
     canned = {
         "schema": 1, "date": "2026-07-10",
+        "generated_at": "2026-07-10T14:31:05-04:00",       # -> "14:31" in the header
         "spy": {"phase": 2, "phase_name": "Stage 2 - Advancing", "trend": "Bullish"},
-        "all_stale": False,
+        "all_stale": False, "intraday": True,
         "names": [
             {"ticker": "TRGX", "status": "triggered", "judged_pivot": 34.12,
              "pivot_source": "judged", "close": 35.0, "volume_ratio_50": 2.1,
-             "triggered": True, "earnings_soon": True, "earnings_in": 12},
+             "volume_pace": 2.8, "triggered": True, "earnings_soon": True,
+             "earnings_in": 12},
             {"ticker": "AUTX", "status": "watch", "judged_pivot": 50.0,
              "pivot_source": "auto", "close": 48.0, "volume_ratio_50": 0.9},
             {"ticker": "NOPX", "status": "no_pivot"},      # sparse row must render too
@@ -1603,7 +1639,9 @@ def test_trigger_report_sidebar_renders():
     rendered = " ".join(str(getattr(m, "value", ""))
                         for m in list(at.markdown) + list(getattr(at, "caption", [])))
     assert "2026-07-10" in rendered, "report date not rendered"
+    assert "14:31" in rendered, "check time (from generated_at) not rendered"
     assert "TRGX" in rendered and "triggered" in rendered, "triggered name not rendered"
+    assert "pace 2.8" in rendered, "intraday volume pace not rendered"
 
 
 def test_get_many_prices_max_age_days():

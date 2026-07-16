@@ -725,7 +725,12 @@ with st.sidebar:
     _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
     if _rep:
         st.markdown("---")
-        st.markdown(f"**🔔 EOD triggers — {_rep.get('date', '?')}**")
+        _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, best-effort
+        st.markdown(f"**🔔 Trigger check — {_rep.get('date', '?')}"
+                    + (f" {_hm}" if _hm else "") + "**")
+        if _rep.get("intraday"):
+            st.caption("⏱ intraday — close/volume provisional until ~4pm; pace = volume "
+                       "so far vs expected by this time of day.")
         if _rep.get("all_stale"):
             st.caption("💤 No new bar on the report date (weekend/holiday?) — "
                        "no trigger can fire from a stale bar.")
@@ -741,6 +746,9 @@ with st.sidebar:
                              + (" (a)" if _n.get("pivot_source") == "auto" else ""))
             if _vr is not None:
                 _bits.append(f"vol {_vr:.1f}×")
+            _pc = _n.get("volume_pace")
+            if _pc is not None and _rep.get("intraday"):
+                _bits.append(f"pace {_pc:.1f}×")
             if _n.get("earnings_soon"):
                 _bits.append(f"⚠ earnings in {_n.get('earnings_in')}d")
             st.caption(" · ".join(_bits))
@@ -749,8 +757,8 @@ with st.sidebar:
                        "volume — judge it (chart + fuel), then buy at/near the next "
                        "open if it holds up.")
     else:
-        st.caption("No EOD trigger report yet — schedule scripts/eod_trigger.bat "
-                   "(HANDOFF §6.14) for a nightly watchlist trigger check.")
+        st.caption("No trigger report yet — schedule scripts/eod_trigger.bat "
+                   "(HANDOFF §6.18) for half-hourly watchlist trigger checks.")
 
 # --------------------------------------------------------------------------- #
 # Regime banner

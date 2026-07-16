@@ -1,8 +1,11 @@
-"""Nightly EOD trigger check — pure logic (no Streamlit, no network; data via arguments).
+"""Watchlist trigger check — pure logic (no Streamlit, no network; data via arguments).
 
-The weekend hunt builds the watchlist; the daily job (HANDOFF §6.11) is answering ONE
-question per name after the close: **did it close above its frozen pivot on ≥1.5× average
-volume?** :func:`check_triggers` answers it from already-fetched frames; the CLI wrapper
+The weekend hunt builds the watchlist; the scheduled job (HANDOFF §6.11/§6.18 — every 30
+minutes during market hours since 2026-07-16) answers ONE question per name: **is it
+above its frozen pivot on ≥1.5× average volume?** Intraday runs read the live provisional
+bar (flagged ``intraday``; ``volume_pace`` says whether volume is running hot for the
+time of day); the last run of the day (~16:30) sees the settled close.
+:func:`check_triggers` answers from already-fetched frames; the CLI wrapper
 (``eod_trigger.py``) does the fetching, report persistence, and scheduling glue.
 
 Pivots are FROZEN on the watchlist entry (``judged_pivot`` — see ``export.py``): the
@@ -38,6 +41,13 @@ EXTENDED_PCT = 0.05         # close > pivot * 1.05 = past the buy zone ("don't c
 EARNINGS_SOON_DAYS = 21     # mirror the app's ⚠ earnings window
 MIN_ROWS_FOR_PIVOT = 200    # classify_phase needs >= 200 rows to compute a pivot
 
+# Intraday half-hourly runs (the schedule since 2026-07-16): the session clock for the
+# volume-pace read and the provisional-bar flag.
+SESSION_OPEN_MIN = 9 * 60 + 30    # 09:30 ET, in minutes-of-day
+SESSION_LEN_MIN = 390             # 09:30 -> 16:00
+PACE_MIN_ELAPSED = 0.1            # clip: dividing by the first few minutes explodes the pace
+INTRADAY_CUTOFF_MIN = 16 * 60 + 5  # runs before ~16:05 ET see a provisional bar
+
 REPORT_SCHEMA = 1
 STATUSES = ("no_data", "no_pivot", "stale", "extended", "triggered", "watch")
 
@@ -47,6 +57,23 @@ def _today_et(today=None) -> pd.Timestamp:
     if today is not None:
         return pd.Timestamp(today).normalize()
     return pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
+
+
+def _now_et(now=None) -> pd.Timestamp:
+    """The run's wall clock in New York, tz-naive — pinned in tests like ``today``."""
+    if now is not None:
+        return pd.Timestamp(now)
+    return pd.Timestamp.now(tz="America/New_York").tz_localize(None)
+
+
+def _session_elapsed(now: pd.Timestamp) -> float:
+    """Fraction of the 09:30-16:00 session elapsed at ``now``: 0.0 pre-open, 1.0 at/after
+    the close, clipped to >= PACE_MIN_ELAPSED once trading has begun (the first minutes
+    would otherwise explode the pace ratio)."""
+    mins = now.hour * 60 + now.minute - SESSION_OPEN_MIN
+    if mins <= 0:
+        return 0.0
+    return min(1.0, max(PACE_MIN_ELAPSED, mins / SESSION_LEN_MIN))
 
 
 def _volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
@@ -110,14 +137,16 @@ def freeze_missing_pivots(entries: Sequence[dict], prices: Dict[str, pd.DataFram
 
 
 def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
-              today=None) -> dict:
+              today=None, now=None) -> dict:
     """Evaluate ONE watchlist entry against its (already-refreshed) daily frame.
 
     Returns the per-name report dict (see ``check_triggers``). ``status`` is a display
     convenience with precedence no_data -> no_pivot -> stale -> extended -> triggered ->
     watch; the booleans stay authoritative. ``triggered`` requires close above the frozen
     pivot AND the 50-day volume gate AND a bar dated today (a Friday bar must not re-fire
-    on a Monday-holiday run)."""
+    on a Monday-holiday run). ``volume_pace`` (intraday context, NEVER the gate) is the
+    50-day ratio divided by the fraction of the session elapsed at ``now`` — "is volume
+    running hot for this time of day?"; equals the plain ratio after the close."""
     t = _today_et(today)
     out = {
         "ticker": entry.get("ticker"), "status": "no_data",
@@ -126,8 +155,9 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         "date_added": entry.get("date_added"), "note": entry.get("note", ""),
         "close": None, "last_bar": None, "stale": None, "close_above_pivot": None,
         "volume": None, "volume_ratio_50": None, "volume_ratio_20": None,
-        "volume_confirmed": None, "triggered": False, "extended": None,
-        "pct_from_pivot": None, "earnings_in": None, "earnings_soon": None, "error": None,
+        "volume_pace": None, "volume_confirmed": None, "triggered": False,
+        "extended": None, "pct_from_pivot": None, "earnings_in": None,
+        "earnings_soon": None, "error": None,
     }
     try:
         out["earnings_in"] = _days_to_earnings(fund, today=t)
@@ -144,6 +174,10 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         out["volume"] = float(df["Volume"].iloc[-1]) if "Volume" in df.columns else None
         out["volume_ratio_50"] = _volume_ratio(df, VOL_AVG_DAYS)
         out["volume_ratio_20"] = _volume_ratio(df, VOL_CONTEXT_DAYS)
+        if out["volume_ratio_50"] is not None and out["stale"] is False:
+            frac = _session_elapsed(_now_et(now))
+            if frac > 0:                                  # pre-open -> no pace read
+                out["volume_pace"] = round(out["volume_ratio_50"] / frac, 2)
 
         pivot = entry.get("judged_pivot")
         if not pivot or pivot <= 0:
@@ -169,15 +203,17 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
 
 def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
                    fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
-                   spy: Optional[pd.DataFrame] = None, today=None) -> dict:
-    """Build the full nightly report (pure, deterministic under a pinned ``today``).
+                   spy: Optional[pd.DataFrame] = None, today=None, now=None) -> dict:
+    """Build the full report (pure, deterministic under pinned ``today``/``now``).
 
     ``fundamentals`` is an optional per-ticker callable (the CLI passes a cached
     ``data_feed.get_fundamentals``); its failures count as "no earnings info", never
     fatal. ``spy`` (if given, >= 200 rows) yields an ``analyze_spy_trend`` note — SPY-only
-    by design: the app banner's full regime needs universe breadth a nightly check
-    shouldn't pay for."""
+    by design: the app banner's full regime needs universe breadth a scheduled check
+    shouldn't pay for. The report's ``intraday`` flag marks runs made on a live session
+    bar (fresh bar + before ~16:05 ET) — close/volume are then provisional."""
     t = _today_et(today)
+    now_t = _now_et(now)
     names: List[dict] = []
     for e in entries or []:
         if not isinstance(e, dict) or not e.get("ticker"):
@@ -188,7 +224,7 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
                 fund = fundamentals(e["ticker"])
             except Exception:
                 fund = None
-        names.append(check_one(e, prices.get(e["ticker"]), fund, today=t))
+        names.append(check_one(e, prices.get(e["ticker"]), fund, today=t, now=now_t))
 
     spy_note = None
     if spy is not None and len(spy) >= MIN_ROWS_FOR_PIVOT:
@@ -212,12 +248,16 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
         "no_pivot": [n["ticker"] for n in names if n["status"] == "no_pivot"],
         "auto_frozen": [],                                # the CLI fills this in
     }
+    fresh = [n for n in names if n.get("stale") is False]
     return {
         "schema": REPORT_SCHEMA,
         "date": t.strftime("%Y-%m-%d"),
         "generated_at": pd.Timestamp.now(tz="America/New_York").isoformat(),
         "spy": spy_note,
         "all_stale": bool(with_bars) and all(n["stale"] for n in with_bars),
+        # A live session bar: close/volume are provisional until ~16:05 ET.
+        "intraday": bool(fresh
+                         and now_t.hour * 60 + now_t.minute < INTRADAY_CUTOFF_MIN),
         "names": names,
         "summary": summary,
     }
@@ -262,16 +302,19 @@ def format_report(report: dict) -> str:
     spy = report.get("spy") or {}
     spy_s = (f"SPY: {spy.get('trend', '?')} (phase {spy.get('phase', '?')})"
              if spy else "SPY: n/a")
-    lines.append(f"EOD TRIGGER CHECK  {report.get('date', '?')}   {spy_s}")
+    hm = str(report.get("generated_at", ""))[11:16]      # ISO -> HH:MM (crude, best-effort)
+    lines.append(f"TRIGGER CHECK  {report.get('date', '?')}"
+                 + (f" {hm}" if hm else "") + f"   {spy_s}")
     names = report.get("names", [])
     if not names:
         lines.append("watchlist is empty -- nothing to check.")
     else:
         lines.append(f"{'TICKER':<8}{'CLOSE':>9}{'PIVOT':>9}  {'SRC':<7}{'%FROM':>7}"
-                     f"{'VOL50':>7}  {'STATUS':<10}{'EARNINGS':<10}")
+                     f"{'VOL50':>7}{'PACE':>7}  {'STATUS':<10}{'EARNINGS':<10}")
         for n in names:
             piv = n.get("judged_pivot")
             vr = n.get("volume_ratio_50")
+            pace = n.get("volume_pace")
             pct = n.get("pct_from_pivot")
             ei = n.get("earnings_in")
             earn = ("-" if ei is None
@@ -282,7 +325,8 @@ def format_report(report: dict) -> str:
                 f"{(f'{piv:.2f}' if piv else '-'):>9}  "
                 f"{(n.get('pivot_source') or '-'):<7}"
                 f"{(f'{pct:+.1f}%' if pct is not None else '-'):>7}"
-                f"{(f'{vr:.1f}x' if vr is not None else '-'):>7}  "
+                f"{(f'{vr:.1f}x' if vr is not None else '-'):>7}"
+                f"{(f'{pace:.1f}x' if pace is not None else '-'):>7}  "
                 f"{n.get('status', '?').upper():<10}{earn:<10}"
                 + (f"  ERR: {n['error']}" if n.get("error") else ""))
     s = report.get("summary", {})
@@ -296,4 +340,7 @@ def format_report(report: dict) -> str:
     if report.get("all_stale"):
         lines.append("NOTE: no new bar on the report date (weekend/holiday?) -- "
                      "no trigger can fire from a stale bar.")
+    if report.get("intraday"):
+        lines.append("NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; "
+                     "PACE = volume so far vs expected by this time of day.")
     return "\n".join(lines)

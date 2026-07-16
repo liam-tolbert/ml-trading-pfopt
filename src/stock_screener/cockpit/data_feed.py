@@ -268,6 +268,12 @@ def _merge_incremental(cached: pd.DataFrame, new: Optional[pd.DataFrame],
     if new is None or not len(new):
         return cached, False
     common = cached.index.intersection(new.index)
+    # TODAY's bar is PROVISIONAL while the session runs — its close moves between
+    # intraday fetches by design, which is not a split/dividend re-adjustment. Compare
+    # only settled (pre-today) overlap; the merge below still takes the newest today-bar
+    # via keep="last". Without this, every half-hourly trigger run would re-baseline
+    # (full 2y refetch) each watchlist name because the live bar "diverged".
+    common = common[common < pd.Timestamp.today().normalize()]
     if len(common):
         c = cached.loc[common, "Close"].astype(float)
         n = new.loc[common, "Close"].astype(float)
