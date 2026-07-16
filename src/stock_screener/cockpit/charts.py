@@ -109,8 +109,14 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
             line=dict(width=1.2, color=color)), row=1, col=1)
 
     if "Volume" in d.columns:
+        # Bars colored by up/down day (close vs prior close): heavy volume on DOWN days is
+        # distribution — a VCP disqualifier per the guide — now visible at a glance where
+        # the old uniform gray hid it. First bar of the window has no prior close -> gray.
+        _chg = d["Close"].diff()
+        _vcol = ["#9aa0a6" if pd.isna(c) else ("#4c9e70" if c >= 0 else "#d96b5f")
+                 for c in _chg]
         fig.add_trace(go.Bar(x=d.index, y=d["Volume"], name="Volume",
-                             marker_color="#9aa0a6", showlegend=False), row=2, col=1)
+                             marker_color=_vcol, showlegend=False), row=2, col=1)
         # Volume baseline (20-period SMA) + the 1.5× breakout threshold. In the DAILY view
         # this SMA is exactly the engine's 20-day average and the dashed line is the
         # 50%-above level a confirmed breakout must clear (see detect_breakout). Bars below

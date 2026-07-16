@@ -111,7 +111,9 @@ def test_build_chart_returns_figure_with_expected_traces():
     assert any(isinstance(tr, go.Candlestick) for tr in fig.data), "no candlestick"
     n_sma = sum(isinstance(tr, go.Scatter) for tr in fig.data)
     assert n_sma >= 3, f"expected 3 SMA overlays, got {n_sma}"
-    assert any(isinstance(tr, go.Bar) for tr in fig.data), "no volume bars"
+    vol_bar = next(tr for tr in fig.data if isinstance(tr, go.Bar))
+    assert not isinstance(vol_bar.marker.color, str), "volume bars must be colored per-bar"
+    assert len(vol_bar.marker.color) == len(vol_bar.x), "one up/down color per bar"
     # weekly view should also build
     assert isinstance(build_chart(ticker, df, weekly=True), go.Figure)
 

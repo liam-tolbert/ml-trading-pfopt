@@ -719,11 +719,20 @@ with st.sidebar:
     else:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
 
-    # --- Last nightly EOD trigger check (written by scripts/eod_trigger.bat) --------- #
-    # Read-only surface: plain captions, every field via .get() so a hand-edited or
-    # older-schema report renders degraded instead of crashing the sidebar.
-    _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
-    if _rep:
+    # --- Latest watchlist trigger check (written by scripts/eod_trigger.bat) ---------- #
+    # A SELF-REFRESHING fragment: the scheduled task rewrites the report file every 30
+    # minutes during market hours, so this block re-reads it once a minute and repaints
+    # only ITSELF (fragment reruns are isolated — the memoized scan/table/chart never
+    # re-run; the timer only ticks while a browser session is connected). Read-only
+    # surface: plain captions, every field via .get() so a hand-edited or older-schema
+    # report renders degraded instead of crashing the sidebar.
+    @st.fragment(run_every="60s")
+    def _trigger_report_panel() -> None:
+        _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
+        if not _rep:
+            st.caption("No trigger report yet — schedule scripts/eod_trigger.bat "
+                       "(HANDOFF §6.18) for half-hourly watchlist trigger checks.")
+            return
         st.markdown("---")
         _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, best-effort
         st.markdown(f"**🔔 Trigger check — {_rep.get('date', '?')}"
@@ -756,9 +765,8 @@ with st.sidebar:
             st.caption("🔔 Triggered = closed above the frozen pivot on ≥1.5× 50-day "
                        "volume — judge it (chart + fuel), then buy at/near the next "
                        "open if it holds up.")
-    else:
-        st.caption("No trigger report yet — schedule scripts/eod_trigger.bat "
-                   "(HANDOFF §6.18) for half-hourly watchlist trigger checks.")
+
+    _trigger_report_panel()
 
 # --------------------------------------------------------------------------- #
 # Regime banner
