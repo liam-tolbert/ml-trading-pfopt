@@ -23,15 +23,9 @@ MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so 
                             # plan builder needn't import alpaca-py)
 MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-order cap as a
                             # fraction of equity; the risk mode clamps to it (submit re-checks)
-STALE_PLAN_BARS = 2         # a plan name whose freshest daily bar is more than this many
-                            # *trading* days old is skipped rather than sized on stale data.
-                            # The scan is memoized in session_state with NO time-based
-                            # invalidation and the trigger fragment keeps the tab alive for
-                            # days, so a Build+Submit could otherwise size/stop off last
-                            # week's close. Build also re-pulls the watchlist's latest bars
-                            # (freshen_prices), so in normal use every name reads 0-1; this
-                            # only trips a name whose refresh couldn't reach fresh data. Set
-                            # to 2 to absorb a weekend + one holiday of refresh flakiness.
+STALE_PLAN_BARS = 2         # skip a plan name whose freshest daily bar is more than this many
+                            # *trading* days old rather than size on stale data (the scan memo
+                            # has no time-based invalidation). 2 absorbs a weekend + a holiday.
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
@@ -42,16 +36,11 @@ HEAVY_VOL_RATIO = 1.5       # latest volume vs its 50-day average = a heavy-volu
 # Suggested-stop bases for the re-arm action; "auto" picks per position by its gain.
 STOP_BASES = ("auto", "initial", "breakeven", "sma50")
 
-# The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which
-# owns the shared ALPACA_API_KEY/SECRET pair). Each Alpaca paper account has its own key
-# pair, so we select the "Minervini Trader" account by preferring its dedicated keys,
-# falling back to the shared ones only if the dedicated pair isn't set.
-#
-# We accept TWO spellings of each name — the originally-documented ``ALPACA_MINERVINI_API_*``
-# form and the ``ALPACA_API_KEY_*_MINERVINI`` / ``*_PAPER1`` form actually used in this repo's
-# .env — because a silent drift between the .env names and the names the code reads routes
-# every order to nowhere (both resolve to None -> TradeUnavailable) with no obvious cause.
-# First non-empty match in each tuple wins.
+# The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which owns
+# the shared ALPACA_API_KEY/SECRET pair). Each paper account has its own key pair, so prefer
+# the dedicated "Minervini Trader" keys, falling back to the shared pair only if unset. Name
+# drift between .env and these constants silently resolves to None -> TradeUnavailable, so keep
+# them in sync. First non-empty match in each tuple wins.
 MINERVINI_KEY_ENVS = "ALPACA_API_KEY_MINERVINI"
 MINERVINI_SECRET_ENVS = "ALPACA_API_KEY_SECRET_MINERVINI"
 SHARED_KEY_ENVS = ("ALPACA_API_KEY", "ALPACA_API_KEY_PAPER1")
@@ -598,9 +587,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
 
 
 def _attr_float(obj, attr: str) -> Optional[float]:
-    """``getattr`` + float-coerce-or-None. The positions page is the first in-repo consumer of
-    alpaca-py ``Position`` P&L fields, so read every one defensively — any absent/odd-typed field
-    just reads as None and the view renders without it."""
+    """``getattr`` + float-coerce-or-None. alpaca-py ``Position`` P&L fields are read
+    defensively — any absent/odd-typed field reads as None and the view renders without it."""
     v = getattr(obj, attr, None)
     if v is None:
         return None

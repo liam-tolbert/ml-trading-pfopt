@@ -34,8 +34,7 @@ from src.stock_screener.cockpit.triggers import load_latest_trigger_report  # no
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
 # Reclaim vertical space so the candidate table is visible on load: trim Streamlit's
-# large default top padding and tighten the gap between stacked elements. Conservative,
-# stable selectors — if a future version ignores one, the page still renders fine.
+# large default top padding and tighten the gap between stacked elements.
 st.markdown(
     "<style>"
     # padding-top must stay >= Streamlit's fixed header height (~3.75rem) or the top row
@@ -121,9 +120,8 @@ These levels are advisory — place the order in your broker.
 EARNINGS_SOON_DAYS = 21   # flag entries within ~3 weeks of a scheduled report
 
 
-# Raw candidate-frame column name -> human-readable label. Used both to relabel the
-# rendered table headers (via st.dataframe column_config) and the filter picker/row
-# headers. Keys stay the raw column names so selection & filtering logic is unchanged.
+# Raw candidate-frame column name -> human-readable label, for the table headers and the
+# filter picker. Keys stay the raw column names so selection & filtering logic is unchanged.
 READABLE_COLS = {
     "ticker": "Ticker",
     "price": "Price ($)",
@@ -184,10 +182,9 @@ COL_HELP = {
     "target": "First objective, +25% above the pivot.",
 }
 
-# The table's four decision groups, in display order. This drives BOTH the column
-# order/visibility in the table and the "Column guide" popover. `criteria` is left out
-# on purpose — it's a constant 8 on this table (the 8/8 gate), so it adds no signal
-# (it still lives in the underlying scan frame for tests / analysis).
+# The table's four decision groups, in display order — drives both the column
+# order/visibility and the "Column guide" popover. `criteria` is left out: it's a constant
+# 8 here (the 8/8 gate), so it adds no signal (still in the scan frame for tests).
 COL_GROUPS = [
     ("Identify", ["ticker", "price"]),
     ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
@@ -298,9 +295,8 @@ def filter_table(df, key_prefix: str = "flt"):
 # a widget key), so button callbacks and the multiselect can both mutate it without
 # fighting over widget ownership. `judged_pivot` is the FROZEN trigger level: the ⭐ add
 # freezes the pivot you're looking at ("judged"); picker/.txt adds are unfrozen until the
-# 📌 button or the nightly EOD check ("auto") freezes one. PERSISTED across runs to
-# `data/cockpit/watchlist.json`: `_wl()` loads it once per session (migrating a legacy
-# ticker-string file), and every mutation saves it back.
+# 📌 button or the nightly EOD check ("auto") freezes one. Persisted to
+# `data/cockpit/watchlist.json`: `_wl()` loads it once per session, every mutation saves back.
 # --------------------------------------------------------------------------- #
 def _wl() -> list:
     if "watchlist" not in st.session_state:              # first access this session -> load from disk
@@ -391,15 +387,11 @@ def _wl_add_from_upload() -> None:
 
 def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce,
                  _force=False, _progress=None):
-    # Hand-rolled SESSION-STATE memo, deliberately NOT @st.cache_data: cache_data RECORDS
-    # any st element emitted inside the cached function and REPLAYS it on every cache hit —
-    # the progress bar drawn into an outside st.empty() slot made every post-scan rerun die
-    # with CacheReplayClosureError (the replayed element's target block no longer exists).
-    # A plain memo has no replay machinery, so the in-scan progress callback is legal.
-    # `_force`/`_progress` stay OUT of the key — force=True/False share one entry, so a
-    # forced Re-scan doesn't fork the memo and a later filter change re-screens off the
-    # 24h price cache instead of re-downloading. The body only runs on a genuine miss
-    # (new nonce / popped memo / changed filter); Re-scan pops the memo + sets _force=True.
+    # Hand-rolled SESSION-STATE memo, deliberately NOT @st.cache_data: cache_data REPLAYS any
+    # st element emitted inside on every cache hit, so the in-scan progress bar died with
+    # CacheReplayClosureError. A plain memo has no replay machinery, so the callback is legal.
+    # `_force`/`_progress` stay OUT of the key so force=True/False share one entry — a forced
+    # Re-scan doesn't fork the memo. The body runs only on a genuine miss; Re-scan pops the memo.
     key = (universe, int(min_criteria), float(min_rs), bool(require_vcp),
            int(min_fund), int(nonce))
     memo = st.session_state.get("_scan_memo")
@@ -452,9 +444,8 @@ min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
 if "nonce" not in st.session_state:
     st.session_state.nonce = 1
 # `_force` is a per-run local, True ONLY on the run where Re-scan is clicked — so that click
-# always forces a real refetch (bumping nonce + clearing the memo makes it a cache miss), while
-# every other rerun leaves it False and reuses the cache. (Replaces the old `nonce % 2` parity
-# hack, which only force-refetched on every OTHER click.)
+# always forces a real refetch (bumping nonce + clearing the memo makes it a cache miss),
+# while every other rerun leaves it False and reuses the cache.
 _force = False
 if st.sidebar.button("🔄 Re-scan (refresh prices)"):
     st.session_state.nonce += 1
@@ -462,9 +453,7 @@ if st.sidebar.button("🔄 Re-scan (refresh prices)"):
     st.session_state.pop("_scan_memo", None)
 
 # Price-fetch progress (the multi-minute part of a cold scan). On a memo hit the scan body
-# never runs, so the bar simply never appears; the slot is cleared right after. (Safe only
-# because _cached_scan is a plain session-state memo — under @st.cache_data these in-scan
-# element calls would be recorded and replayed on hits: CacheReplayClosureError.)
+# never runs, so the bar never appears; the slot is cleared right after.
 _prog_slot = st.empty()
 
 
@@ -551,9 +540,8 @@ with st.sidebar:
         # --- Paper-trade the watchlist via Alpaca (paper account only) --------------- #
         st.markdown("---")
         st.markdown("**⚡ Paper trade (Alpaca)**")
-        # Regime at the point of action (§6.5 item 6): the CAUTION banner lives at the top
-        # of the page, but the finger is HERE — repeat the one line that matters when the
-        # tape says don't press new buys.
+        # Regime at the point of action: the CAUTION banner lives at the top of the page, but
+        # the finger is HERE — repeat the one line that matters when the tape says no new buys.
         if not res.regime.get("should_generate_buys"):
             st.caption(":orange[**⚠︎ CAUTION tape** — the market regime advises against "
                        "NEW buys (most breakouts fail in a weak tape). Managing stops is "
@@ -596,24 +584,22 @@ with st.sidebar:
         st.caption(f"Market BUYs: {_size_note}. Paper account only; whole shares, "
                    "each order still capped at 10% of equity.")
         if st.button("Build trade plan", key="trade_build", width="stretch"):
-            # Fetch the target account ONCE here (not every rerun) so the user can confirm
-            # which paper account will be traded — and, for '% of portfolio', to size on
-            # its live equity.
+            # Fetch the target account ONCE here (not every rerun) so the user can confirm which
+            # paper account will be traded — and, for '% of portfolio', to size on its equity.
             try:
                 _account = fetch_account_summary()
             except TradeUnavailable as _e:
                 _account = {"error": str(_e)}
             # Re-pull the watchlist names' latest bars so sizing/stops use CURRENT prices, not
-            # the possibly days-old closes frozen in the scan memo (the tab can stay open for
-            # days). The staleness guard then skips any name the refresh couldn't freshen.
+            # the days-old closes frozen in the scan memo. The staleness guard then skips any
+            # name the refresh couldn't freshen.
             with st.spinner("Refreshing prices & building plan…"):
                 _fresh_payloads = freshen_prices(_watch_t, res.payloads)
                 _plan, _skip = build_buy_plan(
                     _watch_t, _fresh_payloads, mode=_mode, amount=_amount,
                     equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS)
-            # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a
-            # fresh Build re-seeds each stop to its computed default instead of Streamlit
-            # retaining a stale edited value from the previous plan.
+            # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a fresh
+            # Build re-seeds each stop to its computed default instead of retaining a stale edit.
             _bn = st.session_state.get("trade_build_n", 0) + 1
             st.session_state["trade_build_n"] = _bn
             st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
@@ -660,8 +646,8 @@ with st.sidebar:
                         _cB.caption(":red[stop must be < price]")
                     elif _attach and _eq and _edstop and _o["price"] > _edstop:
                         # Live risk-to-stop for the CURRENT shares + (possibly edited) stop, so a
-                        # risk-sized position stays honest even after the stop is nudged (build
-                        # doesn't re-scale shares on an edit).
+                        # risk-sized position stays honest after the stop is nudged (build doesn't
+                        # re-scale shares on an edit).
                         _rusd = _o["shares"] * (_o["price"] - _edstop)
                         _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
                 if any(_o["extended"] for _o in _plan):
@@ -727,12 +713,10 @@ with st.sidebar:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
 
     # --- Latest watchlist trigger check (written by scripts/eod_trigger.bat) ---------- #
-    # A SELF-REFRESHING fragment: the scheduled task rewrites the report file every 30
-    # minutes during market hours, so this block re-reads it once a minute and repaints
-    # only ITSELF (fragment reruns are isolated — the memoized scan/table/chart never
-    # re-run; the timer only ticks while a browser session is connected). Read-only
-    # surface: plain captions, every field via .get() so a hand-edited or older-schema
-    # report renders degraded instead of crashing the sidebar.
+    # A SELF-REFRESHING fragment: re-reads the report file once a minute and repaints only
+    # ITSELF (fragment reruns are isolated — the memoized scan/table/chart never re-run; the
+    # timer only ticks while a browser session is connected). Read-only: every field via .get()
+    # so a hand-edited or older-schema report renders degraded instead of crashing the sidebar.
     @st.fragment(run_every="60s")
     def _trigger_report_panel() -> None:
         _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
@@ -780,8 +764,8 @@ with st.sidebar:
 # --------------------------------------------------------------------------- #
 reg = res.regime
 buy_ok = reg.get("should_generate_buys")
-# Compact one-line status strip (replaces four tall metric cards) — same underlying
-# values, a fraction of the vertical space, pinned at the top of the page.
+# Compact one-line status strip — same underlying values, a fraction of the vertical
+# space, pinned at the top of the page.
 p2 = reg.get("phase2_pct", 0)
 p2 = p2 if isinstance(p2, (int, float)) else 0
 env = ":green-background[BUY OK]" if buy_ok else ":orange-background[CAUTION]"
@@ -825,9 +809,8 @@ if query:
 else:
     view = cand
 
-# Reserve the table's slot ABOVE the filter: a container renders where it is created,
-# not where it is written to. So we draw the (filtered) table into `table_box`, while the
-# filter UI below runs first — filtered results still apply on the SAME run, no lag.
+# Reserve the table's slot ABOVE the filter: a container renders where it is created, not
+# where it's written to. So the filter UI runs first and its results apply on the SAME run.
 table_box = st.container()
 view = filter_table(view)
 
@@ -837,8 +820,7 @@ if len(view) == 0:
 
 table_box.caption(f"Showing {len(view)} of {len(cand)} — click a row to chart it.")
 # Relabel headers + attach a hover tooltip per column (display only — underlying column
-# names stay raw, so the selection + filter logic that references e.g. "ticker" keeps
-# working). column_order groups the columns and hides any not listed (e.g. `criteria`).
+# names stay raw, so selection/filter logic keeps working). column_order hides any not listed.
 with table_box:
     col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c), help=COL_HELP.get(c))
                   for c in view.columns}
@@ -855,11 +837,9 @@ pick = view.iloc[row_pos]["ticker"]
 
 payload = res.payloads[pick]
 
-# Steps 2 + 3 share one row: the large chart on the LEFT, with the Step-2 (fundamentals)
-# and Step-3 (chart controls) boxes stacked in a same-width column on the RIGHT — read the
-# fuel, then judge the base, without scrolling. The side column is written FIRST in code so
-# its control values (weekly / overlays / bollinger) exist before the chart builds; it still
-# renders on the right because it's the second column returned.
+# Steps 2 + 3 share one row: the large chart on the LEFT, the Step-2 (fundamentals) and
+# Step-3 (chart controls) boxes stacked on the RIGHT. The side column is written FIRST in
+# code so its control values exist before the chart builds; it still renders on the right.
 colChart, colSide = st.columns([3, 1])
 
 with colSide:
@@ -1009,8 +989,7 @@ with st.container(border=True):
     st.markdown("**The base — what you're waiting on (should be _quiet_):**")
 
     # Base volatility (tight): RMV, then BBWP / squeeze as a cross-check. Point-in-time, so as
-    # a breakout fires these naturally rise (the base tightness is "spent") and the breakout
-    # reads below light up — the same volatility axis handing off from quiet to loud.
+    # a breakout fires these naturally rise and the breakout reads below light up.
     rmv = lv.get("rmv")
     if rmv is None:
         rmv_disp, rmv_flag, rmv_label, rmv_note = "n/a", "", "n/a", "not enough history."
@@ -1055,8 +1034,7 @@ with st.container(border=True):
     bc[1].markdown(f"**Squeeze:** {sq_flag} — {bbwp_note}")
 
     # Base volume (should be DRYING UP): % of contractions whose volume ran lighter than the
-    # advance into them (vcp volume_quality). This is the quiet-base counterpart to the loud
-    # breakout-volume surge below — a different yardstick (vs. the run-up, not vs. 1.5× avg).
+    # advance into them (vcp volume_quality) — a different yardstick (vs. the run-up, not 1.5× avg).
     vq = vcp_data.get("volume_quality")
     if vq is None:
         st.markdown("**Base volume:** n/a — no contractions detected.")
@@ -1082,10 +1060,8 @@ with st.container(border=True):
         volat_txt = "— no active squeeze to release"
     st.markdown(f"- **Volatility:** {volat_txt}")
     st.markdown("---")
-    # Explicit keys pin these widgets' identity so their values persist across reruns.
-    # Without a key, a keyless input's identity depends on the (variable) element count
-    # above it, so a rerun could reset it to the default and the size would go stale
-    # until a full page reload.
+    # Explicit keys pin these widgets' identity so their values persist across reruns. Without a
+    # key, identity depends on the (variable) element count above, so a rerun could reset them.
     acct = st.number_input("Account $", min_value=0.0, value=100_000.0, step=1000.0,
                            key="size_acct")
     risk_pct = st.number_input("Risk % per trade", min_value=0.0, value=1.0, step=0.25,

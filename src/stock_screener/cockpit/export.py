@@ -1,16 +1,14 @@
 """Pure helpers for the cockpit watchlist (no Streamlit — unit-testable).
 
 The watchlist is an ordered list of ENTRY DICTS — ``{ticker, judged_pivot, date_added,
-pivot_source, note}`` — persisted to JSON so it survives between app runs. ``judged_pivot``
-is the FROZEN trigger level: the detected pivot drifts with every scan, so the level in
-force is recorded once (when the user judges it on the chart, ``pivot_source="judged"``,
-or by the nightly EOD trigger check on first sight, ``pivot_source="auto"``) and stays put.
-``date_added`` is the date of the entry's current pivot decision (add / re-freeze /
-auto-freeze all stamp it). Legacy files holding a bare JSON array of ticker strings load
-as unfrozen entries (migration is read-time; the file is rewritten on the first mutation).
+pivot_source, note}`` — persisted to JSON. ``judged_pivot`` is the FROZEN trigger level:
+the detected pivot drifts with every scan, so the level is recorded once (user-judged,
+``pivot_source="judged"``, or auto-frozen by the EOD check, ``pivot_source="auto"``) and
+stays put. ``date_added`` stamps the current pivot decision. Legacy files (a bare JSON array
+of ticker strings) migrate to unfrozen entries at read time; rewritten on first mutation.
 
-Also here: the two downloadable CSV builders (decision list + long-format OHLCV dump) and
-the .txt ticker-list parser.
+Also here: the two CSV builders (decision list + long-format OHLCV dump) and the .txt
+ticker-list parser.
 """
 from __future__ import annotations
 
@@ -28,11 +26,10 @@ def make_entry(ticker, judged_pivot=None, date_added=None, pivot_source=None,
                note: str = "") -> Optional[dict]:
     """Normalize one watchlist entry; returns ``None`` when the ticker is blank (invalid).
 
-    The pivot is coerced with ``float()`` (an ``np.float64`` would make ``json.dumps``
-    raise inside :func:`save_watchlist`'s swallow-all — a silent no-persist) and rounded
-    to cents; non-positive/NaN/garbage pivots become ``None``. ``pivot_source`` is kept
-    only when it names a known source AND a pivot is actually set — an unfrozen entry
-    always carries ``pivot_source=None``.
+    The pivot is coerced with ``float()`` (an ``np.float64`` would make ``json.dumps`` raise
+    inside :func:`save_watchlist`'s swallow-all — a silent no-persist) and rounded to cents;
+    non-positive/NaN/garbage pivots become ``None``. ``pivot_source`` is kept only when it
+    names a known source AND a pivot is set — an unfrozen entry carries ``pivot_source=None``.
     """
     sym = str(ticker or "").strip().upper()
     if not sym:
@@ -93,11 +90,10 @@ def save_watchlist(path, entries: Sequence) -> None:
 
 
 def load_watchlist(path) -> List[dict]:
-    """Load persisted watchlist entries, de-duped in first-seen order. A legacy file (a
-    bare JSON array of ticker strings) is MIGRATED element-wise to unfrozen entry dicts —
-    in memory only; the file is rewritten on the first mutation. Returns ``[]`` when the
-    file is missing, unreadable, corrupt, or not a JSON list — a bad file never breaks
-    app startup. Never raises, never writes."""
+    """Load persisted watchlist entries, de-duped in first-seen order. A legacy file (a bare
+    JSON array of ticker strings) is migrated to unfrozen entry dicts in memory only.
+    Returns ``[]`` when the file is missing, unreadable, corrupt, or not a JSON list. Never
+    raises, never writes."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except Exception:
@@ -127,9 +123,8 @@ def watchlist_list_csv(candidates: Optional[pd.DataFrame], entries: Sequence,
     metadata columns (``judged_pivot``, ``date_added``, ``pivot_source``, ``note`` —
     empty for unfrozen entries). ``entries`` may be entry dicts and/or bare tickers.
 
-    Names absent from ``candidates`` (e.g. a stale entry from another universe) still
-    appear as a ticker-only row, so nothing the user picked is silently dropped. The
-    frozen level is exported as ``judged_pivot`` because ``candidates`` already carries a
+    Names absent from ``candidates`` still appear as a ticker-only row, so nothing the user
+    picked is dropped. Exported as ``judged_pivot`` because ``candidates`` already carries a
     scan ``pivot`` column — the two are different numbers by design.
     """
     ents = _coerce_entries(entries)

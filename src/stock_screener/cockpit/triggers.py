@@ -1,12 +1,11 @@
 """Watchlist trigger check — pure logic (no Streamlit, no network; data via arguments).
 
-The weekend hunt builds the watchlist; the scheduled job (HANDOFF §6.11/§6.18 — every 30
-minutes during market hours since 2026-07-16) answers ONE question per name: **is it
-above its frozen pivot on ≥1.5× average volume?** Intraday runs read the live provisional
-bar (flagged ``intraday``; ``volume_pace`` says whether volume is running hot for the
-time of day); the last run of the day (~16:30) sees the settled close.
-:func:`check_triggers` answers from already-fetched frames; the CLI wrapper
-(``eod_trigger.py``) does the fetching, report persistence, and scheduling glue.
+The weekend hunt builds the watchlist; the scheduled job (every 30 minutes during market
+hours) answers ONE question per name: **is it above its frozen pivot on ≥1.5× average
+volume?** Intraday runs read the live provisional bar (flagged ``intraday``; ``volume_pace``
+says whether volume is running hot for the time of day); the last run of the day (~16:30)
+sees the settled close. :func:`check_triggers` answers from already-fetched frames; the CLI
+wrapper (``eod_trigger.py``) does the fetching, report persistence, and scheduling glue.
 
 Pivots are FROZEN on the watchlist entry (``judged_pivot`` — see ``export.py``): the
 detected pivot drifts with every scan, so a trigger against a recomputed level would move
@@ -16,7 +15,7 @@ under your feet. An entry that arrives unfrozen is frozen ON FIRST SIGHT here
 
 Volume gate: last volume / prior 50-day average ≥ 1.5 — Minervini's confirmation standard,
 the same 50-day read the positions page uses (``trade.HEAVY_VOL_RATIO``). The scan's
-"Vol OK" badge is a 20-day read (``detect_breakout``); that number is reported as context
+"Vol OK" badge is a 20-day read (``detect_breakout``); reported as context
 (``volume_ratio_20``) but never gates.
 """
 from __future__ import annotations
@@ -41,8 +40,8 @@ EXTENDED_PCT = 0.05         # close > pivot * 1.05 = past the buy zone ("don't c
 EARNINGS_SOON_DAYS = 21     # mirror the app's ⚠ earnings window
 MIN_ROWS_FOR_PIVOT = 200    # classify_phase needs >= 200 rows to compute a pivot
 
-# Intraday half-hourly runs (the schedule since 2026-07-16): the session clock for the
-# volume-pace read and the provisional-bar flag.
+# Intraday half-hourly runs: the session clock for the volume-pace read and the
+# provisional-bar flag.
 SESSION_OPEN_MIN = 9 * 60 + 30    # 09:30 ET, in minutes-of-day
 SESSION_LEN_MIN = 390             # 09:30 -> 16:00
 PACE_MIN_ELAPSED = 0.1            # clip: dividing by the first few minutes explodes the pace
@@ -90,13 +89,12 @@ def _volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
 
 
 def compute_scan_pivot(df: Optional[pd.DataFrame]) -> Optional[float]:
-    """Recompute the APP pivot for one frame — the EXACT chain the scan uses
-    (classify_phase -> detect_vcp -> detect_breakout -> calculate_stop_loss ->
-    _entry_levels, scan.py's screen_universe loop). The VCP result MUST be passed into
-    detect_breakout: without it there is no VCP-peak breakout level and _entry_levels
-    silently falls back to the 52-week high — a different, usually higher pivot than the
-    one on the chart (live case: EBAY 118.98 vs the app's 111.86). None when the frame is
-    missing/short (< MIN_ROWS_FOR_PIVOT) or the chain errors — never raises."""
+    """Recompute the APP pivot for one frame — the EXACT chain the scan uses (classify_phase
+    -> detect_vcp -> detect_breakout -> calculate_stop_loss -> _entry_levels). The VCP result
+    MUST be passed into detect_breakout: without it there's no VCP-peak breakout level and
+    _entry_levels silently falls back to the 52-week high — a different, usually higher pivot
+    than the chart's. None when the frame is missing/short (< MIN_ROWS_FOR_PIVOT) or the chain
+    errors — never raises."""
     if df is None or len(df) < MIN_ROWS_FOR_PIVOT:
         return None
     try:

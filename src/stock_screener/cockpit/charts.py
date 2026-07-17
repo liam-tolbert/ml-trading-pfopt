@@ -76,16 +76,13 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     else:
         d = d_full
 
-    # 3 rows: price (top), a compressed volume pane, and RMV (bottom). Volume shrinks
-    # from its old 0.24 share to make room for the RMV oscillator.
+    # 3 rows: price (top), compressed volume pane, RMV (bottom).
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                         row_heights=[0.62, 0.19, 0.19], vertical_spacing=0.03)
 
-    # Bollinger envelope (toggleable) — added BEFORE the candles so it renders beneath them
-    # (Scatter has no layer="below"; z-order is trace order). Lower then upper-with-fill draws
-    # a soft band; the dotted 20-SMA basis is the midline. Computed on FULL history (like the
-    # SMAs) so the bands stay correct when the view is zoomed. hoverinfo="skip" keeps the
-    # x-unified readout uncluttered.
+    # Bollinger envelope — added BEFORE the candles so it renders beneath them (Scatter has no
+    # layer="below"; z-order is trace order). Lower + upper-with-fill draws a band, dotted
+    # 20-SMA basis is the midline. Computed on FULL history so bands stay correct when zoomed.
     if show_bollinger and len(d_full) >= 20:
         bb_up, bb_mid, bb_lo = (s.reindex(d.index) for s in bollinger_bands(d_full))
         band = "rgba(75,108,183,0.55)"
@@ -110,18 +107,15 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
 
     if "Volume" in d.columns:
         # Bars colored by up/down day (close vs prior close): heavy volume on DOWN days is
-        # distribution — a VCP disqualifier per the guide — now visible at a glance where
-        # the old uniform gray hid it. First bar of the window has no prior close -> gray.
+        # distribution — a VCP disqualifier. First bar of the window has no prior close -> gray.
         _chg = d["Close"].diff()
         _vcol = ["#9aa0a6" if pd.isna(c) else ("#4c9e70" if c >= 0 else "#d96b5f")
                  for c in _chg]
         fig.add_trace(go.Bar(x=d.index, y=d["Volume"], name="Volume",
                              marker_color=_vcol, showlegend=False), row=2, col=1)
         # Volume baseline (20-period SMA) + the 1.5× breakout threshold. In the DAILY view
-        # this SMA is exactly the engine's 20-day average and the dashed line is the
-        # 50%-above level a confirmed breakout must clear (see detect_breakout). Bars below
-        # the SMA line into a tight base = volume drying up; a bar poking above the dashed
-        # line = confirmed thrust. Computed on full history so it stays correct when zoomed.
+        # this SMA is the engine's 20-day average and the dashed line is the 50%-above level
+        # a confirmed breakout must clear (see detect_breakout). Computed on full history.
         if "Volume" in d_full.columns and len(d_full) >= 20:
             unit = "w" if weekly else "d"
             vsma = calculate_sma(d_full["Volume"], 20).reindex(d.index)
@@ -131,11 +125,9 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                                      line=dict(width=1.1, color="#d93025", dash="dash")),
                           row=2, col=1)
 
-    # Row 3: RMV (Relative Measured Volatility) — normalized 0-100, low = tight base.
-    # Computed on FULL history (like the SMAs) so the min-max normalization window stays
-    # stable when the view is zoomed, then shown over the visible window. The shaded band
-    # marks the < 25 "tight" zone: a low-volatility contraction is the VCP sweet spot, so
-    # watching RMV fall into the band as the base forms is the signal to look for.
+    # Row 3: RMV (Relative Measured Volatility) — normalized 0-100, low = tight base. Computed
+    # on FULL history so the min-max normalization window stays stable when zoomed. The shaded
+    # band marks the < 25 "tight" zone — the VCP sweet spot.
     if len(d_full) >= 15:
         rmv = relative_measured_volatility(d_full).reindex(d.index)
         fig.add_hrect(y0=0, y1=25, fillcolor="green", opacity=0.08, line_width=0,
@@ -150,12 +142,10 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                 fig.add_vrect(x0=c["peak_date"], x1=c["trough_date"],
                               fillcolor="LightSalmon", opacity=0.15, line_width=0,
                               row=1, col=1)
-                # add_vrect is a layout shape and can't carry a tooltip, so overlay an
-                # invisible hoverable scatter across the same span. Under hovermode
-                # "x unified" it adds a "Contraction N" row (depth / prices / volume) to
-                # the readout whenever the cursor is over the shaded column. Restrict x to
-                # the visible candles so the points land on real plotted (rangebreak-safe)
-                # positions and never nudge the y-axis (range is pinned below anyway).
+                # add_vrect is a layout shape and can't carry a tooltip, so overlay an invisible
+                # hoverable scatter across the same span (adds a "Contraction N" row under
+                # hovermode "x unified"). Restrict x to visible candles so points land on real
+                # plotted (rangebreak-safe) positions and don't nudge the y-axis.
                 hx = d.index[(d.index >= c["peak_date"]) & (d.index <= c["trough_date"])]
                 if len(hx):
                     fig.add_trace(go.Scatter(
@@ -173,8 +163,8 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
         if bz:
             fig.add_hrect(y0=bz[0], y1=bz[1], fillcolor="green", opacity=0.07,
                           line_width=0, row=1, col=1)
-        # "top right" anchors the label INSIDE the plot (text runs leftward from the
-        # right edge) so it never clips off the side the way "right" (outside) does.
+        # "top right" anchors the label INSIDE the plot so it never clips off the side the
+        # way "right" (outside) does.
         if piv:
             fig.add_hline(y=piv, line=dict(color="green", dash="dash"),
                           annotation_text="pivot", annotation_position="top right",
@@ -196,12 +186,10 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     fig.update_yaxes(title_text="Price", row=1, col=1)
     fig.update_yaxes(title_text="Vol", row=2, col=1)
     fig.update_yaxes(title_text="RMV", range=[0, 100], row=3, col=1)
-    # Collapse non-trading spans (weekends, holidays, any no-data day) so candles sit
-    # flush. Plotly's date axis spaces points by CALENDAR time, so it leaves blank gaps
-    # over days with no data point, visually distorting the spacing of a VCP base. This
-    # is purely cosmetic — the VCP math runs on trading-day ROWS and never sees the gaps.
-    # Computed generically from the data's own dates (no hardcoded market calendar), so
-    # it works for both daily and weekly views.
+    # Collapse non-trading spans (weekends, holidays, no-data days) so candles sit flush —
+    # Plotly's date axis spaces points by CALENDAR time and otherwise leaves blank gaps.
+    # Purely cosmetic; the VCP math runs on trading-day ROWS. Computed from the data's own
+    # dates (no hardcoded calendar), so it works for both daily and weekly views.
     if len(d) > 1:
         idx = pd.DatetimeIndex(d.index).normalize()
         missing = pd.date_range(idx.min(), idx.max(), freq="D").difference(idx)
@@ -209,7 +197,7 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
             fig.update_xaxes(rangebreaks=[
                 dict(values=missing.strftime("%Y-%m-%d").tolist())])
     # Fit the price pane to the VISIBLE candles so a zoomed-in base fills the chart
-    # (SMA lines that fall outside the window simply clip — VCP candles stay large).
+    # (SMA lines outside the window simply clip).
     if len(d):
         ylo, yhi = float(d["Low"].min()), float(d["High"].max())
         if yhi > ylo:

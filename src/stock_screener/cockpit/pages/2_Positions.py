@@ -1,21 +1,20 @@
 """Positions page — stop management for the Minervini Trader Alpaca paper account.
 
-A dedicated page (opened from the sidebar / page nav), deliberately SEPARATE from the scan page
-so it loads instantly without running the multi-minute scan — this is the daily stop-management
-surface. Shows each holding's P&L and protective-stop status, Minervini exit advisories, and a
-one-click "re-arm / raise all stops" that reuses the GTC one-way ratchet (never lowers a stop).
+Separate from the scan page so it loads instantly (no multi-minute scan) — the daily
+stop-management surface. Shows each holding's P&L and protective-stop status, Minervini exit
+advisories, and a one-click "re-arm / raise all stops" via the GTC one-way ratchet (never
+lowers a stop).
 
 Run the app from the project root: ``streamlit run src/stock_screener/cockpit/app.py`` and pick
-"Positions" from the page nav (or the sidebar link).
+"Positions" from the page nav.
 """
 from __future__ import annotations
 
 import sys
 from pathlib import Path
 
-# This page imports cockpit modules, so it needs the repo ROOT on sys.path (the guide page
-# doesn't import anything and so skips this). From pages/: pages=0, cockpit=1, stock_screener=2,
-# src=3, root=4 — one level deeper than app.py's parents[3].
+# This page imports cockpit modules, so the repo ROOT must be on sys.path. From pages/:
+# pages=0, cockpit=1, stock_screener=2, src=3, root=4.
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -42,9 +41,9 @@ _ICONS = {"submitted": "✅", "stop_only": "🛑", "stop_kept": "🔒", "skipped
 
 @st.cache_data(show_spinner="Reading the paper account…")
 def _cached_positions(nonce):
-    # Reference the MODULE attribute (trade.fetch_positions) so a test patch is honored. The
-    # nonce lets Refresh / a re-arm bust the cache. TradeUnavailable is NOT cached (st.cache_data
-    # doesn't cache exceptions), so a credentials fix + Refresh recovers.
+    # Reference the MODULE attribute (trade.fetch_positions) so a test patch is honored; the
+    # nonce lets Refresh / re-arm bust the cache. TradeUnavailable isn't cached, so a
+    # credentials fix + Refresh recovers.
     return trade.fetch_positions()
 
 

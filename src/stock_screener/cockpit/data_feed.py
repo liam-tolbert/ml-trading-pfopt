@@ -29,19 +29,16 @@ SP500_CSV_URL = (
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/"
     "data/constituents.csv"
 )
-# NASDAQ Trader symbol directories (HTTPS mirror of the upstream ftp:// endpoints, which
-# are commonly blocked). Together these list every NASDAQ + NYSE/AMEX security; we filter
-# them down to clean common stock — the ~3-4.5k "full US" universe. Re-implements
-# minervini_screener.data.universe_fetcher (which we can't import: its package __init__
-# eager-loads SQLAlchemy, absent from this env — see data_feed's module docstring).
+# NASDAQ Trader symbol directories (HTTPS mirror of the commonly-blocked ftp:// endpoints).
+# Together these list every NASDAQ + NYSE/AMEX security; we filter them down to clean
+# common stock — the ~3-4.5k "full US" universe.
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 US_COMMON_CSV = "us_common_universe.csv"
 # Names that betray a fund/ETF/note rather than an operating company.
 _ETF_NAME_RE = r"ETF|FUND|TRUST|INDEX|PORTFOLIO|SHARES|NOTES|BOND|TREASURY"
-# Relative Close divergence over the overlap window that signals yfinance re-adjusted the
-# whole history (a split/dividend) — i.e. an incremental append would splice two different
-# adjustment bases, so we re-baseline with a full refetch instead.
+# Relative Close divergence over the overlap window signaling yfinance re-adjusted the whole
+# history (split/dividend); appending would splice two adjustment bases, so we refetch fully.
 SPLIT_TOL = 0.005
 _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 
@@ -189,17 +186,12 @@ def _filter_us_symbols(df: pd.DataFrame) -> pd.DataFrame:
     """Keep only clean common-stock tickers: drop symbols with $ ^ . - ; drop
     warrant/right/unit issues; keep 1-5 uppercase letters; drop fund/ETF/note names.
 
-    Warrant/right/unit drop is anchored to the nasdaqtrader SymDir shape — a genuine
-    derivative is the *base* symbol plus a trailing issue-code letter, i.e. a 5-character
-    symbol (up-to-4-char base + W/R/U). Anchoring to that shape is deliberate: the older
-    plain ``(?:W|R|U)$`` matched any length and silently dropped ordinary 4-letter common
-    stocks that merely end in one of those letters (PLTR, SNOW, UBER, LULU, TROW, DOW, LOW,
-    KR, and single-letter U — exactly the high-RS names a Minervini screen targets). NYSE
-    CQS-style suffixes (BRK.WS, "XYZ WS") arrive dotted/spaced and are already removed by
-    the punctuation and ``^[A-Z]{1,5}$`` filters. A short-base warrant (3-char base + W, so
-    only 4 chars) can still slip through — that's the intended trade-off: an errant warrant
-    just fails the trend template, whereas a dropped leader is invisible to the screen.
-    Dotted class shares (BRK.B/BF.B) remain omitted, the same known limitation as upstream."""
+    Warrant/right/unit drop is anchored to the nasdaqtrader SymDir shape: a genuine
+    derivative is a 5-char symbol (up-to-4-char base + trailing W/R/U). Matching that shape
+    rather than a plain ``(?:W|R|U)$`` avoids dropping ordinary 4-letter names that merely
+    end in those letters (PLTR, SNOW, UBER, single-letter U). A short-base warrant (3-char
+    base + W) can still slip through — an errant warrant just fails the trend template.
+    Dotted class shares (BRK.B/BF.B) remain omitted, same as upstream."""
     if df.empty:
         return df
     sym = df["symbol"].astype(str)
@@ -277,11 +269,9 @@ def _merge_incremental(cached: pd.DataFrame, new: Optional[pd.DataFrame],
     if new is None or not len(new):
         return cached, False
     common = cached.index.intersection(new.index)
-    # TODAY's bar is PROVISIONAL while the session runs — its close moves between
-    # intraday fetches by design, which is not a split/dividend re-adjustment. Compare
-    # only settled (pre-today) overlap; the merge below still takes the newest today-bar
-    # via keep="last". Without this, every half-hourly trigger run would re-baseline
-    # (full 2y refetch) each watchlist name because the live bar "diverged".
+    # TODAY's bar is PROVISIONAL while the session runs — its close moves between intraday
+    # fetches, which is not a split/dividend re-adjustment. Compare only settled (pre-today)
+    # overlap, else every intraday refresh re-baselines because the live bar "diverged".
     common = common[common < pd.Timestamp.today().normalize()]
     if len(common):
         c = cached.loc[common, "Close"].astype(float)
@@ -378,18 +368,16 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     progress: Optional[Callable[[int, int, str], None]] = None
                     ) -> Dict[str, pd.DataFrame]:
     """Fetch many tickers SAFELY. Concurrent single-ticker ``yf.download`` calls race on
-    yfinance's shared global state (returning the wrong ticker's data), so we instead
-    use yfinance's own batch download (``group_by='ticker'``, internal threading) in
-    chunks, with inter-batch pauses + retry/backoff so a large universe doesn't get
-    rate-limited into silently-dropped batches.
+    yfinance's shared global state (returning the wrong ticker's data), so we use yfinance's
+    own batch download (``group_by='ticker'``, internal threading) in chunks, with inter-batch
+    pauses + retry/backoff so a large universe isn't rate-limited into silently-dropped batches.
 
-    Caching is incremental: a fresh (< ``max_age_days``) parquet is used as-is; a cache
-    with a small recent gap is topped up with only the bars since its last date (one
-    shared ``start`` across the batch); everything else (no cache, or a gap >
-    ``max_gap_days``) gets a full ``lookback`` refetch, which also re-baselines
-    auto-adjusted history. ``max_age_days=0`` sends every cached name through the cheap
-    incremental top-up (the nightly EOD path — gets the finalized close without the full
-    2y refetch that ``force=True`` would do); the 1.0 default preserves the old behavior.
+    Caching is incremental: a fresh (< ``max_age_days``) parquet is used as-is; a cache with a
+    small recent gap is topped up with only the bars since its last date (one shared ``start``
+    across the batch); everything else (no cache, or a gap > ``max_gap_days``) gets a full
+    ``lookback`` refetch, which also re-baselines auto-adjusted history. ``max_age_days=0`` sends
+    every cached name through the cheap incremental top-up (the nightly EOD path — finalized
+    close without a full 2y refetch).
     """
     ensure_dirs()
     syms = [normalize(t) for t in tickers]
@@ -406,9 +394,8 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
         if progress:
             progress(done, total, sym)
 
-    # Cache-served names EMIT too: on a warm cache (e.g. after the nightly prewarm) nearly
-    # every name lands here, and reading thousands of parquets takes real wall-clock — the
-    # old silent branch made the progress bar first appear, already full, at the very end.
+    # Emit progress for cache-served names too — on a warm cache reading thousands of
+    # parquets is real wall-clock time.
     for sym in syms:
         path = PRICES_DIR / f"{sym}.parquet"
         if not force and age_days(path) <= max_age_days:
@@ -814,10 +801,9 @@ def get_fundamentals(ticker: str, force: bool = False,
     if not force and age_days(path) <= max_age_days:
         try:
             cached = json.loads(path.read_text())
-            # Schema upgrade: caches written before the earnings-date / surprise-and-
-            # EDGAR fields lack those keys entirely — refetch those once so the new
-            # columns fill without waiting out the weekly staleness. (A present-but-None
-            # value stays cached.)
+            # Schema upgrade: caches predating the earnings-date/surprise/EDGAR fields lack
+            # those keys — refetch once so the new columns fill without waiting out weekly
+            # staleness. (A present-but-None value stays cached.)
             if "next_earnings" in cached and "last_surprise_pct" in cached:
                 return cached
         except Exception:

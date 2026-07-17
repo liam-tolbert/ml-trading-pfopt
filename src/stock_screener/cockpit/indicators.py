@@ -1,9 +1,8 @@
 """Cockpit-local technical indicators (kept out of the vendored screening package).
 
-RMV (Relative Measured Volatility) is a decision-support metric for the SEPA cockpit,
-not part of the upstream Minervini screener — so it lives here rather than in the
-vendored ``minervini_screener/screening`` tree (whose edits are limited to import
-rewrites; see that package's PROVENANCE.md).
+RMV (Relative Measured Volatility) is a decision-support metric for the SEPA cockpit, not
+part of the upstream Minervini screener — so it lives here rather than in the vendored
+``minervini_screener/screening`` tree (see that package's PROVENANCE.md).
 """
 from __future__ import annotations
 
@@ -21,9 +20,9 @@ def relative_measured_volatility(df: pd.DataFrame, atr_period: int = 10,
     window (a tight VCP contraction — a low-risk, high-quality base); RMV → 100 means it's
     at the loud end of its recent range. Traders treat < ~25 as an ideal tight base.
 
-    Note RMV is *self-referential* (a stock vs its own recent volatility), which is a
-    different axis from the breakout's volume surge (participation) — the two don't
-    conflict: you want a quiet base (low RMV) that then breaks out on heavy volume.
+    RMV is *self-referential* (a stock vs its own recent volatility) — a different axis from
+    the breakout's volume surge, so the two don't conflict: you want a quiet base (low RMV)
+    that then breaks out on heavy volume.
 
     Returns a Series aligned to ``df`` (NaN until enough history exists).
     """
@@ -31,8 +30,7 @@ def relative_measured_volatility(df: pd.DataFrame, atr_period: int = 10,
     prev = close.shift()
     tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()],
                    axis=1).max(axis=1)
-    # True range as a fraction of price, so drift in the price level over the lookback
-    # window doesn't masquerade as changing volatility.
+    # True range as a fraction of price, so a drifting price level doesn't read as volatility.
     trp = tr / close.replace(0, np.nan)
     vol = trp.rolling(atr_period, min_periods=atr_period).mean()
     lo = vol.rolling(lookback, min_periods=atr_period).min()
@@ -49,9 +47,8 @@ def bollinger_bandwidth_percentile(df: pd.DataFrame, period: int = 20,
     BandWidth = (upper - lower) / middle = ``2 * num_std * sigma / sma`` — the classic
     Bollinger squeeze measure. We then percentile-rank the current width within the trailing
     ``lookback`` bars, so the output is 0-100: **low = a squeeze** (bands as tight as they've
-    been all window), high = expanded. This is the *close-based* volatility read — it cross-
-    checks RMV (which uses true range, so it also sees gaps/wicks) from the Bollinger side;
-    the two agreeing is a stronger tight-base signal than either alone.
+    been all window), high = expanded. Close-based, so it cross-checks RMV (true-range based,
+    sees gaps/wicks); the two agreeing is a stronger tight-base signal than either alone.
 
     Returns a Series aligned to ``df`` (NaN until enough history exists).
     """

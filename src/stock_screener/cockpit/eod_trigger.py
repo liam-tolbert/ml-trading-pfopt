@@ -6,17 +6,14 @@ Run from the project root (the .bat wrapper does this):
     python src/stock_screener/cockpit/eod_trigger.py [--date YYYY-MM-DD] [--no-write]
 
 Loads the persisted watchlist, tops up ONLY those names' daily bars (incremental delta
-fetch — a run costs ~1-2 batched yfinance calls), freezes a pivot for any entry that
-doesn't have one yet (recorded back into watchlist.json, ``pivot_source="auto"``; your 📌
-in the app overrides), evaluates Minervini's trigger — above the frozen pivot on >=1.5x
-the 50-day average volume — and prints + saves a dated JSON report the app's sidebar
-surfaces. Intraday runs see the live provisional bar (report flag ``intraday``;
-``volume_pace`` = volume so far vs expected by this time of day); the ~16:30 run sees the
-settled close. NEVER places orders: a trigger means YOU judge it and buy via the trade
-panel (HANDOFF §6.11/§6.14/§6.18).
-
-(The former nightly full_us ``--prewarm`` was removed 2026-07-16 — historical bars don't
-need daily refreshing; use the app's "🔄 Re-scan (refresh prices)" button instead.)
+fetch — a run costs ~1-2 batched yfinance calls), freezes a pivot for any entry that lacks
+one (recorded back into watchlist.json, ``pivot_source="auto"``; your 📌 in the app
+overrides), evaluates Minervini's trigger — above the frozen pivot on >=1.5x the 50-day
+average volume — and prints + saves a dated JSON report the app's sidebar surfaces.
+Intraday runs see the live provisional bar (report flag ``intraday``; ``volume_pace`` =
+volume so far vs expected by this time of day); the ~16:30 run sees the settled close.
+NEVER places orders: a trigger means YOU judge it and buy via the trade panel
+(HANDOFF §6.11/§6.14/§6.18).
 """
 from __future__ import annotations
 
@@ -36,11 +33,11 @@ from src.stock_screener.cockpit import cache, data_feed, export, triggers  # noq
 def build_report(today=None, write_watchlist: bool = True) -> dict:
     """Fetch -> auto-freeze -> evaluate. Returns the report dict (see triggers.py).
 
-    The price refresh uses ``max_age_days=0.0`` (incremental top-up with split detection)
-    — cheap and correct for the latest bar, whether intraday-provisional or settled;
-    ``force=True`` would re-download full 2y histories. Auto-frozen pivots are persisted to the watchlist BEFORE the
-    evaluation (skipped under ``--no-write``), so tomorrow's run checks the same level.
-    Every per-name data problem degrades to that name's row, never a crash."""
+    The price refresh uses ``max_age_days=0.0`` (incremental top-up with split detection) —
+    cheap and correct for the latest bar; ``force=True`` would re-download full 2y histories.
+    Auto-frozen pivots are persisted BEFORE the evaluation (skipped under ``--no-write``) so
+    tomorrow's run checks the same level. Every per-name data problem degrades to that name's
+    row, never a crash."""
     entries = export.load_watchlist(cache.WATCHLIST_JSON)
     syms = export.watchlist_tickers(entries)
 

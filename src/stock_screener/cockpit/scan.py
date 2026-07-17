@@ -32,13 +32,12 @@ from src.stock_screener.minervini_screener.screening import (
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
 from .indicators import (relative_measured_volatility,
                          bollinger_bandwidth_percentile, ttm_squeeze)
-# Cockpit VCP detector replaces the vendored detect_vcp_pattern (which starves strong
-# uptrends → cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
+# Cockpit VCP detector: the vendored detect_vcp_pattern starves strong uptrends
+# (cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
 from .vcp import detect_vcp
 
-# Minervini's stop is measured from the BUY POINT (pivot): 7-8% ideal, 10% hard max. The
-# advisory stop is floored this far below the pivot so a current-price-anchored engine stop
-# can't drift past the max-loss rule (see _entry_levels).
+# Minervini's stop is measured from the pivot: 7-8% ideal, 10% hard max. Floors the advisory
+# stop this far below the pivot so a price-anchored engine stop can't breach max-loss.
 MAX_STOP_FROM_PIVOT = 0.10
 
 
@@ -65,16 +64,14 @@ class ScanResult:
 # --------------------------------------------------------------------------- #
 def _rs_ratings(prices: Dict[str, pd.DataFrame], period: int) -> Dict[str, int]:
     """IBD-style RS rating, 1-99: percentile-rank a WEIGHTED multi-horizon return blend
-    across the whole scanned universe (was: plain 6-mo return percentile).
+    across the whole scanned universe.
 
-    Horizons derive from ``period`` (the ~6-mo leg, 126 trading days by default):
-    3-mo = period/2 at DOUBLE weight (IBD's recent-strength emphasis), then 6-mo, 9-mo
-    and 12-mo at single weight — the classic ``2·r3 + r6 + r9 + r12`` blend. The weighted
-    MEAN (sum / weights-used) is ranked rather than the raw sum so young listings can be
-    scored on the legs they actually have: a name missing the 9/12-mo legs competes on
-    its 3+6-mo strength instead of dropping out (the old inclusion rule — at least
-    ``period`` bars of history — is unchanged; for full-history names the mean is the
-    IBD sum / 5, which ranks identically)."""
+    Horizons derive from ``period`` (the ~6-mo leg, 126 trading days by default): 3-mo =
+    period/2 at DOUBLE weight (IBD's recent-strength emphasis), then 6-mo, 9-mo, 12-mo at
+    single weight — the classic ``2·r3 + r6 + r9 + r12`` blend. The weighted MEAN (not the
+    raw sum) is ranked so young listings compete on the legs they have instead of dropping
+    out. Inclusion still requires >= ``period`` bars; for full-history names the mean is the
+    IBD sum / 5, ranking identically."""
     horizons = ((max(1, period // 2), 2.0), (period, 1.0),
                 (period * 3 // 2, 1.0), (period * 2, 1.0))
     scores = {}
@@ -136,13 +133,12 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
     """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else the
     52-week high (the line a breakout would clear).
 
-    The stop is measured from the PIVOT (the intended buy point): Minervini's 7-8% ideal with a
-    10% hard max. The engine's ``calculate_stop_loss`` anchors to the *current* price and to
-    swing-low/50-SMA support, which — for a name still below its pivot — can sit well past 10%
-    below the pivot. We floor the advisory stop at ``MAX_STOP_FROM_PIVOT`` below the pivot so the
-    max-loss rule holds regardless (a tighter engine stop is kept as-is; ``stop_clamped`` records
-    whether the floor bound). This only tightens the advisory number — it never moves a real
-    order on its own."""
+    The stop is measured from the PIVOT (the intended buy point): Minervini's 7-8% ideal, 10%
+    hard max. The engine's ``calculate_stop_loss`` anchors to the *current* price and swing-low/
+    50-SMA support, which for a name below its pivot can sit well past 10% below it. We floor the
+    advisory stop at ``MAX_STOP_FROM_PIVOT`` below the pivot so the max-loss rule holds (a tighter
+    engine stop is kept; ``stop_clamped`` records whether the floor bound). Advisory only — never
+    moves a real order."""
     pivot = breakout.get("breakout_level")
     if not pivot or pivot <= 0:
         pivot = phase_info.get("week_52_high") or cp
@@ -175,8 +171,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     ``prices``: {ticker -> daily OHLCV}. ``spy``: SPY daily OHLCV.
     ``get_fundamentals``: optional callable run only on Step-1 passers (cheap).
     ``progress``: optional ``(done, total, ticker)`` callback, called once per name —
-    on a warm cache THIS loop (phase/VCP detection over the whole universe) is the
-    multi-minute part of a scan, so it reports progress just like the price fetch.
+    on a warm cache this loop (phase/VCP detection) is the multi-minute part of a scan.
     """
     cfg = cfg or ScanConfig()
     errors: List[str] = []
@@ -225,19 +220,17 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
 
             levels = _entry_levels(cp, breakout, stop, phase_info)
             # RMV (Relative Measured Volatility): advisory base-tightness read for Step 4.
-            # Does NOT feed the pivot/stop/target math — the cockpit shows hints, it doesn't
-            # move the levels for you.
+            # Advisory only — does NOT feed the pivot/stop/target math.
             rmv_series = relative_measured_volatility(df).dropna()
             levels["rmv"] = float(rmv_series.iloc[-1]) if len(rmv_series) else None
-            # BBWP + TTM squeeze: the Bollinger-side volatility read, a cross-check on RMV
-            # (also advisory). BBWP low = a Bollinger squeeze; squeeze True = bands inside
-            # the Keltner channel (a coiled spring).
+            # BBWP + TTM squeeze: Bollinger-side volatility read, an advisory cross-check on RMV.
+            # BBWP low = a Bollinger squeeze; squeeze True = bands inside the Keltner channel.
             bbwp_series = bollinger_bandwidth_percentile(df).dropna()
             levels["bbwp"] = float(bbwp_series.iloc[-1]) if len(bbwp_series) else None
             sq = ttm_squeeze(df)
             levels["squeeze"] = bool(sq.iloc[-1]) if len(sq) else False
-            # "squeeze fired": the base was coiled within the last ~6 bars but is expanding
-            # (off) now — the volatility-EXPANSION side of a breakout (vs. the tight base).
+            # "squeeze fired": coiled within the last ~6 bars but expanding now — the
+            # volatility-EXPANSION side of a breakout.
             prior = sq.iloc[-6:-1] if len(sq) >= 2 else sq.iloc[:0]
             levels["squeeze_released"] = bool(len(prior) and bool(prior.any())
                                               and not levels["squeeze"])
@@ -314,8 +307,8 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     spy = data_feed.get_spy(force=force)
     if spy is None or len(spy) < 200:
         raise RuntimeError("Could not fetch SPY benchmark data (needed for RS/regime).")
-    # Two sequential progress phases share the one (done, total, label) callback; the label
-    # prefix tells the UI which phase the bar is walking through.
+    # Two sequential progress phases share one (done, total, label) callback; the label
+    # prefix tells the UI which phase the bar is in.
     _p_fetch = (None if progress is None
                 else lambda d, t, s: progress(d, t, f"Prices · {s}"))
     _p_screen = (None if progress is None

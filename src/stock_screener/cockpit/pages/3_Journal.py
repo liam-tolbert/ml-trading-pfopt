@@ -1,11 +1,10 @@
 """Trade journal page — "know your numbers" for the Minervini Trader Alpaca paper account.
 
-A dedicated page (sidebar nav, right below Positions), SEPARATE from the scan page so it
-loads instantly. Reconstructs closed round trips from the account's order history — every
-cockpit order is tagged via client_order_id (SEPAoto-/SEPAstop-/SEPAcockpit-), so no
-separate bookkeeping exists or is needed — and shows the numbers Minervini says drive
-progressive exposure (*Think & Trade Like a Champion*): batting average, average win vs
-average loss, and per-trade expectancy.
+Separate from the scan page so it loads instantly. Reconstructs closed round trips from the
+account's order history — every cockpit order is tagged via client_order_id
+(SEPAoto-/SEPAstop-/SEPAcockpit-), so no separate bookkeeping is needed — and shows the
+numbers Minervini says drive progressive exposure (*Think & Trade Like a Champion*): batting
+average, average win vs average loss, and per-trade expectancy.
 
 Run the app from the project root: ``streamlit run src/stock_screener/cockpit/app.py`` and
 pick "Journal" from the page nav.
@@ -15,9 +14,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# This page imports cockpit modules, so it needs the repo ROOT on sys.path (the guide page
-# doesn't import anything and so skips this). From pages/: pages=0, cockpit=1, stock_screener=2,
-# src=3, root=4 — one level deeper than app.py's parents[3].
+# This page imports cockpit modules, so the repo ROOT must be on sys.path. From pages/:
+# pages=0, cockpit=1, stock_screener=2, src=3, root=4.
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -36,9 +34,9 @@ st.markdown(
 
 @st.cache_data(show_spinner="Reading the order history…")
 def _cached_fills(nonce):
-    # Reference the MODULE attribute (trade.fetch_order_fills) so a test patch is honored. The
-    # nonce lets Refresh bust the cache. TradeUnavailable is NOT cached (st.cache_data doesn't
-    # cache exceptions), so a credentials fix + Refresh recovers.
+    # Reference the MODULE attribute (trade.fetch_order_fills) so a test patch is honored; the
+    # nonce lets Refresh bust the cache. TradeUnavailable isn't cached, so a credentials fix +
+    # Refresh recovers.
     return trade.fetch_order_fills()
 
 
