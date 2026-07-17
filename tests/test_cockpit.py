@@ -1392,7 +1392,13 @@ def test_get_universe_full_us_offline():
               "MSFT|Microsoft Corp - Common Stock|Q|N|N|100|N|N\n"
               "QQQ|Invesco QQQ Trust|Q|N|N|100|Y|N\n"            # ETF flag -> drop
               "TSTZ|Test Issue Co|Q|Y|N|100|N|N\n"              # Test Issue -> drop
-              "XYZW|Some Warrant|Q|N|N|100|N|N\n"               # W suffix -> drop
+              "ABCDW|Some Warrant|Q|N|N|100|N|N\n"              # base+W (5-char) -> drop
+              "ABCDU|Some SPAC Unit|Q|N|N|100|N|N\n"            # base+U (5-char) -> drop
+              "ABCDR|Some SPAC Right|Q|N|N|100|N|N\n"           # base+R (5-char) -> drop
+              "SNOW|Snowflake Inc - Common Stock|Q|N|N|100|N|N\n"   # 4-char, ends W -> KEEP
+              "PLTR|Palantir Technologies - Common|Q|N|N|100|N|N\n" # 4-char, ends R -> KEEP
+              "LULU|lululemon athletica - Common|Q|N|N|100|N|N\n"   # 4-char, ends U -> KEEP
+              "U|Unity Software Inc - Common Stock|N|N|N|100|N|N\n"  # 1-char, ends U -> KEEP
               "File Creation Time: 07/02/2026 05:30|||||||\n")   # footer -> drop
     other = ("ACT Symbol|Security Name|Exchange|CQS Symbol|ETF|Round Lot Size|"
              "Test Issue|NASDAQ Symbol\n"
@@ -1414,7 +1420,12 @@ def test_get_universe_full_us_offline():
     assert "AAPL" in syms and "MSFT" in syms and "IBM" in syms
     assert all(s == s.upper() and "." not in s for s in syms), "symbols must be normalized"
     assert "QQQ" not in syms and "SPY" not in syms, "ETFs must be dropped"
-    assert "TSTZ" not in syms and "XYZW" not in syms, "test/warrant must be dropped"
+    assert "TSTZ" not in syms, "test issue must be dropped"
+    assert not {"ABCDW", "ABCDU", "ABCDR"} & set(syms), "base+W/R/U (5-char) warrants/units/rights must be dropped"
+    # Regression: ordinary common stocks ending in W/R/U must NOT be dropped by the
+    # warrant filter (the old (?:W|R|U)$ pattern silently removed all of these).
+    for keep in ("SNOW", "PLTR", "LULU", "U"):
+        assert keep in syms, f"{keep} is a common stock and must be kept"
     assert not any(s.startswith("BRK") for s in syms), "dotted class share must be dropped"
 
 

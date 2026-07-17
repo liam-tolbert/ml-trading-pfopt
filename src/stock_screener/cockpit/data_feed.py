@@ -186,16 +186,25 @@ def _fetch_us_common_nasdaqtrader() -> Optional[List[str]]:
 
 
 def _filter_us_symbols(df: pd.DataFrame) -> pd.DataFrame:
-    """Keep only clean common-stock tickers. Faithful to the upstream Minervini filter (a
-    single pass avoids its boolean-alignment bug): drop symbols with $ ^ . - ; drop
-    warrant/right/unit suffixes; keep 1-5 uppercase letters; drop fund/ETF/note names.
-    Note this also omits dotted class shares (BRK.B) and 1-letter-suffix names (U) — the
-    same known limitation as upstream."""
+    """Keep only clean common-stock tickers: drop symbols with $ ^ . - ; drop
+    warrant/right/unit issues; keep 1-5 uppercase letters; drop fund/ETF/note names.
+
+    Warrant/right/unit drop is anchored to the nasdaqtrader SymDir shape — a genuine
+    derivative is the *base* symbol plus a trailing issue-code letter, i.e. a 5-character
+    symbol (up-to-4-char base + W/R/U). Anchoring to that shape is deliberate: the older
+    plain ``(?:W|R|U)$`` matched any length and silently dropped ordinary 4-letter common
+    stocks that merely end in one of those letters (PLTR, SNOW, UBER, LULU, TROW, DOW, LOW,
+    KR, and single-letter U — exactly the high-RS names a Minervini screen targets). NYSE
+    CQS-style suffixes (BRK.WS, "XYZ WS") arrive dotted/spaced and are already removed by
+    the punctuation and ``^[A-Z]{1,5}$`` filters. A short-base warrant (3-char base + W, so
+    only 4 chars) can still slip through — that's the intended trade-off: an errant warrant
+    just fails the trend template, whereas a dropped leader is invisible to the screen.
+    Dotted class shares (BRK.B/BF.B) remain omitted, the same known limitation as upstream."""
     if df.empty:
         return df
     sym = df["symbol"].astype(str)
     df = df[~sym.str.contains(r"[\$\^\.\-]", regex=True, na=False)]
-    df = df[~df["symbol"].astype(str).str.contains(r"(?:WS|WT|W|R|U)$", regex=True, na=False)]
+    df = df[~df["symbol"].astype(str).str.match(r"^[A-Z]{4}[WRU]$", na=False)]
     df = df[df["symbol"].astype(str).str.match(r"^[A-Z]{1,5}$", na=False)]
     name_u = df["name"].astype(str).str.upper()
     df = df[~name_u.str.contains(_ETF_NAME_RE, regex=True, na=False)]
