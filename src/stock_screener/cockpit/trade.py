@@ -23,6 +23,15 @@ MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so 
                             # plan builder needn't import alpaca-py)
 MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-order cap as a
                             # fraction of equity; the risk mode clamps to it (submit re-checks)
+STALE_PLAN_BARS = 2         # a plan name whose freshest daily bar is more than this many
+                            # *trading* days old is skipped rather than sized on stale data.
+                            # The scan is memoized in session_state with NO time-based
+                            # invalidation and the trigger fragment keeps the tab alive for
+                            # days, so a Build+Submit could otherwise size/stop off last
+                            # week's close. Build also re-pulls the watchlist's latest bars
+                            # (freshen_prices), so in normal use every name reads 0-1; this
+                            # only trips a name whose refresh couldn't reach fresh data. Set
+                            # to 2 to absorb a weekend + one holiday of refresh flakiness.
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
@@ -195,9 +204,27 @@ def position_advisories(pos: dict) -> List[str]:
     return out
 
 
+def _trading_days_since(last, today) -> Optional[int]:
+    """Number of *trading* days between a bar date ``last`` and ``today`` — 0 when ``last`` is
+    the freshest possible bar (e.g. Friday's bar read on the weekend, or today's own bar).
+    Business-day based; holidays aren't modelled, so a holiday reads as one extra day and the
+    caller's tolerance absorbs it. Returns None if either date can't be parsed, so the caller
+    skips the check rather than blocking a trade on a parse error."""
+    try:
+        import pandas as pd
+        a = pd.Timestamp(last).normalize()
+        b = pd.Timestamp(today).normalize()
+        if b <= a:
+            return 0
+        return len(pd.bdate_range(a, b)) - 1
+    except Exception:
+        return None
+
+
 def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                    mode: str, amount: float,
-                   equity: Optional[float] = None) -> Tuple[List[dict], List[dict]]:
+                   equity: Optional[float] = None, asof=None,
+                   max_bar_age_days: Optional[float] = None) -> Tuple[List[dict], List[dict]]:
     """Size a market-BUY for EACH watchlisted name by the chosen ``mode``:
 
     * ``"pct"``     — ``amount`` % of the account ``equity`` per name (needs ``equity``);
@@ -224,9 +251,20 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     NOT re-scale a risk-sized quantity. ``earnings_in`` (calendar days to the next scheduled
     report, from the scan payload; None = unknown) is carried through untouched so the caller
     can warn about buying into an imminent report — advisory only, never a skip.
+
+    When ``max_bar_age_days`` is set, a name whose freshest bar is more than that many
+    *trading* days old (relative to ``asof`` or today) is skipped as stale rather than sized
+    on days-old data — the app pairs this with :func:`freshen_prices` at Build so ordinary
+    names read fresh. Both default to off, keeping the builder pure and unchanged for callers
+    (and unit tests) that omit them.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
+    _stale_ref = None
+    if max_bar_age_days is not None:
+        import pandas as pd
+        _stale_ref = (pd.Timestamp(asof).normalize() if asof is not None
+                      else pd.Timestamp.today().normalize())
     plan: List[dict] = []
     skipped: List[dict] = []
     for t in dict.fromkeys(tickers):
@@ -241,6 +279,14 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
         if not price or price <= 0:
             skipped.append({"ticker": t, "reason": "no current price"})
             continue
+        if _stale_ref is not None:
+            _age = _trading_days_since(df.index[-1], _stale_ref)
+            if _age is not None and _age > max_bar_age_days:
+                skipped.append({"ticker": t, "reason":
+                                f"stale price data (last bar "
+                                f"{pd.Timestamp(df.index[-1]).date()}, ~{_age} trading days "
+                                f"old) — Re-scan to refresh"})
+                continue
 
         stop = lv.get("stop")            # read early — the risk mode sizes against it
         capped = False
@@ -293,6 +339,37 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "earnings_in": payload.get("earnings_in"),
         })
     return plan, skipped
+
+
+def freshen_prices(tickers: Sequence[str], payloads: Dict[str, dict]) -> Dict[str, dict]:
+    """Re-pull the latest daily bars for the given watchlist ``tickers`` and return a small
+    payloads dict with each name's ``df`` replaced by the freshest available frame, so
+    :func:`build_buy_plan` sizes on current prices instead of the possibly days-old closes
+    frozen in the scan memo (the scan result lives in session_state with no time-based
+    invalidation and the trigger fragment keeps the tab alive for days).
+
+    Uses the cheap incremental top-up (``max_age_days=0`` — the same path the EOD trigger
+    uses to fetch the finalized close without a full 2y refetch); only the handful of
+    watchlist names are fetched, never the universe. Any name the refresh can't reach keeps
+    its existing frame — :func:`build_buy_plan`'s ``max_bar_age_days`` guard then skips a
+    genuinely stale one. Tickers absent from ``payloads`` are dropped (the builder already
+    reports those as 'not in the current scan'). ``levels`` and ``earnings_in`` are carried
+    through untouched; only the price frame is refreshed. ``data_feed`` is imported lazily so
+    the cockpit still loads without its optional deps, and a total fetch failure degrades to
+    the original frames rather than raising."""
+    want = [t for t in dict.fromkeys(tickers) if payloads.get(t)]
+    if not want:
+        return {}
+    try:
+        from . import data_feed
+        fresh = data_feed.get_many_prices(want, max_age_days=0.0) or {}
+    except Exception:
+        fresh = {}
+    out: Dict[str, dict] = {}
+    for t in want:
+        f = fresh.get(t)
+        out[t] = {**payloads[t], "df": f} if (f is not None and len(f)) else payloads[t]
+    return out
 
 
 def _open_sell_stops(client, ticker: str, *, GetOrdersRequest, QueryOrderStatus,

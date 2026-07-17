@@ -745,6 +745,83 @@ def test_build_buy_plan_sizing_modes():
     assert by_edge["ZERO"]["stop_price"] is None              # stop 0 -> None
 
 
+def test_build_buy_plan_skips_stale_bars():
+    """With ``max_bar_age_days`` set, a name whose freshest daily bar is older than the
+    tolerance (relative to ``asof``) is skipped as stale instead of sized on days-old data;
+    a name whose bar is current is planned normally. Omitting ``max_bar_age_days`` keeps the
+    builder's old behavior (no time check) so existing callers/tests are unaffected."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan, STALE_PLAN_BARS
+
+    asof = pd.Timestamp("2026-07-15")
+
+    def mk(last_ts):
+        idx = pd.bdate_range(end=pd.Timestamp(last_ts), periods=3)
+        df = pd.DataFrame({"Open": 100.0, "High": 100.0, "Low": 100.0,
+                           "Close": 100.0, "Volume": 1000}, index=idx)
+        return {"df": df, "levels": {"pivot": 100.0, "buy_zone": (100.0, 105.0), "stop": 92.0}}
+
+    fresh = mk(asof)                                        # last bar == asof -> 0 days old
+    stale = mk(pd.bdate_range(end=asof, periods=11)[0])     # 10 trading days back -> stale
+    edge = mk(pd.bdate_range(end=asof, periods=STALE_PLAN_BARS + 1)[0])  # exactly tolerated
+
+    plan, skipped = build_buy_plan(
+        ["F", "S", "E"], {"F": fresh, "S": stale, "E": edge},
+        mode="shares", amount=5, asof=asof, max_bar_age_days=STALE_PLAN_BARS)
+    planned = {o["ticker"] for o in plan}
+    assert "F" in planned, "current-bar name must be planned"
+    assert "E" in planned, "a bar exactly at the tolerance must NOT be skipped"
+    assert "S" not in planned, "a clearly-stale name must be skipped"
+    _s = {s["ticker"]: s["reason"] for s in skipped}
+    assert "S" in _s and "stale" in _s["S"].lower(), _s
+
+    # Back-compat: without max_bar_age_days the stale name is planned (no time check).
+    p2, s2 = build_buy_plan(["S"], {"S": stale}, mode="shares", amount=5)
+    assert p2 and p2[0]["ticker"] == "S" and not s2
+
+
+def test_freshen_prices_overlays_latest_bars():
+    """freshen_prices re-pulls the watchlist names' latest bars (incremental top-up) and
+    overlays them onto the payload frames, carrying levels/earnings through; a name the
+    refresh can't reach keeps its original frame, and non-scan tickers are dropped."""
+    import pandas as pd
+    from src.stock_screener.cockpit import trade, data_feed
+
+    def _old(price):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        return pd.DataFrame({"Open": price, "High": price, "Low": price,
+                             "Close": price, "Volume": 1}, index=idx)
+
+    payloads = {
+        "AAA": {"df": _old(10.0), "levels": {"pivot": 10.0}, "earnings_in": 5},
+        "BBB": {"df": _old(20.0), "levels": {"pivot": 20.0}},
+    }
+
+    captured = {}
+
+    def fake_gmp(syms, **kw):
+        captured["syms"], captured["max_age_days"] = list(syms), kw.get("max_age_days")
+        idx = pd.bdate_range(end=pd.Timestamp("2026-07-15"), periods=4)
+        # Fresh data for AAA only; BBB absent -> caller must fall back to its old frame.
+        return {"AAA": pd.DataFrame({"Open": 12, "High": 12, "Low": 12,
+                                     "Close": [12, 13, 14, 15.5], "Volume": 1}, index=idx)}
+
+    _orig = data_feed.get_many_prices
+    data_feed.get_many_prices = fake_gmp
+    try:
+        out = trade.freshen_prices(["AAA", "BBB", "ZZZ"], payloads)
+    finally:
+        data_feed.get_many_prices = _orig
+
+    assert set(out) == {"AAA", "BBB"}, "ZZZ isn't in payloads -> dropped"
+    assert captured["max_age_days"] == 0.0, "must use the cheap incremental top-up path"
+    assert "ZZZ" not in captured["syms"], "only refresh names present in the scan"
+    assert float(out["AAA"]["df"]["Close"].iloc[-1]) == 15.5, "AAA price refreshed"
+    assert out["AAA"]["levels"] == {"pivot": 10.0} and out["AAA"]["earnings_in"] == 5, \
+        "levels/earnings carried through untouched"
+    assert out["BBB"]["df"] is payloads["BBB"]["df"], "unrefreshable name keeps its old frame"
+
+
 def test_stop_is_valid():
     """A protective sell-stop is valid only strictly below the reference price."""
     from src.stock_screener.cockpit.trade import stop_is_valid

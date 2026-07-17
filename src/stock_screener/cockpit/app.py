@@ -27,7 +27,8 @@ from src.stock_screener.cockpit.export import (  # noqa: E402
     watchlist_ohlcv_csv, watchlist_tickers)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
-    TradeUnavailable, build_buy_plan, fetch_account_summary, stop_is_valid, submit_buy_plan)
+    STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
+    freshen_prices, stop_is_valid, submit_buy_plan)
 from src.stock_screener.cockpit.triggers import load_latest_trigger_report  # noqa: E402
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
@@ -602,8 +603,14 @@ with st.sidebar:
                 _account = fetch_account_summary()
             except TradeUnavailable as _e:
                 _account = {"error": str(_e)}
-            _plan, _skip = build_buy_plan(_watch_t, res.payloads, mode=_mode,
-                                          amount=_amount, equity=_account.get("equity"))
+            # Re-pull the watchlist names' latest bars so sizing/stops use CURRENT prices, not
+            # the possibly days-old closes frozen in the scan memo (the tab can stay open for
+            # days). The staleness guard then skips any name the refresh couldn't freshen.
+            with st.spinner("Refreshing prices & building plan…"):
+                _fresh_payloads = freshen_prices(_watch_t, res.payloads)
+                _plan, _skip = build_buy_plan(
+                    _watch_t, _fresh_payloads, mode=_mode, amount=_amount,
+                    equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS)
             # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a
             # fresh Build re-seeds each stop to its computed default instead of Streamlit
             # retaining a stale edited value from the previous plan.
