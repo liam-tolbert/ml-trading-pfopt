@@ -140,6 +140,11 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
     engine stop is kept; ``stop_clamped`` records whether the floor bound). Advisory only — never
     moves a real order."""
     pivot = breakout.get("breakout_level")
+    # A '50 SMA Breakout' level IS the 50-day SMA (a routine pullback-to-50-day recovery), not a
+    # base pivot — anchoring the buy zone/stop/target (and the frozen trigger level) to it is
+    # wrong. Ignore it and fall through to the 52-week high the strategy defines as the pivot.
+    if breakout.get("breakout_type") == "50 SMA Breakout":
+        pivot = None
     if not pivot or pivot <= 0:
         pivot = phase_info.get("week_52_high") or cp
     raw_stop = stop if (stop and stop > 0 and stop < pivot) else pivot * 0.925

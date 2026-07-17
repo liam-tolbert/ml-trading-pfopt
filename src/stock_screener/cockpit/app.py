@@ -593,11 +593,16 @@ with st.sidebar:
             # Re-pull the watchlist names' latest bars so sizing/stops use CURRENT prices, not
             # the days-old closes frozen in the scan memo. The staleness guard then skips any
             # name the refresh couldn't freshen.
+            # Each name's FROZEN judged_pivot (the level its trigger fired on) overrides the
+            # drifted scan pivot in the plan — buy zone, stop, extended flag, and risk sizing.
+            _pivots = {e["ticker"]: e["judged_pivot"] for e in _watch
+                       if isinstance(e, dict) and e.get("ticker") and e.get("judged_pivot")}
             with st.spinner("Refreshing prices & building plan…"):
                 _fresh_payloads = freshen_prices(_watch_t, res.payloads)
                 _plan, _skip = build_buy_plan(
                     _watch_t, _fresh_payloads, mode=_mode, amount=_amount,
-                    equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS)
+                    equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS,
+                    pivots=_pivots)
             # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a fresh
             # Build re-seeds each stop to its computed default instead of retaining a stale edit.
             _bn = st.session_state.get("trade_build_n", 0) + 1
@@ -631,6 +636,8 @@ with st.sidebar:
                     _fl = " ⚠︎ extended" if _o["extended"] else ""
                     if _o.get("capped"):
                         _fl += " ⚠︎ capped"
+                    if _o.get("pivot_frozen") and _o.get("pivot"):
+                        _fl += f" · 📌 pivot {_o['pivot']:.2f}"   # stop/zone off the frozen level
                     _ew = _earnings_flag(_o.get("earnings_in"))
                     _cA, _cB = st.columns([3, 2])
                     _cA.caption(f"• **{_t}** {_o['shares']} sh @ "

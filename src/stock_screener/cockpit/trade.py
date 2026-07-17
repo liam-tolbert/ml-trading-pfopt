@@ -26,6 +26,10 @@ MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-ord
 STALE_PLAN_BARS = 2         # skip a plan name whose freshest daily bar is more than this many
                             # *trading* days old rather than size on stale data (the scan memo
                             # has no time-based invalidation). 2 absorbs a weekend + a holiday.
+# When a frozen judged_pivot drives the plan, mirror scan._entry_levels: default stop 7.5% below
+# the pivot, hard-floored at 10% below it (Minervini's 7-8% ideal / 10% max).
+DEFAULT_STOP_FROM_PIVOT = 0.075
+MAX_STOP_FROM_PIVOT = 0.10
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
@@ -213,7 +217,8 @@ def _trading_days_since(last, today) -> Optional[int]:
 def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                    mode: str, amount: float,
                    equity: Optional[float] = None, asof=None,
-                   max_bar_age_days: Optional[float] = None) -> Tuple[List[dict], List[dict]]:
+                   max_bar_age_days: Optional[float] = None,
+                   pivots: Optional[Dict[str, float]] = None) -> Tuple[List[dict], List[dict]]:
     """Size a market-BUY for EACH watchlisted name by the chosen ``mode``:
 
     * ``"pct"``     — ``amount`` % of the account ``equity`` per name (needs ``equity``);
@@ -246,6 +251,14 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     on days-old data — the app pairs this with :func:`freshen_prices` at Build so ordinary
     names read fresh. Both default to off, keeping the builder pure and unchanged for callers
     (and unit tests) that omit them.
+
+    ``pivots`` maps ticker -> a FROZEN judged_pivot (the level the watchlist trigger fired on).
+    The detected scan pivot drifts every scan, so for a name with a frozen pivot the buy zone,
+    ``extended`` flag, default ``stop_price``, and risk sizing all key off the frozen level
+    instead of the current payload's ``levels`` (default stop 7.5% below it, hard-floored 10%
+    below — mirroring ``scan._entry_levels``; a tighter engine stop below the frozen pivot is
+    kept). Each plan entry carries ``pivot_frozen`` (True when its pivot came from ``pivots``).
+    Omit ``pivots`` and every name uses its scan-derived levels as before.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
@@ -277,7 +290,23 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                                 f"old) — Re-scan to refresh"})
                 continue
 
-        stop = lv.get("stop")            # read early — the risk mode sizes against it
+        # Effective entry levels (read early — the risk mode sizes against the stop). A frozen
+        # judged_pivot overrides the drifted scan pivot: buy zone, extended flag, and the default
+        # stop all key off it, so the order the user submits matches the level the trigger fired on.
+        frozen = None
+        if pivots:
+            _fp = pivots.get(t)
+            frozen = float(_fp) if _fp and _fp > 0 else None
+        if frozen:
+            pivot, buy_hi = frozen, frozen * 1.05
+            _eng = lv.get("stop")                        # keep a tighter engine stop below the pivot
+            _raw = (_eng if (_eng and _eng > 0 and _eng < frozen)
+                    else frozen * (1.0 - DEFAULT_STOP_FROM_PIVOT))
+            stop = max(_raw, frozen * (1.0 - MAX_STOP_FROM_PIVOT))
+        else:
+            bz = lv.get("buy_zone") or (None, None)
+            pivot, buy_hi = bz[0], bz[1]
+            stop = lv.get("stop")
         capped = False
 
         if mode == "pct":
@@ -316,13 +345,12 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                             "reason": f"under the ${MIN_TRADE_USD:.0f} order minimum"})
             continue
 
-        bz = lv.get("buy_zone") or (None, None)
-        pivot = bz[0]
         plan.append({
             "ticker": t, "shares": shares, "price": round(price, 2),
             "pivot": round(float(pivot), 2) if pivot else None,
+            "pivot_frozen": bool(frozen),
             "est_value": round(est_value, 2),
-            "extended": bool(bz[1] and price > bz[1]),
+            "extended": bool(buy_hi and price > buy_hi),
             "capped": capped,
             "stop_price": round(float(stop), 2) if stop and stop > 0 else None,
             "earnings_in": payload.get("earnings_in"),
@@ -436,6 +464,28 @@ def _open_sell_stops_by_symbol(client, *, GetOrdersRequest, QueryOrderStatus,
     return out
 
 
+def _open_cockpit_buys(client, *, GetOrdersRequest, QueryOrderStatus, OrderSide) -> set:
+    """Symbols with an OPEN cockpit BUY order (``client_order_id`` starts ``SEPA``) in ONE query.
+
+    The documented cadence submits after the close, so a DAY OTO/market BUY sits queued until the
+    next open with no position yet — :func:`submit_buy_plan`'s only 'already invested' guard is
+    ``get_all_positions()``, which wouldn't see it. Skipping these on a re-submit prevents a second
+    BUY (double position, double risk). Side=BUY already excludes ``SEPAstop-`` sells. Empty set on
+    any error (fail-open: the 10%-cap / tradability checks still bound a duplicate)."""
+    try:
+        opens = client.get_orders(filter=GetOrdersRequest(
+            status=QueryOrderStatus.OPEN, side=OrderSide.BUY))
+    except Exception:
+        return set()
+    out: set = set()
+    for od in opens or []:
+        sym = getattr(od, "symbol", None)
+        coid = str(getattr(od, "client_order_id", None) or "")
+        if sym and coid.startswith("SEPA"):
+            out.add(sym)
+    return out
+
+
 def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, existing, *,
                     OrderSide, TimeInForce, StopOrderRequest) -> dict:
     """Minervini's one-way GTC stop ratchet for a held position — the single source of truth,
@@ -520,6 +570,11 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
     account_number = getattr(acct, "account_number", "?")
     # {ticker: whole shares held} — mirrors get_account_state's int(float(qty)) convention.
     held = {p.symbol: int(float(p.qty)) for p in client.get_all_positions()}
+    # Cockpit BUYs still queued (submitted after the close, not yet filled) don't show as
+    # positions — skip a re-buy on those so a re-submit can't double the position.
+    pending_buys = _open_cockpit_buys(
+        client, GetOrdersRequest=GetOrdersRequest,
+        QueryOrderStatus=QueryOrderStatus, OrderSide=OrderSide)
     tradable = validate_tradable(client, [o["ticker"] for o in plan])
     max_allowed = MAX_ORDER_PCT * equity
 
@@ -551,6 +606,11 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                 continue
 
             # Not held — a market BUY, with an OTO protective stop when attach_stop is on.
+            if t in pending_buys:
+                results.append({**o, "status": "skipped",
+                                "detail": "a cockpit BUY is already queued (pending fill) — "
+                                          "not re-submitting"})
+                continue
             if o["est_value"] > max_allowed:
                 results.append({**o, "status": "skipped",
                                 "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})

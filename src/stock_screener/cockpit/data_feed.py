@@ -506,16 +506,27 @@ def _pct(curr, prev) -> Optional[float]:
     return (curr - prev) / abs(prev) * 100.0
 
 
-def _yoy(s: Optional[pd.Series], lag: int = 4) -> Optional[float]:
-    if s is None or len(s) < lag + 1:
+def _yoy_at(s: Optional[pd.Series], back: int = 0) -> Optional[float]:
+    """YoY % for the quarter ``back`` steps from the latest (0 = latest, 1 = prior): its value
+    vs the entry ~a year earlier (330-400 days back), DATE-matched like ``_edgar_yoy_series``
+    so a missing/extra quarter can't misalign a fixed 4-step lag. None if ``s`` is too short or
+    no ~1-year-prior quarter exists."""
+    if s is None or back < 0 or len(s) < back + 2:
         return None
-    return _pct(s.iloc[-1], s.iloc[-1 - lag])
+    i = len(s) - 1 - back                        # absolute position of the anchor quarter
+    end = s.index[i]
+    for k in range(i - 1, -1, -1):
+        if 330 <= (end - s.index[k]).days <= 400:
+            return _pct(s.iloc[i], s.iloc[k])
+    return None
+
+
+def _yoy(s: Optional[pd.Series], lag: int = 4) -> Optional[float]:
+    return _yoy_at(s, 0)
 
 
 def _yoy_prev(s: Optional[pd.Series], lag: int = 4) -> Optional[float]:
-    if s is None or len(s) < lag + 2:
-        return None
-    return _pct(s.iloc[-2], s.iloc[-2 - lag])
+    return _yoy_at(s, 1)
 
 
 def _qoq(s: Optional[pd.Series]) -> Optional[float]:
@@ -524,25 +535,32 @@ def _qoq(s: Optional[pd.Series]) -> Optional[float]:
     return _pct(s.iloc[-1], s.iloc[-2])
 
 
+def _aligned(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optional[pd.DataFrame]:
+    """``num``/``den`` aligned on their common (quarter-end) index with NaNs dropped, so a margin
+    never divides a numerator and denominator from DIFFERENT quarters. ``_row`` dropna's each line
+    item independently, so yfinance populating Total Revenue for the newest quarter before Gross
+    Profit / Operating Income would otherwise pair GP(Q-1) with Rev(Q0). Columns ``n``/``d``;
+    None when either input is missing or no common quarter remains."""
+    if num is None or den is None:
+        return None
+    both = pd.concat([num.rename("n"), den.rename("d")], axis=1).dropna()
+    return both if not both.empty else None
+
+
 def _margin(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optional[float]:
-    if num is None or den is None or len(num) == 0 or len(den) == 0:
+    a = _aligned(num, den)
+    if a is None or a["d"].iloc[-1] == 0:
         return None
-    d = den.iloc[-1]
-    if d == 0 or pd.isna(d) or pd.isna(num.iloc[-1]):
-        return None
-    return num.iloc[-1] / d * 100.0
+    return a["n"].iloc[-1] / a["d"].iloc[-1] * 100.0
 
 
 def _margin_trend(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optional[float]:
     """Change in operating margin vs the prior quarter (pp); + = expanding."""
-    if num is None or den is None or len(num) < 2 or len(den) < 2:
+    a = _aligned(num, den)
+    if a is None or len(a) < 2 or a["d"].iloc[-1] == 0 or a["d"].iloc[-2] == 0:
         return None
-    if den.iloc[-1] == 0 or den.iloc[-2] == 0:
-        return None
-    cur = num.iloc[-1] / den.iloc[-1] * 100.0
-    prev = num.iloc[-2] / den.iloc[-2] * 100.0
-    if pd.isna(cur) or pd.isna(prev):
-        return None
+    cur = a["n"].iloc[-1] / a["d"].iloc[-1] * 100.0
+    prev = a["n"].iloc[-2] / a["d"].iloc[-2] * 100.0
     return cur - prev
 
 

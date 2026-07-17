@@ -240,6 +240,50 @@ def test_fundamentals_surprise_and_edgar_merge():
             assert "last_surprise_pct" in out2 and out2["eps_fy_yoy"] == 22.5
 
 
+def test_margin_aligns_num_and_den_quarters():
+    """_margin / _margin_trend must pair numerator and denominator from the SAME quarter. When
+    yfinance has the newest quarter's revenue but not yet its operating income (a common
+    right-after-a-release state), the OI series ends one quarter earlier — aligning on the common
+    index keeps the ratio honest instead of dividing OI(Q-1) by Rev(Q0) (a wrong margin and a
+    possibly flipped trend sign)."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    qends = pd.to_datetime(["2025-03-31", "2025-06-30", "2025-09-30",
+                            "2025-12-31", "2026-03-31"])
+    rev = pd.Series([100., 110., 120., 130., 200.], index=qends)   # newest quarter revenue jumps
+    oi = pd.Series([18., 20., 24., 32.5], index=qends[:4])         # OI not yet reported for Q0
+
+    # aligned: latest COMMON quarter is 2025-12-31 -> 32.5/130 = 25.0% (NOT 32.5/200 = 16.25%)
+    assert abs(dfeed._margin(oi, rev) - 25.0) < 1e-9
+    # aligned trend: 25.0% (Q-1) vs 20.0% (Q-2, 24/120) = +5.0pp expanding — the buggy
+    # cross-quarter pairing would read it as CONTRACTING
+    assert abs(dfeed._margin_trend(oi, rev) - 5.0) < 1e-9
+    # degenerate inputs still yield None, never raise
+    assert dfeed._margin(None, rev) is None
+    assert dfeed._margin(oi, pd.Series(dtype=float)) is None
+    assert dfeed._margin_trend(oi.iloc[:1], rev) is None           # only one common quarter
+
+
+def test_yoy_is_date_matched():
+    """_yoy / _yoy_prev compare against the entry ~a year earlier by DATE (330-400 days), so an
+    extra/missing quarter can't misalign a fixed 4-step positional lag."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    # six entries incl. an off-cycle 2025-11-15 restatement: a positional -5 lag lands on
+    # 2025-09-30 (~9mo back, wrong); date-matching finds 2025-06-30 (365 days) -> +25%.
+    idx = pd.to_datetime(["2025-06-30", "2025-09-30", "2025-11-15",
+                          "2025-12-31", "2026-03-31", "2026-06-30"])
+    s = pd.Series([100., 102., 103., 104., 106., 125.], index=idx)
+    assert abs(dfeed._yoy(s) - 25.0) < 1e-9
+
+    # too short to have a ~1-year-prior quarter -> None (not a bogus positional read)
+    short = pd.Series([100., 110.],
+                      index=pd.to_datetime(["2026-03-31", "2026-06-30"]))
+    assert dfeed._yoy(short) is None
+
+
 def test_rs_ratings_ibd_weighted():
     """The RS rating is an IBD-style weighted multi-horizon percentile (2×3mo + 6mo + 9mo
     + 12mo): a smaller move concentrated in the last 3 months outranks a bigger move that
@@ -374,6 +418,26 @@ def test_entry_levels_stop_clamped_to_pivot():
     default = scan_mod._entry_levels(99.0, bo, None, ph)
     assert default["stop"] == 92.5 and default["stop_clamped"] is False
     assert default["stop"] < default["pivot"]               # never at/above the pivot
+
+
+def test_entry_levels_ignores_50sma_breakout_pivot():
+    """A '50 SMA Breakout' level is the 50-day SMA (a routine pullback recovery), not a base
+    pivot — _entry_levels must ignore it and fall through to the 52-week-high fallback so the
+    buy zone/stop/target (and the frozen trigger level) anchor to a real pivot."""
+    ph = {"week_52_high": 120.0}
+    # 50-SMA reclaim: the engine reports a breakout AT the 50-day SMA (90.0), below the market.
+    sma_bo = {"breakout_level": 90.0, "breakout_type": "50 SMA Breakout",
+              "is_breakout": True, "volume_ratio": 1.0, "volume_confirmed": False}
+    lv = scan_mod._entry_levels(100.0, sma_bo, None, ph)
+    assert lv["pivot"] == 120.0                             # the 52-wk high, NOT the 90.0 SMA
+    assert lv["buy_zone"][0] == 120.0
+    assert lv["target"] == 120.0 * 1.25
+
+    # a genuine VCP/base breakout level IS still adopted as the pivot
+    vcp_bo = {"breakout_level": 110.0, "breakout_type": "VCP Breakout (3 contractions)",
+              "is_breakout": True, "volume_ratio": 1.6, "volume_confirmed": True}
+    lv2 = scan_mod._entry_levels(112.0, vcp_bo, None, ph)
+    assert lv2["pivot"] == 110.0
 
 
 def test_streamlit_app_renders_offline():
@@ -780,6 +844,63 @@ def test_build_buy_plan_skips_stale_bars():
     assert p2 and p2[0]["ticker"] == "S" and not s2
 
 
+def test_build_buy_plan_uses_frozen_pivot():
+    """A watchlist entry's FROZEN judged_pivot (the level its trigger fired on) overrides the
+    drifted scan pivot: the buy zone / extended flag / default stop / risk sizing all key off the
+    frozen level, not the current payload's levels. Names absent from ``pivots`` are unchanged."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import (
+        build_buy_plan, DEFAULT_STOP_FROM_PIVOT, MAX_STOP_FROM_PIVOT)
+
+    def _pl(price, scan_pivot, stop=None):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        lv = {"pivot": scan_pivot, "buy_zone": (scan_pivot, scan_pivot * 1.05)}
+        if stop is not None:
+            lv["stop"] = stop
+        return {"df": df, "levels": lv}
+
+    # scan pivot drifted DOWN to 95 (price sits above it); the frozen trigger level is 120, and
+    # the payload carries no engine stop -> the frozen-pivot default 7.5%-below stop applies,
+    # floored at 10% below (here 111.0 = 120×0.925, above the 108.0 floor).
+    pl = {"AAA": _pl(100.0, 95.0)}
+    expect_stop = round(max(120.0 * (1.0 - DEFAULT_STOP_FROM_PIVOT),
+                            120.0 * (1.0 - MAX_STOP_FROM_PIVOT)), 2)   # 111.0
+
+    frozen, _ = build_buy_plan(["AAA"], pl, mode="shares", amount=5, pivots={"AAA": 120.0})
+    o = frozen[0]
+    assert o["pivot"] == 120.0 and o["pivot_frozen"] is True
+    assert o["stop_price"] == expect_stop                  # stop off the frozen pivot, not 95
+    assert o["extended"] is False                          # 100 < 120×1.05, unlike 100 > 95×1.05
+
+    # same name WITHOUT the frozen pivot: scan pivot 95 -> extended (100 > 99.75), no stop.
+    plain, _ = build_buy_plan(["AAA"], pl, mode="shares", amount=5)
+    assert plain[0]["pivot"] == 95.0 and plain[0]["pivot_frozen"] is False
+    assert plain[0]["extended"] is True and plain[0]["stop_price"] is None
+
+    # price above the frozen buy zone -> extended flags off the FROZEN pivot (126 = 120×1.05).
+    ext, _ = build_buy_plan(["AAA"], {"AAA": _pl(130.0, 95.0)},
+                            mode="shares", amount=5, pivots={"AAA": 120.0})
+    assert ext[0]["extended"] is True
+
+    # risk sizing keys off the frozen-pivot stop: the payload has NO engine stop, so WITHOUT a
+    # frozen pivot the risk mode can't size (skipped 'no stop'); WITH it, shares = budget/(price−stop).
+    risk_pl = {"AAA": _pl(118.0, 95.0)}
+    _, s_norisk = build_buy_plan(["AAA"], risk_pl, mode="risk", amount=0.5, equity=100_000.0)
+    assert s_norisk and "stop" in s_norisk[0]["reason"]    # no stop to risk-size against
+    p_risk, _ = build_buy_plan(["AAA"], risk_pl, mode="risk", amount=0.5,
+                               equity=100_000.0, pivots={"AAA": 120.0})
+    assert p_risk[0]["stop_price"] == expect_stop          # 111.0
+    assert p_risk[0]["shares"] == int((100_000.0 * 0.5 / 100.0) / (118.0 - expect_stop))
+    assert p_risk[0]["capped"] is False
+
+    # a tighter engine stop that sits BELOW the frozen pivot and within 10% is kept as-is.
+    kept, _ = build_buy_plan(["AAA"], {"AAA": _pl(118.0, 95.0, stop=115.0)},
+                             mode="shares", amount=5, pivots={"AAA": 120.0})
+    assert kept[0]["stop_price"] == 115.0                  # 115 < 120 and within 10% -> kept
+
+
 def test_freshen_prices_overlays_latest_bars():
     """freshen_prices re-pulls the watchlist names' latest bars (incremental top-up) and
     overlays them onto the payload frames, carrying levels/earnings through; a name the
@@ -958,6 +1079,92 @@ def test_submit_buy_plan_stop_logic():
                                                  stop_price=95.0)]})
     outF = _run([_entry("HELD", 10, 100.0, 95.0)], True, ff)["results"][0]
     assert outF["status"] == "stop_kept" and not ff.submitted and not ff.cancelled
+
+
+def test_submit_buy_plan_skips_pending_cockpit_buy():
+    """A cockpit BUY submitted after the close sits QUEUED (no position yet) until the next
+    open. A re-submit must not place a second BUY: submit_buy_plan queries open BUY orders and
+    skips a not-held ticker that already has a pending cockpit buy (client_order_id 'SEPA…').
+    A pending BUY from some OTHER tool (no SEPA prefix) does NOT block, and a ticker with no
+    pending order is bought normally."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.requests import MarketOrderRequest
+    from alpaca.trading.enums import OrderSide
+
+    class _Acct:
+        equity = "100000"; cash = "100000"; account_number = "PA000123"
+
+    class _Asset:
+        tradable = True
+
+    class _Order:
+        def __init__(self, symbol, side, coid):
+            self.symbol, self.side, self.client_order_id = symbol, side, coid
+            self.type = None; self.stop_price = None
+
+    class _Resp:
+        def __init__(self, oid):
+            self.id = oid
+
+    class FakeClient:
+        def __init__(self, open_orders):
+            self._open = open_orders            # flat list of _Order
+            self.submitted, self._n = [], 0
+
+        def get_account(self):
+            return _Acct()
+
+        def get_all_positions(self):
+            return []                           # nothing held -> all names take the BUY path
+
+        def get_asset(self, t):
+            return _Asset()
+
+        def get_orders(self, filter=None):
+            side = getattr(filter, "side", None)
+            syms = getattr(filter, "symbols", None)
+            out = []
+            for od in self._open:
+                if side is not None and od.side != side:
+                    continue
+                if syms and od.symbol not in syms:
+                    continue
+                out.append(od)
+            return out
+
+        def submit_order(self, order_data=None):
+            self.submitted.append(order_data)
+            self._n += 1
+            return _Resp(f"id-{self._n}")
+
+    def _entry(t, shares, price, stop):
+        return {"ticker": t, "shares": shares, "price": price, "pivot": price,
+                "est_value": round(shares * price, 2), "extended": False, "stop_price": stop}
+
+    def _run(plan, fake):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (fake, True)
+        try:
+            return trade.submit_buy_plan(plan, attach_stop=True)
+        finally:
+            trade._connect_paper = orig
+
+    # QUEUED covers a cockpit SEPAoto buy; FREE has an unrelated (non-SEPA) buy that must NOT
+    # block; NEW has nothing pending and should submit.
+    fake = FakeClient([
+        _Order("QUEUED", OrderSide.BUY, "SEPAoto-QUEUED-123"),
+        _Order("FREE", OrderSide.BUY, "someBroker-FREE-1"),
+    ])
+    out = {r["ticker"]: r for r in _run(
+        [_entry("QUEUED", 10, 50.0, 46.0),
+         _entry("FREE", 10, 50.0, 46.0),
+         _entry("NEW", 10, 50.0, 46.0)], fake)["results"]}
+
+    assert out["QUEUED"]["status"] == "skipped" and "queued" in out["QUEUED"]["detail"]
+    assert out["FREE"]["status"] == "submitted"       # a non-cockpit buy doesn't block
+    assert out["NEW"]["status"] == "submitted"
+    bought = {r.symbol for r in fake.submitted if isinstance(r, MarketOrderRequest)}
+    assert bought == {"FREE", "NEW"} and "QUEUED" not in bought
 
 
 def test_trade_plan_preview_renders_stop_controls():
