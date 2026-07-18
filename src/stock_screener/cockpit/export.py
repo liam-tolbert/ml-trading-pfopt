@@ -134,17 +134,13 @@ def watchlist_list_csv(candidates: Optional[pd.DataFrame], entries: Sequence,
     if candidates is None or len(candidates) == 0 or "ticker" not in candidates.columns:
         rows = pd.DataFrame({"ticker": tickers})
     else:
-        present = [t for t in tickers if t in set(candidates["ticker"])]
-        if present:
-            rows = (candidates[candidates["ticker"].isin(present)]
-                    .set_index("ticker").reindex(present).reset_index())
-            if columns:
-                rows = rows[[c for c in columns if c in rows.columns]]
-        else:
-            rows = pd.DataFrame({"ticker": tickers})
-        missing = [t for t in tickers if t not in present]
-        if missing and "ticker" in rows.columns:
-            rows = pd.concat([rows, pd.DataFrame({"ticker": missing})], ignore_index=True)
+        # One row per watchlist entry IN watchlist order: reindex over ALL tickers so a stale
+        # (not-in-scan) name stays IN PLACE as a ticker-only NaN row, instead of being appended
+        # at the end (which broke the documented "in the order you added them" ordering).
+        rows = (candidates.drop_duplicates("ticker").set_index("ticker")
+                .reindex(tickers).reset_index())
+        if columns:
+            rows = rows[[c for c in columns if c in rows.columns]]
 
     for col in ("judged_pivot", "date_added", "pivot_source", "note"):
         rows[col] = [meta.get(t, {}).get(col) for t in rows["ticker"]]

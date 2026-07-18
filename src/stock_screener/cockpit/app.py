@@ -28,7 +28,7 @@ from src.stock_screener.cockpit.export import (  # noqa: E402
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
-    freshen_prices, stop_is_valid, submit_buy_plan)
+    fetch_held_shares, freshen_prices, stop_is_valid, submit_buy_plan)
 from src.stock_screener.cockpit.triggers import load_latest_trigger_report  # noqa: E402
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
@@ -590,6 +590,12 @@ with st.sidebar:
                 _account = fetch_account_summary()
             except TradeUnavailable as _e:
                 _account = {"error": str(_e)}
+            # Held positions (best-effort): the plan builder is holdings-blind, so mark already-held
+            # names in the preview as re-arm-only. Unknown (no creds) -> no annotations.
+            try:
+                _held = fetch_held_shares()
+            except TradeUnavailable:
+                _held = {}
             # Re-pull the watchlist names' latest bars so sizing/stops use CURRENT prices, not
             # the days-old closes frozen in the scan memo. The staleness guard then skips any
             # name the refresh couldn't freshen.
@@ -608,15 +614,23 @@ with st.sidebar:
             _bn = st.session_state.get("trade_build_n", 0) + 1
             st.session_state["trade_build_n"] = _bn
             st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
-                                              "account": _account, "build_ts": _bn}
+                                              "account": _account, "held": _held,
+                                              "build_ts": _bn}
             st.session_state.pop("trade_result", None)
 
         _tp = st.session_state.get("trade_plan")
         if _tp:
             _plan, _skip = _tp["plan"], _tp["skipped"]
             if _plan:
-                _tot = sum(o["est_value"] for o in _plan)
-                st.caption(f"**{len(_plan)} order(s)** · ~${_tot:,.0f} est.")
+                # build_buy_plan is holdings-blind; submit sends NO buy for a held name (re-arm
+                # only). So the est-value total counts only names that actually execute as buys.
+                _held = _tp.get("held") or {}
+                _buys = [o for o in _plan if _held.get(o["ticker"], 0) <= 0]
+                _tot = sum(o["est_value"] for o in _buys)
+                _cap = f"**{len(_buys)} buy(s)** · ~${_tot:,.0f} est."
+                if len(_buys) != len(_plan):
+                    _cap += f" · {len(_plan) - len(_buys)} already held (no buy)"
+                st.caption(_cap)
                 # Master switch: attach a protective sell-stop to each order. When off, buys go
                 # in naked and already-held names are skipped (no buy, no stop).
                 _attach = st.toggle(
@@ -633,23 +647,32 @@ with st.sidebar:
                 _eq = (_tp.get("account") or {}).get("equity")
                 for _o in _plan:
                     _t = _o["ticker"]
-                    _fl = " ⚠︎ extended" if _o["extended"] else ""
-                    if _o.get("capped"):
-                        _fl += " ⚠︎ capped"
-                    if _o.get("pivot_frozen") and _o.get("pivot"):
-                        _fl += f" · 📌 pivot {_o['pivot']:.2f}"   # stop/zone off the frozen level
-                    _ew = _earnings_flag(_o.get("earnings_in"))
+                    _held_sh = _held.get(_t, 0)
                     _cA, _cB = st.columns([3, 2])
-                    _cA.caption(f"• **{_t}** {_o['shares']} sh @ "
-                                f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}"
-                                + (f" · {_ew}" if _ew else ""))
+                    if _held_sh > 0:
+                        # No buy is sent for a held name — the stop below is a re-arm target only
+                        # (or, with attach off, submit skips it entirely).
+                        _act = "stop re-arm only, no buy" if _attach else "skipped (attach off)"
+                        _cA.caption(f"• **{_t}** — already held ({_held_sh} sh) · {_act}")
+                    else:
+                        _fl = " ⚠︎ extended" if _o["extended"] else ""
+                        if _o.get("capped"):
+                            _fl += " ⚠︎ capped"
+                        if _o.get("pivot_frozen") and _o.get("pivot"):
+                            _fl += f" · 📌 pivot {_o['pivot']:.2f}"   # stop/zone off frozen level
+                        _ew = _earnings_flag(_o.get("earnings_in"))
+                        _cA.caption(f"• **{_t}** {_o['shares']} sh @ "
+                                    f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}"
+                                    + (f" · {_ew}" if _ew else ""))
                     _cB.number_input(
                         f"stop {_t}", min_value=0.0,
                         value=float(_o["stop_price"]) if _o["stop_price"] else 0.0,
                         step=0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
                         label_visibility="collapsed", disabled=not _attach)
                     _edstop = st.session_state.get(f"stop_{_t}_{_nonce}", _o["stop_price"])
-                    if _attach and not stop_is_valid(_edstop, _o["price"]):
+                    if _held_sh > 0:
+                        pass                                     # held: stop is a re-arm target, not a buy gate
+                    elif _attach and not stop_is_valid(_edstop, _o["price"]):
                         _cB.caption(":red[stop must be < price]")
                     elif _attach and _eq and _edstop and _o["price"] > _edstop:
                         # Live risk-to-stop for the CURRENT shares + (possibly edited) stop, so a
@@ -657,14 +680,14 @@ with st.sidebar:
                         # re-scale shares on an edit).
                         _rusd = _o["shares"] * (_o["price"] - _edstop)
                         _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
-                if any(_o["extended"] for _o in _plan):
+                if any(_o["extended"] for _o in _buys):      # footnotes describe the BUYs only
                     st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
                                "the real risk to your stop is larger.")
-                if any(_o.get("capped") for _o in _plan):
+                if any(_o.get("capped") for _o in _buys):
                     st.caption("⚠︎ *capped* = the risk-sized quantity hit the 10%-of-equity "
                                "order cap and was clamped down, so the realized risk sits below "
                                "your target. Lower the risk % or tighten the stop to fit.")
-                if any(_earnings_flag(_o.get("earnings_in")) for _o in _plan):
+                if any(_earnings_flag(_o.get("earnings_in")) for _o in _buys):
                     st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
                                f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "
                                "cushion to absorb an earnings gap — Minervini would wait "

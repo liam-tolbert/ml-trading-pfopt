@@ -548,6 +548,30 @@ def test_watchlist_export_helpers():
     assert watchlist_ohlcv_csv([], payloads) == b""             # empty list -> empty bytes
 
 
+def test_watchlist_list_csv_keeps_stale_in_order():
+    """Issue 7: a stale (not-in-scan) ticker keeps its watchlist POSITION instead of being moved
+    to the end. For [ZZZ(stale), BBB, AAA] the rows come out ZZZ, BBB, AAA — matching the download
+    help's 'in the order you added them' (pre-fix a concat-append produced BBB, AAA, ZZZ). The
+    existing helper test can't catch this because its stale pick already sat last."""
+    import pandas as pd
+    from src.stock_screener.cockpit.export import watchlist_list_csv
+
+    cand = pd.DataFrame({"ticker": ["AAA", "BBB", "CCC"],
+                         "tier": ["A", "B", "A"], "pivot": [10.0, 20.0, 30.0]})
+    ents = [{"ticker": "ZZZ", "judged_pivot": 5.0, "date_added": "2026-07-18",
+             "pivot_source": "judged", "note": ""},            # stale AND first in the watchlist
+            "BBB", "AAA"]
+    csv = watchlist_list_csv(cand, ents, columns=["ticker", "tier", "pivot"]).decode()
+    lines = csv.strip().splitlines()
+    assert [ln.split(",")[0] for ln in lines[1:]] == ["ZZZ", "BBB", "AAA"], csv
+    zzz = lines[1].split(",")
+    assert zzz[1] == "" and zzz[2] == ""                        # stale -> empty tier/pivot cells
+    assert zzz[3].startswith("5")                               # frozen judged_pivot preserved
+    # the in-scan rows still carry their decision columns, in place
+    bbb = lines[2].split(",")
+    assert bbb[0] == "BBB" and bbb[1] == "B" and bbb[2] == "20.0"
+
+
 def test_watchlist_persistence():
     """save_watchlist/load_watchlist round-trip ENTRY DICTS (ticker upper/strip, de-duped
     first-seen); a legacy string-array file migrates to unfrozen entries at load; load
@@ -950,6 +974,27 @@ def test_stop_is_valid():
     for bad in [(100.0, 100.0), (101.0, 100.0), (0.0, 100.0), (None, 100.0), (50.0, None)]:
         assert stop_is_valid(*bad) is False, bad
 
+
+def test_minervini_key_envs_single_spelling():
+    """Issue 8: the dedicated Minervini paper keys use the SINGLE canonical spelling .env actually
+    holds (ALPACA_API_KEY_MINERVINI / ALPACA_API_KEY_SECRET_MINERVINI) — no either/or logic, and
+    the comment/HANDOFF are corrected to match. `_first_env` resolves the set value; an unset key
+    returns None so `_connect_paper` falls back to the shared pair."""
+    from unittest.mock import patch
+    from src.stock_screener.cockpit.trade import (
+        _first_env, MINERVINI_KEY_ENVS, MINERVINI_SECRET_ENVS)
+
+    assert MINERVINI_KEY_ENVS == "ALPACA_API_KEY_MINERVINI"
+    assert MINERVINI_SECRET_ENVS == "ALPACA_API_KEY_SECRET_MINERVINI"
+
+    with patch.dict("os.environ", {"ALPACA_API_KEY_MINERVINI": "k-live",
+                                   "ALPACA_API_KEY_SECRET_MINERVINI": "s-live"}, clear=True):
+        assert _first_env(MINERVINI_KEY_ENVS) == "k-live"
+        assert _first_env(MINERVINI_SECRET_ENVS) == "s-live"
+
+    with patch.dict("os.environ", {}, clear=True):          # unset -> None -> shared-pair fallback
+        assert _first_env(MINERVINI_KEY_ENVS) is None
+
 def test_submit_buy_plan_stop_logic():
     """submit_buy_plan against a fake Alpaca client: an already-held name becomes a GTC
     stop-only order that REPLACES its open stop; a fresh name becomes an OTO buy+stop;
@@ -1209,6 +1254,55 @@ def test_trade_plan_preview_renders_stop_controls():
     assert stops[0].value == 92.5, f"stop should default to computed value, got {stops[0].value}"
 
 
+def test_trade_plan_preview_marks_held_names():
+    """Issue 6: build_buy_plan is holdings-blind, but submit sends NO buy for a held name (re-arm
+    only). The preview must mark a held name 'already held … no buy', keep the buy line for a fresh
+    name, and EXCLUDE the held name from the est-value total (which counts only executing buys)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_plan_preview_marks_held_names (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with patch.object(scanmod, "run_scan", return_value=result):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = [
+            {"ticker": "NEWX", "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""},
+            {"ticker": "HELDX", "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""}]
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": [
+                {"ticker": "NEWX", "shares": 10, "price": 50.0, "pivot": 50.0,
+                 "est_value": 500.0, "extended": False, "capped": False,
+                 "stop_price": 46.0, "earnings_in": None},
+                {"ticker": "HELDX", "shares": 20, "price": 100.0, "pivot": 100.0,
+                 "est_value": 2000.0, "extended": False, "capped": False,
+                 "stop_price": 92.0, "earnings_in": None}],
+            "skipped": [],
+            "account": {"account_number": "PA000123", "equity": 100000.0,
+                        "using_dedicated": True},
+            "held": {"HELDX": 20},                            # HELDX already held -> re-arm only
+            "build_ts": 1}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+
+    rendered = " ".join(str(getattr(m, "value", ""))
+                        for m in list(at.markdown) + list(getattr(at, "caption", [])))
+    assert "already held (20 sh)" in rendered, rendered      # held name marked, no buy line
+    assert "1 buy(s)" in rendered                            # only NEWX counts as a buy
+    # total excludes the $2,000 held name (would be ~$2,500 if it were summed in)
+    assert "$2,500" not in rendered, rendered
+
+
 def test_sepa_guide_page_renders():
     """The SEPA Guide page must load and render the method markdown without error."""
     try:
@@ -1243,10 +1337,11 @@ def _pos_fakes():
                 setattr(self, k, v)
 
     class _Order:
-        def __init__(self, oid, symbol, stop_price, otype=None):
+        def __init__(self, oid, symbol, stop_price, otype=None, qty=None):
             self.id, self.symbol = oid, symbol
             self.type = otype or OrderType.STOP
             self.stop_price, self.side = stop_price, OrderSide.SELL
+            self.qty = qty                                    # None -> unreadable (no re-quantify)
 
     class _Resp:
         def __init__(self, oid):
@@ -1334,6 +1429,45 @@ def test_rearm_gtc_stop_ratchet():
     assert r4["HELD"]["status"] == "stop_only" and r4["HELD"]["stop_price"] == 95.0
 
 
+def test_rearm_gtc_stop_requantifies_grown_position():
+    """Issue 9: a would-be-lower re-arm normally KEEPS the higher in-force stop — but if that stop
+    covers fewer shares than are held (the position grew via a manual pyramid buy Alpaca-side), the
+    ratchet re-places it at the SAME (never-lower) level for the FULL held qty so the added shares
+    aren't left unprotected. A stop that already covers the whole position is kept untouched, and an
+    order with an unreadable qty never triggers needless churn."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.requests import StopOrderRequest
+    from alpaca.trading.enums import TimeInForce
+    Client, _Pos, _Order = _pos_fakes()
+
+    def run(client):                                          # new stop 95 < the in-force 110 stop
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (client, True)
+        try:
+            return trade.rearm_stops([{"ticker": "HELD", "stop_price": 95.0, "price": 130.0}])
+        finally:
+            trade._connect_paper = orig
+
+    # in-force stop @110 covers only 20 of 40 held -> re-place at 110 (NOT lowered to 95) for 40
+    c1 = Client([_Pos("HELD", 40)], {"HELD": [_Order("u", "HELD", 110.0, qty=20)]})
+    r1 = {x["ticker"]: x for x in run(c1)["results"]}
+    assert r1["HELD"]["status"] == "stop_only" and r1["HELD"]["stop_price"] == 110.0
+    assert "u" in c1.cancelled
+    sreq = [o for o in c1.submitted if isinstance(o, StopOrderRequest)][0]
+    assert int(sreq.qty) == 40 and float(sreq.stop_price) == 110.0
+    assert sreq.time_in_force == TimeInForce.GTC
+
+    # in-force stop already covers the whole 40 -> kept, no churn
+    c2 = Client([_Pos("HELD", 40)], {"HELD": [_Order("f", "HELD", 110.0, qty=40)]})
+    r2 = {x["ticker"]: x for x in run(c2)["results"]}
+    assert r2["HELD"]["status"] == "stop_kept" and not c2.submitted and not c2.cancelled
+
+    # unreadable qty (None) -> can't prove under-coverage -> kept, no churn (fail-safe)
+    c3 = Client([_Pos("HELD", 40)], {"HELD": [_Order("n", "HELD", 110.0)]})
+    r3 = {x["ticker"]: x for x in run(c3)["results"]}
+    assert r3["HELD"]["status"] == "stop_kept" and not c3.submitted and not c3.cancelled
+
+
 def test_fetch_positions_offline():
     """fetch_positions enriches Alpaca holdings with P&L, the in-force stop, 50-day SMA and
     advisories — against a fake client + an offline price feed (no network)."""
@@ -1378,6 +1512,9 @@ def test_fetch_positions_offline():
     assert by["BBB"]["below_sma50"] is True                     # last close under its 50-day SMA
     assert any("No protective stop" in a for a in by["BBB"]["advisories"])
     assert any("50-day SMA" in a for a in by["BBB"]["advisories"])
+    # Issue 10: the ratio divides by the PRIOR 50 bars (all 1000), EXCLUDING today's 3000 spike,
+    # so it reads exactly 3.0 — matching triggers._volume_ratio, not 2.88 (today-in-average).
+    assert abs(by["BBB"]["volume_ratio"] - 3.0) < 1e-9
 
 
 def test_suggest_stop():

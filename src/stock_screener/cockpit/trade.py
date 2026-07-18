@@ -42,11 +42,12 @@ STOP_BASES = ("auto", "initial", "breakeven", "sma50")
 
 # The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which owns
 # the shared ALPACA_API_KEY/SECRET pair). Each paper account has its own key pair, so prefer
-# the dedicated "Minervini Trader" keys, falling back to the shared pair only if unset. Name
-# drift between .env and these constants silently resolves to None -> TradeUnavailable, so keep
-# them in sync. First non-empty match in each tuple wins.
+# the dedicated "Minervini Trader" keys, falling back to the shared pair only if unset. The
+# dedicated names must match .env EXACTLY — a mismatch silently resolves to None and the code
+# then trades the SHARED account — so keep these two constants in sync with .env.
 MINERVINI_KEY_ENVS = "ALPACA_API_KEY_MINERVINI"
 MINERVINI_SECRET_ENVS = "ALPACA_API_KEY_SECRET_MINERVINI"
+# The shared pair accepts either spelling (_first_env takes the first non-empty in the tuple).
 SHARED_KEY_ENVS = ("ALPACA_API_KEY", "ALPACA_API_KEY_PAPER1")
 SHARED_SECRET_ENVS = ("ALPACA_API_SECRET", "ALPACA_API_SECRET_PAPER1")
 
@@ -113,6 +114,16 @@ def fetch_account_summary() -> dict:
         "cash": float(acct.cash),
         "using_dedicated": using_dedicated,
     }
+
+
+def fetch_held_shares() -> Dict[str, int]:
+    """``{symbol: whole shares held}`` on the cockpit's paper account (same ``int(float(qty))``
+    convention as :func:`submit_buy_plan`). Lets the Build-plan preview mark already-held names
+    ('stop re-arm only, no buy') since :func:`build_buy_plan` is holdings-blind. Raises
+    :class:`TradeUnavailable` on missing package/credentials — the caller treats that as 'unknown'
+    (no held annotations)."""
+    client, _ = _connect_paper()
+    return {p.symbol: int(float(p.qty)) for p in client.get_all_positions()}
 
 
 SIZING_MODES = ("pct", "dollars", "shares", "risk")
@@ -427,6 +438,18 @@ def _stop_price_of(order) -> Optional[float]:
         return None
 
 
+def _order_qty(order) -> int:
+    """Whole-share qty of an order (alpaca-py ``Order.qty``), or 0 if absent/unparseable — used
+    to check whether the in-force stop(s) still cover the whole position after it grew."""
+    v = getattr(order, "qty", None)
+    if v is None:
+        return 0
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _cancel_orders(client, orders) -> List[str]:
     """Cancel each order by id, independently guarded so one stuck order never blocks the rest.
     Returns the cancelled ids."""
@@ -510,10 +533,25 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
         return {"status": "skipped",
                 "detail": "no valid stop (must be > 0 and < current price)"}
 
-    # Ratchet: only replace to RAISE the stop; a lower-or-equal one is kept.
+    # Ratchet: only replace to RAISE the stop; a lower-or-equal one is kept — UNLESS the in-force
+    # stop under-covers the position (it grew via a manual pyramid buy Alpaca-side). Then re-place
+    # at the SAME (never-lower) level for the full held qty so the added shares aren't left
+    # unprotected while the UI reports a stop in force. Only acts on positive evidence of
+    # under-coverage (0 < covered < held), so an unreadable qty never triggers needless churn.
     if cur is not None and new_stop <= cur:
-        return {"status": "stop_kept", "stop_price": cur,
-                "detail": f"kept existing stop @ {cur:.2f} — not lowering to {new_stop:.2f}"}
+        covered = sum(_order_qty(od) for od in existing)
+        if not (0 < covered < held_shares):
+            return {"status": "stop_kept", "stop_price": cur,
+                    "detail": f"kept existing stop @ {cur:.2f} — not lowering to {new_stop:.2f}"}
+        _cancel_orders(client, existing)                 # under-covered -> re-place at cur, full qty
+        req = StopOrderRequest(
+            symbol=symbol, qty=held_shares, side=OrderSide.SELL,
+            time_in_force=TimeInForce.GTC, stop_price=cur,
+            client_order_id=f"SEPAstop-{symbol}-{int(time.time() * 1000)}")
+        resp = client.submit_order(order_data=req)
+        return {"status": "stop_only", "stop_price": cur,
+                "detail": f"GTC stop re-placed for full {held_shares} sh @ {cur:.2f} "
+                          f"(was {covered} sh; id {getattr(resp, 'id', '?')})"}
 
     _cancel_orders(client, existing)                     # replace the lower stop(s)
     req = StopOrderRequest(
@@ -727,8 +765,10 @@ def fetch_positions() -> dict:
                 s = calculate_sma(df["Close"], 50)
                 if len(s) and pd.notna(s.iloc[-1]):
                     sma_50 = float(s.iloc[-1])
-            if "Volume" in df.columns and len(df) >= 50:
-                avg_vol = float(df["Volume"].iloc[-50:].mean())
+            if "Volume" in df.columns and len(df) >= 51:
+                # Prior 50 bars, EXCLUDING today — matches triggers._volume_ratio so the shared
+                # 1.5× heavy-volume exit gate reads the same on both surfaces.
+                avg_vol = float(df["Volume"].iloc[-51:-1].mean())
                 if avg_vol > 0:
                     volume_ratio = float(df["Volume"].iloc[-1]) / avg_vol
 
