@@ -203,12 +203,21 @@ def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: floa
     recent = [c for c in contractions
               if c['drawdown_pct'] <= MAX_DEPTH_PCT and c['peak_date'] >= cutoff
               and (c['trough_index'] - c['peak_index']) >= MIN_LEG_BARS]
+    # A leg REMOVED for depth (a > MAX_DEPTH_PCT collapse) sitting chronologically between two
+    # kept legs is a base BOUNDARY, not a leg to skip over: PEAK_FLAT_BAND only rejects an ADVANCE
+    # between legs, so without this a crash-and-recover gets stitched into one "base" (is_vcp /
+    # tier A over a > 35% drop). Only DEPTH bounds the base — a filtered-out short (<2-bar) leg is a
+    # normal shakeout, and treating those as boundaries over-fragments real bases (it cost 5 tier-A
+    # YES on the 200-chart benchmark for a precision gain this recall-first tool doesn't want).
+    disq = [c for c in contractions if c['drawdown_pct'] > MAX_DEPTH_PCT]
     sel: List[dict] = []
     if recent:
         sel = [recent[-1]]
         for c in reversed(recent[:-1]):
             if len(sel) >= max_contractions:
                 break
+            if any(c['peak_index'] < b['peak_index'] < sel[0]['peak_index'] for b in disq):
+                break                                              # a removed leg intervenes -> boundary
             peaks = [x['peak_price'] for x in sel] + [c['peak_price']]
             if max(peaks) / min(peaks) > PEAK_FLAT_BAND:            # top not flat -> different base
                 break

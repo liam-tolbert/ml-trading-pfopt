@@ -2172,6 +2172,26 @@ def test_vcp_base_does_not_span_a_breakout():
     assert v["is_vcp"] is True, v["pattern_details"]
 
 
+def test_vcp_base_does_not_span_a_collapse():
+    """A > MAX_DEPTH_PCT collapse (dropped by the depth filter) that sits BETWEEN two shallow
+    legs is a base boundary — the walk-back must not stitch the legs on either side of it into
+    one 'base' (their peaks are ~equal, so the flat-top rule alone can't catch it). Pre-fix this
+    reported 2 contractions / a spannable base straddling a 40% crash."""
+    from src.stock_screener.cockpit.vcp import detect_vcp, MAX_DEPTH_PCT
+
+    # rise → C1 (100→90, 10%) → recover → CRASH (100→60, 40%, dropped) → recover →
+    # C3 (100→92, 8%) → up to 99 (near the high). C1 and C3 peaks are both ~100 (flat top).
+    df = _lin_series([(40, 100), (8, 90), (8, 100), (8, 60), (12, 100), (8, 92), (8, 99)],
+                     start=70.0)
+    v = detect_vcp(df, float(df["Close"].iloc[-1]), {}, thr=0.04)
+    # the base stops at the crash: only the recent shallow leg survives, so it's not a 2-leg VCP
+    assert v["contraction_count"] == 1, v["contraction_count"]
+    assert v["is_vcp"] is False, v["pattern_details"]
+    # and the > 35% collapse is never reported as part of the base
+    assert all(c["drawdown_pct"] <= MAX_DEPTH_PCT for c in v["contractions"]), \
+        [c["drawdown_pct"] for c in v["contractions"]]
+
+
 def _range_frame(wide=150, tight=60):
     """OHLCV with real intrabar range (unlike ``_lin_series`` where H=L=C): a volatile body
     (closes oscillate ±2.5) then a near-flat tail (closes ±0.1) that still has intraday range.
