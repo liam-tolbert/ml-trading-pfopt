@@ -399,8 +399,9 @@ def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce,
     # Hand-rolled SESSION-STATE memo, deliberately NOT @st.cache_data: cache_data REPLAYS any
     # st element emitted inside on every cache hit, so the in-scan progress bar died with
     # CacheReplayClosureError. A plain memo has no replay machinery, so the callback is legal.
-    # `_force`/`_progress` stay OUT of the key so force=True/False share one entry — a forced
-    # Re-scan doesn't fork the memo. The body runs only on a genuine miss; Re-scan pops the memo.
+    # `_force`/`_progress` stay OUT of the key. The body runs only on a genuine miss; Re-scan
+    # pops the memo (run_scan always tops up the latest bars); `_force` is the Advanced
+    # full-re-download escape hatch only.
     key = (universe, int(min_criteria), float(min_rs), bool(require_vcp),
            int(min_fund), int(nonce))
     memo = st.session_state.get("_scan_memo")
@@ -452,14 +453,25 @@ min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
 
 if "nonce" not in st.session_state:
     st.session_state.nonce = 1
-# `_force` is a per-run local, True ONLY on the run where Re-scan is clicked — so that click
-# always forces a real refetch (bumping nonce + clearing the memo makes it a cache miss),
-# while every other rerun leaves it False and reuses the cache.
-_force = False
+# Re-scan = bump nonce + clear the memo -> a genuine miss -> run_scan re-runs, and its
+# always-on incremental top-up refreshes the latest bars. (It used to pass force=True,
+# which re-downloaded the full 2y history for the whole universe on every click.)
+_force = False                       # per-run local, True only on a full-re-download click
 if st.sidebar.button("🔄 Re-scan (refresh prices)"):
     st.session_state.nonce += 1
-    _force = True
     st.session_state.pop("_scan_memo", None)
+# Escape hatch, tucked away so a misclick can't cost a multi-minute refetch. NOT needed
+# for newly listed tickers — a name with no cache is full-fetched automatically on any scan.
+with st.sidebar.expander("⚙ Advanced"):
+    if st.button("⟳ Full re-download (2y, slow)", key="full_refetch",
+                 help="Ignores every price cache and re-downloads the full 2-year history "
+                      "for ALL names in the universe (several minutes; yfinance rate-limit "
+                      "risk). Only for re-baselining suspect caches — new tickers are "
+                      "fetched in full automatically, and normal scans already top up "
+                      "the latest bars."):
+        st.session_state.nonce += 1
+        _force = True
+        st.session_state.pop("_scan_memo", None)
 
 # Price-fetch progress (the multi-minute part of a cold scan). On a memo hit the scan body
 # never runs, so the bar never appears; the slot is cleared right after.

@@ -306,10 +306,16 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
              max_workers: int = 6, force: bool = False,
              progress: Optional[Callable[[int, int, str], None]] = None) -> ScanResult:
     """Live wrapper: fetch via data_feed, then screen. Fundamentals are fetched lazily
-    inside the funnel (only for Step-1 passers)."""
+    inside the funnel (only for Step-1 passers).
+
+    Prices always go through the cheap incremental top-up (``max_age_days=0.0``): a cache
+    that already has today's bar re-fetches just the latest bars; a cache last written on
+    an earlier day fetches only the missing days; only cold names (or a genuine
+    split/dividend re-baseline) pay the full 2y download. ``force=True`` is the explicit
+    full-re-download escape hatch (the app's Advanced ⟳ button)."""
     from . import data_feed
     tickers = data_feed.get_universe(universe, force=force)
-    spy = data_feed.get_spy(force=force)
+    spy = data_feed.get_spy(force=force, max_age_days=0.0)
     if spy is None or len(spy) < 200:
         raise RuntimeError("Could not fetch SPY benchmark data (needed for RS/regime).")
     # Two sequential progress phases share one (done, total, label) callback; the label
@@ -319,7 +325,7 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     _p_screen = (None if progress is None
                  else lambda d, t, s: progress(d, t, f"Screening · {s}"))
     prices = data_feed.get_many_prices(tickers, max_workers=max_workers,
-                                       force=force, progress=_p_fetch)
+                                       force=force, max_age_days=0.0, progress=_p_fetch)
     return screen_universe(list(prices.keys()), prices, spy,
                            get_fundamentals=data_feed.get_fundamentals, cfg=cfg,
                            progress=_p_screen)

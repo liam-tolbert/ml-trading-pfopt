@@ -273,6 +273,15 @@ def _merge_incremental(cached: pd.DataFrame, new: Optional[pd.DataFrame],
     # fetches, which is not a split/dividend re-adjustment. Compare only settled (pre-today)
     # overlap, else every intraday refresh re-baselines because the live bar "diverged".
     common = common[common < pd.Timestamp.today().normalize()]
+    # The cache's FINAL bar can be provisional too: an intraday scan persists the
+    # mid-session close, and on the NEXT day this comparison would read the settled close
+    # as a "split" and full-refetch every name that moved after that scan (the 2y avalanche
+    # on each new-day open). The merge overwrites that bar with the fetched one anyway, so
+    # drop it whenever older overlap days exist — a real re-adjustment rescales those too.
+    # With no other overlap it stays in: sole evidence beats none, and a rare false full
+    # refetch on a near-empty cache is cheap.
+    if len(common) > 1:
+        common = common[common < cached.index[-1]]
     if len(common):
         c = cached.loc[common, "Close"].astype(float)
         n = new.loc[common, "Close"].astype(float)
@@ -478,8 +487,8 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     return out
 
 
-def get_spy(force: bool = False) -> Optional[pd.DataFrame]:
-    return get_prices("SPY", force=force)
+def get_spy(force: bool = False, max_age_days: float = 1.0) -> Optional[pd.DataFrame]:
+    return get_prices("SPY", force=force, max_age_days=max_age_days)
 
 
 # --------------------------------------------------------------------------- #

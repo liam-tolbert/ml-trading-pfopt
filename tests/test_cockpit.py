@@ -500,6 +500,44 @@ def test_streamlit_app_renders_offline():
     assert calls["n"] == 1, f"scan should run once and memoize, ran {calls['n']}x"
 
 
+def test_full_redownload_button_forces_scan():
+    """The Advanced '⟳ Full re-download' button re-runs the scan with force=True (full-
+    history cache re-baseline); the initial scan — and by the same wiring the Re-scan
+    button — never passes force (they use the incremental top-up)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_full_redownload_button_forces_scan (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    forces = []
+
+    def _fake_scan(*a, force=False, progress=None, **kw):
+        forces.append(force)
+        return result
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        with patch.object(scanmod, "run_scan", side_effect=_fake_scan), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+            assert forces == [False], f"initial scan must not force, got {forces}"
+            full = [b for b in at.button if b.key == "full_refetch"]
+            assert full, "Advanced full re-download button not found"
+            full[0].click().run()
+            assert not at.exception, f"app raised after full re-download: {at.exception}"
+    assert forces == [False, True], f"full re-download must re-scan with force=True, got {forces}"
+
+
 def test_watchlist_export_helpers():
     """The watchlist CSV builders: the decision list keeps user order and never drops a
     picked ticker (stale ones survive as ticker-only rows); the OHLCV dump stacks every
@@ -1974,6 +2012,56 @@ def test_incremental_price_cache_appends_delta():
     moved_prior = _ohlcv(pd.DatetimeIndex([tidx[-2]]), [55.0])     # settled day -> real split
     _, full2 = dfeed._merge_incremental(base, moved_prior, "2y")
     assert full2 is True, "divergence on a settled day must still re-baseline"
+
+    # (d) The cache's FINAL bar can be provisional too: an intraday scan persisted a
+    # mid-session close for it on an EARLIER day. On the next open the settled fetch
+    # differs on that bar only — NOT a split; the merge must adopt the settled bar
+    # instead of re-baselining. (This was the new-day-open 2y avalanche: every name
+    # that moved >SPLIT_TOL after the last intraday scan re-downloaded full history.)
+    cdx = pd.bdate_range(end=today, periods=10)
+    cdx = cdx[cdx < today]                                         # ends BEFORE today
+    prov = _ohlcv(cdx, [100.0] * (len(cdx) - 1) + [107.0])         # final bar provisional
+    settled = _ohlcv(cdx[-4:], [100.0] * 4)                        # settled overlap re-fetch
+    m3, full3 = dfeed._merge_incremental(prov, settled, "2y")
+    assert full3 is False, "a provisional FINAL bar must not trigger a re-baseline"
+    assert float(m3.loc[cdx[-1], "Close"]) == 100.0                # settled bar adopted
+    # ...but a real split still re-baselines: the OLDER overlap days diverge as well.
+    halved = _ohlcv(cdx[-4:], [50.0] * 4)
+    _, full4 = dfeed._merge_incremental(prov, halved, "2y")
+    assert full4 is True, "divergence across settled prior days must still re-baseline"
+
+
+def test_run_scan_uses_topup_fetch():
+    """run_scan routes ALL price fetches (universe + SPY) through the incremental top-up
+    (max_age_days=0.0): a cache holding today's bar re-fetches just the latest bars, a
+    cache from an earlier day fetches only the missing days, and only cold names pay the
+    full 2y download. force is not passed by the app's Re-scan anymore (top-up instead)."""
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+    from src.stock_screener.cockpit.scan import run_scan
+
+    TODAY = "2026-07-10"
+    frame = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)])
+    spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
+    seen = {}
+
+    def fake_many(tickers, **kw):
+        seen["many"] = kw
+        return {t: frame for t in tickers}
+
+    def fake_spy(**kw):
+        seen["spy"] = kw
+        return spy
+
+    with patch.object(dfeed, "get_universe", lambda u, **kw: ["UPUP"]), \
+            patch.object(dfeed, "get_spy", fake_spy), \
+            patch.object(dfeed, "get_many_prices", fake_many), \
+            patch.object(dfeed, "get_fundamentals", lambda t, **kw: None):
+        run_scan(universe="full_us")
+    assert seen["many"].get("max_age_days") == 0.0, "universe fetch must use the top-up path"
+    assert seen["spy"].get("max_age_days") == 0.0, "SPY fetch must use the top-up path"
+    assert not seen["many"].get("force") and not seen["spy"].get("force")
 
 
 # --------------------------------------------------------------------------- #
