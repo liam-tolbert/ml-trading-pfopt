@@ -13,6 +13,7 @@ ticker-list parser.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -79,14 +80,25 @@ def watchlist_tickers(entries: Sequence) -> List[str]:
 
 def save_watchlist(path, entries: Sequence) -> None:
     """Persist the watchlist as a JSON array of entry dicts (strings are coerced to
-    unfrozen entries). Best-effort: a write failure is swallowed (the in-session list
-    stays authoritative)."""
+    unfrozen entries). The write is ATOMIC: serialized to a pid-suffixed sibling temp
+    file, then ``os.replace``'d over the target — a crash mid-write can never leave a
+    truncated file for :func:`load_watchlist` to silently read back as ``[]``, and the
+    app/eod_trigger writers can't see each other's half-written bytes. Best-effort: a
+    failure is swallowed (the in-session list stays authoritative) and the existing
+    file is left intact."""
+    tmp = None
     try:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(_coerce_entries(entries)), encoding="utf-8")
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")  # unique per process — no collisions
+        tmp.write_text(json.dumps(_coerce_entries(entries)), encoding="utf-8")
+        os.replace(tmp, p)
     except Exception:
-        pass
+        try:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def load_watchlist(path) -> List[dict]:
@@ -101,6 +113,33 @@ def load_watchlist(path) -> List[dict]:
     if not isinstance(data, list):
         return []
     return _coerce_entries(data)
+
+
+def merge_frozen_pivots(primary: Sequence, donor: Sequence) -> List[dict]:
+    """Lost-update-safe merge of two watchlist copies (pure — no I/O).
+
+    ``primary`` is authoritative for membership, order, notes, and any pivot it has
+    frozen itself; the ONLY thing taken from ``donor`` is a frozen pivot
+    (``judged_pivot``/``date_added``/``pivot_source``) for a primary entry that is
+    still unfrozen. Both sides go through the usual entry coercion.
+
+    Both directions of the app <-> eod_trigger race use it just before saving:
+    the app persists ``merge(session, disk)`` so its stale session copy can't clobber
+    pivots the half-hourly trigger job froze meanwhile; the trigger persists
+    ``merge(disk_now, frozen_copies)`` so entries the user removed or 📌-re-froze
+    during its slow fetch window stay removed/judged, and its auto pivots land only
+    on entries still unfrozen on disk.
+    """
+    out = _coerce_entries(primary)
+    frozen = {e["ticker"]: e for e in _coerce_entries(donor)
+              if e["judged_pivot"] is not None}
+    for ent in out:
+        d = frozen.get(ent["ticker"])
+        if ent["judged_pivot"] is None and d is not None:
+            ent["judged_pivot"] = d["judged_pivot"]
+            ent["date_added"] = d["date_added"]
+            ent["pivot_source"] = d["pivot_source"]
+    return out
 
 
 def parse_ticker_list(text: str) -> List[str]:

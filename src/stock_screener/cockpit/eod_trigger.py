@@ -36,8 +36,9 @@ def build_report(today=None, write_watchlist: bool = True) -> dict:
     The price refresh uses ``max_age_days=0.0`` (incremental top-up with split detection) —
     cheap and correct for the latest bar; ``force=True`` would re-download full 2y histories.
     Auto-frozen pivots are persisted BEFORE the evaluation (skipped under ``--no-write``) so
-    tomorrow's run checks the same level. Every per-name data problem degrades to that name's
-    row, never a crash."""
+    tomorrow's run checks the same level; the write-back merges into a fresh read of the
+    file so a concurrent app-session save is never clobbered. Every per-name data problem
+    degrades to that name's row, never a crash."""
     entries = export.load_watchlist(cache.WATCHLIST_JSON)
     syms = export.watchlist_tickers(entries)
 
@@ -49,7 +50,13 @@ def build_report(today=None, write_watchlist: bool = True) -> dict:
 
     entries, frozen = triggers.freeze_missing_pivots(entries, frames, today=today)
     if frozen and write_watchlist:
-        export.save_watchlist(cache.WATCHLIST_JSON, entries)
+        # Merge into the file's CURRENT state, not the copy loaded before the slow price
+        # fetch: an app-session save during that window (remove / 📌 re-freeze / add)
+        # would otherwise be clobbered. Disk wins membership and any pivot it has; our
+        # auto pivots land only on entries still unfrozen on disk.
+        disk = export.load_watchlist(cache.WATCHLIST_JSON)
+        export.save_watchlist(cache.WATCHLIST_JSON,
+                              export.merge_frozen_pivots(disk, entries))
 
     def _fund(t):
         try:

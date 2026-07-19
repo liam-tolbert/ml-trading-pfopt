@@ -23,8 +23,8 @@ import streamlit as st  # noqa: E402
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
-    load_watchlist, make_entry, parse_ticker_list, save_watchlist, watchlist_list_csv,
-    watchlist_ohlcv_csv, watchlist_tickers)
+    load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
+    watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
 from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
@@ -296,7 +296,8 @@ def filter_table(df, key_prefix: str = "flt"):
 # fighting over widget ownership. `judged_pivot` is the FROZEN trigger level: the ⭐ add
 # freezes the pivot you're looking at ("judged"); picker/.txt adds are unfrozen until the
 # 📌 button or the nightly EOD check ("auto") freezes one. Persisted to
-# `data/cockpit/watchlist.json`: `_wl()` loads it once per session, every mutation saves back.
+# `data/cockpit/watchlist.json`: `_wl()` loads it once per session; every mutation merges
+# with the on-disk copy (the eod_trigger job writes the same file) and saves back.
 # --------------------------------------------------------------------------- #
 def _wl() -> list:
     if "watchlist" not in st.session_state:              # first access this session -> load from disk
@@ -313,7 +314,15 @@ def _wl_entry(ticker: str):
 
 
 def _wl_persist() -> None:
-    save_watchlist(cache.WATCHLIST_JSON, _wl())
+    # Merge with the file's CURRENT state before rewriting it: the half-hourly
+    # eod_trigger job auto-freezes pivots into watchlist.json while this session holds
+    # a copy loaded at session start — a blind rewrite would clobber them. Disk pivots
+    # win for entries this session left unfrozen; the session wins membership, order,
+    # and its own freezes. The merged result becomes the session copy so the UI shows
+    # the adopted pivots too.
+    merged = merge_frozen_pivots(_wl(), load_watchlist(cache.WATCHLIST_JSON))
+    st.session_state["watchlist"] = merged
+    save_watchlist(cache.WATCHLIST_JSON, merged)
 
 
 def _wl_add(ticker: str, judged_pivot=None, note: str = "", persist: bool = True) -> None:

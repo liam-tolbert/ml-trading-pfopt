@@ -675,6 +675,61 @@ def test_watchlist_legacy_migration_roundtrip():
         assert load_watchlist(p) == ents                       # idempotent
 
 
+def test_save_watchlist_atomic():
+    """save_watchlist writes via a sibling temp file + os.replace: a successful save
+    leaves no temp litter, and a failure at the replace step leaves the EXISTING file
+    byte-intact (the old truncate-in-place write could be caught mid-write, and
+    load_watchlist silently reads a truncated file as [])."""
+    import tempfile
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import export
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "watchlist.json"
+        export.save_watchlist(p, ["NVDA", "MSFT"])
+        assert [e["ticker"] for e in export.load_watchlist(p)] == ["NVDA", "MSFT"]
+        assert list(Path(tmp).glob("*.tmp")) == []          # no temp litter on success
+
+        before = p.read_text(encoding="utf-8")
+        with patch.object(export.os, "replace", side_effect=OSError("boom")):
+            export.save_watchlist(p, ["AAPL"])              # swallowed, never raises
+        assert p.read_text(encoding="utf-8") == before, "failed save must not touch the file"
+        assert list(Path(tmp).glob("*.tmp")) == []          # temp cleaned up on failure
+
+
+def test_watchlist_merge_frozen_pivots():
+    """merge_frozen_pivots (the item-11 lost-update fix): primary keeps membership,
+    order, notes, and its own frozen pivots; an UNFROZEN primary entry adopts the
+    donor's frozen pivot; donor-only tickers are never resurrected."""
+    from src.stock_screener.cockpit.export import make_entry, merge_frozen_pivots
+
+    # App direction: primary = the (stale) session copy, donor = disk, where the
+    # trigger job auto-froze KEEP and the user removed GONE in another tab.
+    session = [make_entry("KEEP", note="my note"),                     # unfrozen in session
+               make_entry("MINE", 50.0, date_added="2026-07-15",
+                          pivot_source="judged"),                      # session's own freeze
+               make_entry("NEWB")]                                     # added this session
+    disk = [make_entry("KEEP", 34.12, date_added="2026-07-17", pivot_source="auto"),
+            make_entry("MINE", 99.0, date_added="2026-07-17", pivot_source="auto"),
+            make_entry("GONE", 12.0, date_added="2026-07-17", pivot_source="auto")]
+    merged = merge_frozen_pivots(session, disk)
+
+    assert [e["ticker"] for e in merged] == ["KEEP", "MINE", "NEWB"]   # membership+order
+    by = {e["ticker"]: e for e in merged}
+    assert by["KEEP"]["judged_pivot"] == 34.12                         # adopted from disk
+    assert by["KEEP"]["pivot_source"] == "auto" and by["KEEP"]["date_added"] == "2026-07-17"
+    assert by["KEEP"]["note"] == "my note"                             # note stays primary's
+    assert by["MINE"]["judged_pivot"] == 50.0                          # own freeze wins
+    assert by["MINE"]["pivot_source"] == "judged"
+    assert by["NEWB"]["judged_pivot"] is None                          # nothing to adopt
+    assert "GONE" not in by                                            # never resurrected
+
+    # An unfrozen donor entry contributes nothing; mixed legacy strings coerce fine.
+    out = merge_frozen_pivots(["aaa"], [make_entry("AAA")])
+    assert out[0]["ticker"] == "AAA" and out[0]["judged_pivot"] is None
+    assert merge_frozen_pivots([], disk) == []                         # clear stays cleared
+
+
 def test_parse_ticker_list():
     """The .txt-upload parser tokenizes on commas AND whitespace/newlines, upper-cases,
     drops blanks, and de-duplicates while preserving first-seen order."""
@@ -2136,6 +2191,48 @@ def test_eod_trigger_cli_offline():
             ent = load_watchlist(wl)[0]
             assert ent["judged_pivot"] and ent["pivot_source"] == "auto"
             assert rep["names"][0]["judged_pivot"] == ent["judged_pivot"]
+
+
+def test_eod_trigger_merges_concurrent_watchlist_edit():
+    """Item-11 race, trigger side: an app save landing DURING the trigger's price fetch
+    (remove GONE, 📌-freeze UPUP, add NEWB) must survive the auto-freeze write-back —
+    disk membership and the user's judged pivot win; the trigger's auto pivot lands only
+    on the still-unfrozen KEEP; NEWB stays for next run."""
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import cache, eod_trigger
+    from src.stock_screener.cockpit.export import load_watchlist, make_entry, save_watchlist
+
+    TODAY = "2026-07-10"
+    up = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)])
+    spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wl = Path(tmp) / "watchlist.json"
+        trg = Path(tmp) / "triggers"
+        save_watchlist(wl, ["UPUP", "GONE", "KEEP"])       # all unfrozen at trigger load
+
+        def fake_prices(tickers, **kw):
+            # Simulate the app writing mid-fetch: the trigger has already loaded the
+            # 3-name list above; the file now says otherwise.
+            save_watchlist(wl, [make_entry("UPUP", 55.5, date_added=TODAY,
+                                           pivot_source="judged"),
+                                make_entry("KEEP"), make_entry("NEWB")])
+            return {t: (spy if t == "SPY" else up) for t in tickers}
+
+        with patch.object(cache, "WATCHLIST_JSON", wl), \
+                patch.object(cache, "TRIGGERS_DIR", trg), \
+                patch.object(eod_trigger.data_feed, "get_many_prices", fake_prices), \
+                patch.object(eod_trigger.data_feed, "get_fundamentals", lambda t, **kw: None):
+            assert eod_trigger.main(["--date", TODAY]) == 0
+
+        by = {e["ticker"]: e for e in load_watchlist(wl)}
+        assert set(by) == {"UPUP", "KEEP", "NEWB"}, "app's membership must win"
+        assert by["UPUP"]["judged_pivot"] == 55.5           # user's 📌 beats the auto freeze
+        assert by["UPUP"]["pivot_source"] == "judged"
+        assert by["KEEP"]["judged_pivot"] and by["KEEP"]["pivot_source"] == "auto"
+        assert by["NEWB"]["judged_pivot"] is None           # unseen by this run; next time
 
 
 def test_trigger_report_sidebar_renders():
