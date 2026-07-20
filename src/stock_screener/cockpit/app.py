@@ -646,11 +646,25 @@ with st.sidebar:
                 # build_buy_plan is holdings-blind; submit sends NO buy for a held name (re-arm
                 # only). So the est-value total counts only names that actually execute as buys.
                 _held = _tp.get("held") or {}
-                _buys = [o for o in _plan if _held.get(o["ticker"], 0) <= 0]
+                _nonce = _tp.get("build_ts")
+
+                # Per-name include/exclude for the submit (checkbox per buy row below).
+                # Earnings-flagged names start UNCHECKED (the ~21-day no-fly rule) — tick to
+                # include one anyway. Keys carry the build nonce so a fresh Build re-seeds
+                # the defaults instead of retaining a stale selection.
+                def _buy_key(t):
+                    return f"buy_{t}_{_nonce}"
+
+                def _buy_default(o):
+                    return not _earnings_flag(o.get("earnings_in"))
+
+                _buyable = [o for o in _plan if _held.get(o["ticker"], 0) <= 0]
+                _buys = [o for o in _buyable
+                         if st.session_state.get(_buy_key(o["ticker"]), _buy_default(o))]
                 _tot = sum(o["est_value"] for o in _buys)
-                _cap = f"**{len(_buys)} buy(s)** · ~${_tot:,.0f} est."
-                if len(_buys) != len(_plan):
-                    _cap += f" · {len(_plan) - len(_buys)} already held (no buy)"
+                _cap = f"**{len(_buys)}/{len(_buyable)} buy(s) selected** · ~${_tot:,.0f} est."
+                if len(_buyable) != len(_plan):
+                    _cap += f" · {len(_plan) - len(_buyable)} already held (no buy)"
                 st.caption(_cap)
                 # Master switch: attach a protective sell-stop to each order. When off, buys go
                 # in naked and already-held names are skipped (no buy, no stop).
@@ -664,12 +678,12 @@ with st.sidebar:
                          "RATCHETS UP: a re-arm that would lower the stop is ignored and the "
                          "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
                          "below (defaults to the app-computed stop).")
-                _nonce = _tp.get("build_ts")
                 _eq = (_tp.get("account") or {}).get("equity")
                 for _o in _plan:
                     _t = _o["ticker"]
                     _held_sh = _held.get(_t, 0)
                     _cA, _cB = st.columns([3, 2])
+                    _on = True                       # held rows have no checkbox (re-arm only)
                     if _held_sh > 0:
                         # No buy is sent for a held name — the stop below is a re-arm target only
                         # (or, with attach off, submit skips it entirely).
@@ -682,17 +696,20 @@ with st.sidebar:
                         if _o.get("pivot_frozen") and _o.get("pivot"):
                             _fl += f" · 📌 pivot {_o['pivot']:.2f}"   # stop/zone off frozen level
                         _ew = _earnings_flag(_o.get("earnings_in"))
-                        _cA.caption(f"• **{_t}** {_o['shares']} sh @ "
-                                    f"~${_o['price']:.2f} (~${_o['est_value']:,.0f}){_fl}"
-                                    + (f" · {_ew}" if _ew else ""))
+                        _on = _cA.checkbox(
+                            f"**{_t}** {_o['shares']} sh @ ~${_o['price']:.2f} "
+                            f"(~${_o['est_value']:,.0f}){_fl}" + (f" · {_ew}" if _ew else ""),
+                            value=_buy_default(_o), key=_buy_key(_t),
+                            help="Unchecked names are left out of the submit entirely. "
+                                 "Earnings-soon names start unchecked (no-fly window).")
                     _cB.number_input(
                         f"stop {_t}", min_value=0.0,
                         value=float(_o["stop_price"]) if _o["stop_price"] else 0.0,
-                        step=0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
-                        label_visibility="collapsed", disabled=not _attach)
+                        step = 0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
+                        label_visibility="collapsed", disabled=not _attach or not _on)
                     _edstop = st.session_state.get(f"stop_{_t}_{_nonce}", _o["stop_price"])
-                    if _held_sh > 0:
-                        pass                                     # held: stop is a re-arm target, not a buy gate
+                    if _held_sh > 0 or not _on:
+                        pass          # held: stop is a re-arm target; unchecked: not submitted
                     elif _attach and not stop_is_valid(_edstop, _o["price"]):
                         _cB.caption(":red[stop must be < price]")
                     elif _attach and _eq and _edstop and _o["price"] > _edstop:
@@ -708,11 +725,11 @@ with st.sidebar:
                     st.caption("⚠︎ *capped* = the risk-sized quantity hit the 10%-of-equity "
                                "order cap and was clamped down, so the realized risk sits below "
                                "your target. Lower the risk % or tighten the stop to fit.")
-                if any(_earnings_flag(_o.get("earnings_in")) for _o in _buys):
+                if any(_earnings_flag(_o.get("earnings_in")) for _o in _buyable):
                     st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
                                f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "
-                               "cushion to absorb an earnings gap — Minervini would wait "
-                               "for the report or already have a cushion.")
+                               "cushion to absorb an earnings gap, so these start "
+                               "UNCHECKED — tick one to include it anyway.")
                 # Confirm WHICH account before submitting (each paper account has its own keys).
                 _account = _tp.get("account", {})
                 if _account.get("error"):
@@ -724,11 +741,17 @@ with st.sidebar:
                     st.caption(f"Target account **…{str(_account['account_number'])[-4:]}** "
                                f"({_src}) · equity ${_account['equity']:,.0f}")
                 _c1, _c2 = st.columns(2)
+                _n_held = sum(1 for _o in _plan if _held.get(_o["ticker"], 0) > 0)
                 if _c1.button("✅ Submit (paper)", key="trade_submit",
-                              type="primary", width="stretch"):
+                              type="primary", width="stretch",
+                              disabled=not _buys and not _n_held):
                     # Merge each ticker's edited stop (session_state) into the plan entries.
+                    # Only CHECKED buy rows are sent; held names always pass through (submit
+                    # re-arms their stop, never buys).
                     _final = [{**_o, "stop_price": st.session_state.get(
-                        f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"])} for _o in _plan]
+                        f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"])} for _o in _plan
+                        if _held.get(_o["ticker"], 0) > 0
+                        or st.session_state.get(_buy_key(_o["ticker"]), _buy_default(_o))]
                     with st.spinner("Submitting to Alpaca paper…"):
                         try:
                             st.session_state["trade_result"] = submit_buy_plan(

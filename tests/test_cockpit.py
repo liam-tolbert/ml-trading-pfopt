@@ -1396,6 +1396,69 @@ def test_trade_plan_preview_marks_held_names():
     assert "$2,500" not in rendered, rendered
 
 
+def test_trade_plan_buy_checkboxes_filter_submit():
+    """Per-buy include/exclude checkboxes: an earnings-flagged buy starts UNCHECKED (the
+    ~21-day no-fly), a clean buy starts checked, the selected-count caption tracks the
+    boxes, and Submit sends ONLY the checked buys (held names always pass through)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_plan_buy_checkboxes_filter_submit (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, trade as tradmod
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    sent = {}
+
+    def _fake_submit(plan, attach_stop=True):
+        sent["tickers"] = [o["ticker"] for o in plan]
+        return {"results": [{"ticker": o["ticker"], "status": "submitted", "detail": ""}
+                            for o in plan],
+                "account_number": "PA000123", "equity": 100000.0}
+
+    def _entry(t, earnings_in=None):
+        return {"ticker": t, "shares": 10, "price": 50.0, "pivot": 50.0,
+                "est_value": 500.0, "extended": False, "capped": False,
+                "stop_price": 46.0, "earnings_in": earnings_in}
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(tradmod, "submit_buy_plan", _fake_submit):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = [
+            {"ticker": t, "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""} for t in ("CLEAN", "ERNS", "HELDX")]
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": [_entry("CLEAN"), _entry("ERNS", earnings_in=10), _entry("HELDX")],
+            "skipped": [],
+            "account": {"account_number": "PA000123", "equity": 100000.0,
+                        "using_dedicated": True},
+            "held": {"HELDX": 20},
+            "build_ts": 1}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+
+        boxes = {c.key: c for c in at.checkbox if str(c.key or "").startswith("buy_")}
+        assert set(boxes) == {"buy_CLEAN_1", "buy_ERNS_1"}, \
+            f"one checkbox per BUY row (held has none), got {sorted(boxes)}"
+        assert boxes["buy_CLEAN_1"].value is True
+        assert boxes["buy_ERNS_1"].value is False, "earnings-soon buy must start unchecked"
+        rendered = " ".join(str(getattr(m, "value", ""))
+                            for m in list(at.markdown) + list(getattr(at, "caption", [])))
+        assert "1/2 buy(s) selected" in rendered, rendered
+
+        submit = [b for b in at.button if b.key == "trade_submit"]
+        assert submit, "submit button not found"
+        submit[0].click().run()
+        assert not at.exception, f"app raised on submit: {at.exception}"
+    assert sent["tickers"] == ["CLEAN", "HELDX"], \
+        f"submit must send checked buys + held only, got {sent.get('tickers')}"
+
+
 def test_sepa_guide_page_renders():
     """The SEPA Guide page must load and render the method markdown without error."""
     try:
