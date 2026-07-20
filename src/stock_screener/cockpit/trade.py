@@ -37,6 +37,9 @@ BREAKEVEN_GAIN = 0.16       # gain past which the stop should be at least breake
 TRAIL_GAIN = 0.20           # gain past which, "well in profit", trail the 50-day SMA
 SELL_STRENGTH_GAIN = 0.20   # gain past which to consider selling part into strength
 HEAVY_VOL_RATIO = 1.5       # latest volume vs its 50-day average = a heavy-volume day
+EARNINGS_SOON_DAYS = 21     # mirrors triggers.EARNINGS_SOON_DAYS (kept here so this module
+                            # needn't import the pandas-heavy triggers/scan stack at load time)
+EARNINGS_CUSHION_MIN = 0.08  # min profit cushion to comfortably hold a position through a report
 # Suggested-stop bases for the re-arm action; "auto" picks per position by its gain.
 STOP_BASES = ("auto", "initial", "breakeven", "sma50")
 
@@ -184,11 +187,27 @@ def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
     return (cand, eff) if stop_is_valid(cand, current_price) else (None, eff)
 
 
+def position_stage(gain_pct: Optional[float]) -> Optional[str]:
+    """The position's stage on the Minervini stop ladder, from its gain. Pure. Uses the SAME
+    thresholds as :func:`suggest_stop`'s auto basis so the label and the suggested stop agree."""
+    if gain_pct is None:
+        return None
+    if gain_pct < 0:
+        return "underwater"
+    if gain_pct < BREAKEVEN_GAIN:
+        return "fresh"
+    if gain_pct < TRAIL_GAIN:
+        return "working"
+    return "well in profit"
+
+
 def position_advisories(pos: dict) -> List[str]:
     """Display-only Minervini exit advisories derived from a :func:`fetch_positions` dict. Pure.
 
     Note the "×initial-risk" rule (#4) approximates the initial risk at ``INITIAL_STOP_PCT`` (8%),
-    because the entry-time stop distance isn't persisted anywhere — so it's a nudge, not exact."""
+    because the entry-time stop distance isn't persisted anywhere — so it's a nudge, not exact.
+    The earnings-cushion rules fire only for a KNOWN upcoming report (``earnings_in`` 0..21) with
+    a KNOWN gain — a just-reported name (negative days) or missing data stays silent."""
     out: List[str] = []
     gain = pos.get("gain_pct")
     avg_entry = pos.get("avg_entry")
@@ -196,6 +215,16 @@ def position_advisories(pos: dict) -> List[str]:
 
     if not pos.get("has_stop"):
         out.append("⚠ No protective stop armed — arm one.")
+    ei = pos.get("earnings_in")
+    if ei is not None and 0 <= ei <= EARNINGS_SOON_DAYS and gain is not None:
+        # A stop can't protect against an earnings gap — the exit decision must come BEFORE
+        # the report unless the position has already built a cushion.
+        if gain < 0:
+            out.append(f"⚠ Earnings in {int(ei)}d with a loss — no cushion; "
+                       "exit or reduce before the report.")
+        elif gain < EARNINGS_CUSHION_MIN:
+            out.append(f"⚠ Earnings in {int(ei)}d with only a {gain * 100:.0f}% cushion — "
+                       "consider trimming before the report.")
     if gain is not None and gain >= SELL_STRENGTH_GAIN:
         out.append(f"Up {gain * 100:.0f}% — consider selling part into strength.")
     if pos.get("below_sma50"):
@@ -698,7 +727,8 @@ def _attr_float(obj, attr: str) -> Optional[float]:
 
 def fetch_positions() -> dict:
     """Read the cockpit's Alpaca **paper** account (Minervini keys preferred) and return holdings
-    enriched with P&L, in-force stop level, 50-day SMA, and Minervini exit advisories.
+    enriched with P&L, in-force stop level, 50-day SMA, earnings date (for the cushion
+    advisories), stage on the stop ladder, and Minervini exit advisories.
 
     Returns ``{"account": {account_number, equity, cash, using_dedicated, positions_count,
     total_unrealized_pl}, "positions": [ per-position dict ]}``. Raises :class:`TradeUnavailable`
@@ -736,6 +766,21 @@ def fetch_positions() -> dict:
     except Exception:
         calculate_sma = None
     import pandas as pd
+
+    # Earnings dates for the cushion advisories (best-effort; weekly JSON cache per ticker,
+    # serial — position counts are small and the page's cache_data absorbs the cost).
+    earn: Dict[str, tuple] = {}                     # sym -> (next_earnings, earnings_in)
+    try:
+        from . import data_feed as _fund_mod
+        from .scan import _days_to_earnings
+        for sym in symbols:
+            try:
+                f = _fund_mod.get_fundamentals(sym)
+                earn[sym] = ((f or {}).get("next_earnings"), _days_to_earnings(f))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     positions: List[dict] = []
     for p in raw:
@@ -777,6 +822,7 @@ def fetch_positions() -> dict:
             gain_pct = (price - avg_entry) / avg_entry
         below_sma50 = bool(sma_50 is not None and last_close is not None and last_close < sma_50)
 
+        next_earnings, earnings_in = earn.get(sym, (None, None))
         pos = {
             "symbol": sym, "qty": qty, "avg_entry": avg_entry, "current_price": price,
             "market_value": _attr_float(p, "market_value"),
@@ -787,6 +833,8 @@ def fetch_positions() -> dict:
             "current_stop": current_stop, "has_stop": current_stop is not None,
             "sma_50": sma_50, "last_close": last_close, "volume_ratio": volume_ratio,
             "gain_pct": gain_pct, "below_sma50": below_sma50,
+            "next_earnings": next_earnings, "earnings_in": earnings_in,
+            "stage": position_stage(gain_pct),
         }
         pos["advisories"] = position_advisories(pos)
         positions.append(pos)
@@ -840,10 +888,107 @@ def rearm_stops(targets: List[dict]) -> dict:
             "using_dedicated": using_dedicated, "results": results}
 
 
+def submit_position_sell(symbol: str, qty: int) -> dict:
+    """Manual market SELL of part/all of a held position (paper account), stop-aware.
+
+    Shares covered by an open GTC sell-stop are RESERVED at Alpaca, so the flow is:
+    cancel the symbol's open sell-stops → submit the market SELL (DAY, tagged
+    ``SEPAsell-``) → re-place a GTC stop for any REMAINING shares at the SAME (never
+    lower) level. If the market sell fails AFTER the cancel, the previous stop is
+    restored for the full held quantity — the position is never silently left
+    unprotected (the cancel-before-place gap done right; cf. review finding #14).
+
+    No $50 floor / 10%-cap / tradability gate: like the stop re-arm path, a sell is
+    risk-reducing. ``qty`` above the held count clamps to it (a stale page is the only
+    way there — the UI caps the input). A cancel that silently failed can still bounce
+    the market sell on reserved shares; that lands in the failure/restore path and the
+    duplicate restore is itself reported. Returns a flat dict for the page's icon
+    renderer: ``{status: submitted|skipped|failed, detail, symbol, sold_qty, remaining,
+    stop_price, account_number, equity}``. Raises :class:`TradeUnavailable`."""
+    client, _using_dedicated = _connect_paper()
+    try:
+        from alpaca.trading.requests import (MarketOrderRequest, StopOrderRequest,
+                                             GetOrdersRequest)
+        from alpaca.trading.enums import (OrderSide, TimeInForce, QueryOrderStatus,
+                                          OrderType)
+    except ImportError as e:
+        raise TradeUnavailable(str(e)) from e
+
+    acct = client.get_account()
+    base = {"symbol": symbol, "sold_qty": 0, "remaining": 0, "stop_price": None,
+            "account_number": getattr(acct, "account_number", "?"),
+            "equity": float(acct.equity)}
+
+    held = 0
+    for p in client.get_all_positions():
+        if getattr(p, "symbol", None) == symbol:
+            try:
+                held = int(float(getattr(p, "qty", 0) or 0))
+            except (TypeError, ValueError):
+                held = 0
+            break
+    try:
+        qty = int(qty)
+    except (TypeError, ValueError):
+        qty = 0
+    if held < 1:
+        return {**base, "status": "skipped", "detail": "not held in this account"}
+    if qty < 1:
+        return {**base, "status": "skipped", "detail": "sell quantity must be ≥ 1"}
+    clamp_note = ""
+    if qty > held:
+        clamp_note = f" (requested {qty}, clamped to the {held} held)"
+        qty = held
+    remaining = held - qty
+    base.update(sold_qty=qty, remaining=remaining)
+
+    existing = _open_sell_stops(client, symbol, GetOrdersRequest=GetOrdersRequest,
+                                QueryOrderStatus=QueryOrderStatus, OrderSide=OrderSide,
+                                OrderType=OrderType)
+    levels = [q for q in (_stop_price_of(od) for od in existing) if q is not None]
+    old_level = max(levels) if levels else None
+    base["stop_price"] = old_level
+    cancelled = _cancel_orders(client, existing)
+
+    def _place_stop(stop_qty: int) -> bool:
+        try:
+            client.submit_order(order_data=StopOrderRequest(
+                symbol=symbol, qty=stop_qty, side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC, stop_price=round(old_level, 2),
+                client_order_id=f"SEPAstop-{symbol}-{int(time.time() * 1000)}"))
+            return True
+        except Exception:
+            return False
+
+    try:
+        client.submit_order(order_data=MarketOrderRequest(
+            symbol=symbol, qty=qty, side=OrderSide.SELL, time_in_force=TimeInForce.DAY,
+            client_order_id=f"SEPAsell-{symbol}-{int(time.time() * 1000)}"))
+    except Exception as e:
+        detail = f"market sell failed: {e}"
+        if cancelled and old_level is not None:
+            detail += (f"; previous stop restored @ {old_level:.2f}" if _place_stop(held)
+                       else "; stop restore FAILED — arm a stop manually")
+        return {**base, "status": "failed", "detail": detail + clamp_note}
+
+    detail = f"market SELL {qty}/{held} sh (DAY)"
+    if remaining > 0:
+        if old_level is not None:
+            detail += (f"; stop re-placed @ {old_level:.2f} for the remaining {remaining} sh"
+                       if _place_stop(remaining)
+                       else f"; stop re-place FAILED — remaining {remaining} sh "
+                            "unprotected, re-arm manually")
+        else:
+            detail += f"; remaining {remaining} sh have no stop — arm one"
+    elif cancelled:
+        detail += "; protective stop cancelled (no shares remain)"
+    return {**base, "status": "submitted", "detail": detail + clamp_note}
+
+
 # --------------------------------------------------------------------------- #
 # Trade journal — "know your numbers" (Think & Trade Like a Champion)
 # --------------------------------------------------------------------------- #
-SEPA_TAG_PREFIXES = ("SEPAoto-", "SEPAstop-", "SEPAcockpit-")
+SEPA_TAG_PREFIXES = ("SEPAoto-", "SEPAstop-", "SEPAcockpit-", "SEPAsell-")
 _ORDERS_PAGE_LIMIT = 500        # Alpaca's max order-history page size
 _MAX_ORDER_PAGES = 40           # pagination ceiling (40 × 500 = 20k orders), not a real limit
 

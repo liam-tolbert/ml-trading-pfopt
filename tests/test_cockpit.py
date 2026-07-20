@@ -1649,13 +1649,17 @@ def test_fetch_positions_offline():
     ]
     client = Client(positions, {"AAA": [_Order("s1", "AAA", 120.0)]})   # AAA has a stop, BBB none
 
+    future = (pd.Timestamp.today().normalize() + pd.Timedelta(days=10)).strftime("%Y-%m-%d")
     orig_conn, orig_gmp = trade._connect_paper, data_feed.get_many_prices
+    orig_fund = data_feed.get_fundamentals
     trade._connect_paper = lambda: (client, True)
     data_feed.get_many_prices = lambda syms, **kw: frames
+    data_feed.get_fundamentals = lambda t, **kw: {"next_earnings": future}
     try:
         out = trade.fetch_positions()
     finally:
         trade._connect_paper, data_feed.get_many_prices = orig_conn, orig_gmp
+        data_feed.get_fundamentals = orig_fund
 
     acct = out["account"]
     assert acct["positions_count"] == 2
@@ -1671,6 +1675,12 @@ def test_fetch_positions_offline():
     # Issue 10: the ratio divides by the PRIOR 50 bars (all 1000), EXCLUDING today's 3000 spike,
     # so it reads exactly 3.0 — matching triggers._volume_ratio, not 2.88 (today-in-average).
     assert abs(by["BBB"]["volume_ratio"] - 3.0) < 1e-9
+    # Earnings enrichment + stage: BBB is a LOSER 10 days from its report -> cushion advisory;
+    # AAA (+30%) is cushioned, so the same imminent report stays silent.
+    assert by["AAA"]["next_earnings"] == future and by["AAA"]["earnings_in"] == 10
+    assert by["AAA"]["stage"] == "well in profit" and by["BBB"]["stage"] == "underwater"
+    assert any("Earnings in 10d with a loss" in a for a in by["BBB"]["advisories"])
+    assert not any("Earnings" in a for a in by["AAA"]["advisories"])
 
 
 def test_suggest_stop():
@@ -1720,6 +1730,135 @@ def test_position_advisories():
                                  "volume_ratio": 1.0, "avg_entry": 100.0, "current_stop": 96.0})
     assert clean == []
 
+    # Earnings-cushion rules: a loser into a report, then a thin cushion, both warn; a real
+    # cushion, an unknown/negative days-to-earnings, or an unknown gain stay silent.
+    base = {"has_stop": True, "below_sma50": False, "volume_ratio": 1.0,
+            "avg_entry": 100.0, "current_stop": 96.0}
+    lose = position_advisories({**base, "gain_pct": -0.05, "earnings_in": 7})
+    assert any("Earnings in 7d with a loss" in a for a in lose)
+    thin = position_advisories({**base, "gain_pct": 0.03, "earnings_in": 9})
+    assert any("only a 3% cushion" in a for a in thin)
+    for quiet in ({**base, "gain_pct": 0.12, "earnings_in": 9},      # cushioned
+                  {**base, "gain_pct": -0.05, "earnings_in": None},  # date unknown
+                  {**base, "gain_pct": -0.05, "earnings_in": -3},    # just reported
+                  {**base, "gain_pct": None, "earnings_in": 7}):     # gain unknown
+        assert not any("Earnings" in a for a in position_advisories(quiet)), quiet
+
+
+def test_position_stage():
+    """The stop-ladder stage label mirrors suggest_stop's auto thresholds exactly."""
+    from src.stock_screener.cockpit.trade import position_stage
+
+    assert position_stage(None) is None
+    assert position_stage(-0.02) == "underwater"
+    assert position_stage(0.0) == "fresh"
+    assert position_stage(0.15) == "fresh"
+    assert position_stage(0.16) == "working"
+    assert position_stage(0.19) == "working"
+    assert position_stage(0.20) == "well in profit"
+
+
+def test_submit_position_sell():
+    """Manual sell: cancels the covering stop, submits a SEPAsell- market SELL (DAY), and on a
+    partial sell re-places the GTC stop for the remainder at the SAME level. Skips unheld
+    names, clamps an over-ask, and notes an unprotected remainder when no stop existed."""
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
+    from src.stock_screener.cockpit import trade
+
+    Client, _Pos, _Order = _pos_fakes()
+
+    def _run(client, symbol, qty):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (client, True)
+        try:
+            return trade.submit_position_sell(symbol, qty)
+        finally:
+            trade._connect_paper = orig
+
+    # (a) FULL sell: stop cancelled, one market SELL DAY for all 40, NO stop re-placed.
+    c = Client([_Pos("HELD", 40)], {"HELD": [_Order("s1", "HELD", 95.0)]})
+    r = _run(c, "HELD", 40)
+    assert r["status"] == "submitted" and r["sold_qty"] == 40 and r["remaining"] == 0
+    assert "s1" in c.cancelled
+    assert len(c.submitted) == 1
+    mkt = c.submitted[0]
+    assert isinstance(mkt, MarketOrderRequest) and mkt.side == OrderSide.SELL
+    assert int(float(mkt.qty)) == 40 and mkt.time_in_force == TimeInForce.DAY
+    assert str(mkt.client_order_id).startswith("SEPAsell-HELD-")
+    assert "no shares remain" in r["detail"]
+
+    # (b) PARTIAL sell: market SELL 15, then a GTC stop re-placed for the remaining 25 at 95.0.
+    c2 = Client([_Pos("HELD", 40)], {"HELD": [_Order("s1", "HELD", 95.0)]})
+    r2 = _run(c2, "HELD", 15)
+    assert r2["status"] == "submitted" and r2["remaining"] == 25
+    assert len(c2.submitted) == 2
+    stop = c2.submitted[1]
+    assert isinstance(stop, StopOrderRequest) and int(float(stop.qty)) == 25
+    assert float(stop.stop_price) == 95.0 and stop.time_in_force == TimeInForce.GTC
+    assert str(stop.client_order_id).startswith("SEPAstop-HELD-")
+    assert "re-placed @ 95.00" in r2["detail"]
+
+    # (c) over-ask clamps to held; (d) unheld/zero-qty -> skipped, nothing touched.
+    c3 = Client([_Pos("HELD", 40)], {"HELD": [_Order("s1", "HELD", 95.0)]})
+    r3 = _run(c3, "HELD", 100)
+    assert r3["sold_qty"] == 40 and "clamped" in r3["detail"]
+    c4 = Client([_Pos("HELD", 40)], {})
+    assert _run(c4, "NOPE", 10)["status"] == "skipped"
+    assert _run(c4, "HELD", 0)["status"] == "skipped"
+    assert not c4.cancelled and not c4.submitted
+
+    # (e) partial with NO existing stop: no cancel, no re-place, loud unprotected note.
+    c5 = Client([_Pos("HELD", 40)], {})
+    r5 = _run(c5, "HELD", 10)
+    assert r5["status"] == "submitted" and len(c5.submitted) == 1 and not c5.cancelled
+    assert "have no stop" in r5["detail"]
+
+    assert "SEPAsell-" in trade.SEPA_TAG_PREFIXES     # journal tags manual sells
+
+
+def test_submit_position_sell_restores_stop_on_failure():
+    """The cancel-before-sell gap done right: if the market SELL fails AFTER the covering stop
+    was cancelled, the previous stop is restored for the FULL held qty at the old level; if
+    even the restore fails, the detail says to arm one manually."""
+    from alpaca.trading.enums import TimeInForce
+    from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
+    from src.stock_screener.cockpit import trade
+
+    Client, _Pos, _Order = _pos_fakes()
+
+    class FailSellClient(Client):
+        def submit_order(self, order_data=None):
+            if isinstance(order_data, MarketOrderRequest):
+                raise RuntimeError("rejected")
+            return super().submit_order(order_data=order_data)
+
+    c = FailSellClient([_Pos("HELD", 40)], {"HELD": [_Order("s1", "HELD", 95.0)]})
+    orig = trade._connect_paper
+    trade._connect_paper = lambda: (c, True)
+    try:
+        r = trade.submit_position_sell("HELD", 15)
+    finally:
+        trade._connect_paper = orig
+    assert r["status"] == "failed" and "s1" in c.cancelled
+    restored = [o for o in c.submitted if isinstance(o, StopOrderRequest)]
+    assert len(restored) == 1 and int(float(restored[0].qty)) == 40
+    assert float(restored[0].stop_price) == 95.0
+    assert restored[0].time_in_force == TimeInForce.GTC
+    assert "previous stop restored @ 95.00" in r["detail"]
+
+    class FailAllClient(Client):
+        def submit_order(self, order_data=None):
+            raise RuntimeError("rejected")
+
+    c2 = FailAllClient([_Pos("HELD", 40)], {"HELD": [_Order("s1", "HELD", 95.0)]})
+    trade._connect_paper = lambda: (c2, True)
+    try:
+        r2 = trade.submit_position_sell("HELD", 15)
+    finally:
+        trade._connect_paper = orig
+    assert r2["status"] == "failed" and "arm a stop manually" in r2["detail"]
+
 
 def test_positions_page_renders():
     """The Positions page loads and renders with an offline (patched) fetch_positions — no
@@ -1753,6 +1892,75 @@ def test_positions_page_renders():
     # rendered end-to-end with the offline holding (and didn't st.stop() early).
     assert any("Re-arm" in str(getattr(b, "label", "")) for b in at.button), \
         "positions page did not render the re-arm control"
+
+
+def test_positions_page_sell_flow():
+    """The manual-sell UI end-to-end (offline): qty seeds to the full position, the ½ preset
+    halves it, Sell opens the two-step confirm, Cancel clears it without submitting, and
+    Confirm calls submit_position_sell with the FROZEN quantity and renders the result."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_positions_page_sell_flow (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import trade
+
+    offline = {
+        "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
+                    "using_dedicated": True, "positions_count": 1, "total_unrealized_pl": -50.0},
+        "positions": [{
+            "symbol": "AAA", "qty": 10, "avg_entry": 100.0, "current_price": 95.0,
+            "market_value": 950.0, "cost_basis": 1000.0, "unrealized_pl": -50.0,
+            "unrealized_plpc": -0.05, "lastday_price": 96.0, "current_stop": 92.0,
+            "has_stop": True, "sma_50": 90.0, "last_close": 95.0, "volume_ratio": 1.0,
+            "gain_pct": -0.05, "below_sma50": False, "next_earnings": "2026-07-27",
+            "earnings_in": 7, "stage": "underwater",
+            "advisories": ["⚠ Earnings in 7d with a loss — no cushion; exit or reduce "
+                           "before the report."],
+        }],
+    }
+    calls = []
+
+    def _fake_sell(symbol, qty):
+        calls.append((symbol, qty))
+        return {"status": "submitted", "detail": "market SELL 5/10 sh (DAY); stop re-placed "
+                "@ 92.00 for the remaining 5 sh", "symbol": symbol, "sold_qty": qty,
+                "remaining": 5, "stop_price": 92.0, "account_number": "PA00SZOE",
+                "equity": 50000.0}
+
+    def _btn(at, key):
+        hits = [b for b in at.button if b.key == key]
+        assert hits, f"button {key} not rendered"
+        return hits[0]
+
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
+    with patch.object(trade, "fetch_positions", return_value=offline), \
+            patch.object(trade, "submit_position_sell", side_effect=_fake_sell):
+        at = AppTest.from_file(page, default_timeout=60)
+        at.run()
+        assert not at.exception, f"page raised: {at.exception}"
+        qty = [n for n in at.number_input if n.key == "sellqty_AAA_1"]
+        assert qty and qty[0].value == 10, "sell qty must seed to the full position"
+
+        _btn(at, "sellq2_AAA_1").click().run()               # ½ preset -> 5
+        qty = [n for n in at.number_input if n.key == "sellqty_AAA_1"]
+        assert qty[0].value == 5, f"½ preset should set qty to 5, got {qty[0].value}"
+
+        _btn(at, "sell_AAA_1").click().run()                 # step 1 -> confirm renders
+        assert [b for b in at.button if b.key == "sellgo_AAA_1"], "confirm button missing"
+
+        _btn(at, "sellno_AAA_1").click().run()               # cancel -> pending cleared
+        assert not [b for b in at.button if b.key == "sellgo_AAA_1"]
+        assert not calls, "cancel must not submit"
+
+        _btn(at, "sell_AAA_1").click().run()                 # step 1 again
+        _btn(at, "sellgo_AAA_1").click().run()               # step 2 -> submit
+        assert not at.exception, f"page raised on confirm: {at.exception}"
+    assert calls == [("AAA", 5)], f"confirm must sell the frozen qty, got {calls}"
+    rendered = " ".join(str(getattr(m, "value", ""))
+                        for m in list(at.markdown) + list(getattr(at, "caption", [])))
+    assert "submitted" in rendered and "re-placed" in rendered, rendered
 
 
 # --------------------------------------------------------------------------- #
