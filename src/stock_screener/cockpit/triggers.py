@@ -46,6 +46,8 @@ SESSION_OPEN_MIN = 9 * 60 + 30    # 09:30 ET, in minutes-of-day
 SESSION_LEN_MIN = 390             # 09:30 -> 16:00
 PACE_MIN_ELAPSED = 0.1            # clip: dividing by the first few minutes explodes the pace
 INTRADAY_CUTOFF_MIN = 16 * 60 + 5  # runs before ~16:05 ET see a provisional bar
+EARLY_CLOSE_LEN_MIN = 210         # NYSE half days close 13:00 -> a 09:30-13:00 session
+EARLY_CLOSE_CUTOFF_MIN = 13 * 60 + 5  # ...and the bar settles ~13:05 on those days
 
 REPORT_SCHEMA = 1
 STATUSES = ("no_data", "no_pivot", "stale", "extended", "triggered", "watch")
@@ -65,14 +67,39 @@ def _now_et(now=None) -> pd.Timestamp:
     return pd.Timestamp.now(tz="America/New_York").tz_localize(None)
 
 
+def _early_close(date) -> bool:
+    """NYSE recurring 1:00 pm early closes: July 3 (when Mon-Thu), the day after
+    Thanksgiving (4th Thursday of November), and December 24 (when Mon-Thu).
+
+    A FRIDAY Jul 3 / Dec 24 is the OBSERVED full holiday (Jul 4 / Dec 25 falls on a
+    Saturday), so the Mon-Thu rule excludes exactly the right years; weekend dates aren't
+    sessions at all. One-off special closes (e.g. days of mourning) are not modeled."""
+    d = pd.Timestamp(date)
+    if (d.month == 7 and d.day == 3) or (d.month == 12 and d.day == 24):
+        return d.weekday() <= 3                          # Mon..Thu
+    if d.month == 11:
+        first_thu = 1 + (3 - pd.Timestamp(year=d.year, month=11, day=1).weekday()) % 7
+        return d.day == first_thu + 21 + 1               # day after the 4th Thursday
+    return False
+
+
+def _session_len_min(date) -> int:
+    return EARLY_CLOSE_LEN_MIN if _early_close(date) else SESSION_LEN_MIN
+
+
+def _intraday_cutoff_min(date) -> int:
+    return EARLY_CLOSE_CUTOFF_MIN if _early_close(date) else INTRADAY_CUTOFF_MIN
+
+
 def _session_elapsed(now: pd.Timestamp) -> float:
-    """Fraction of the 09:30-16:00 session elapsed at ``now``: 0.0 pre-open, 1.0 at/after
-    the close, clipped to >= PACE_MIN_ELAPSED once trading has begun (the first minutes
-    would otherwise explode the pace ratio)."""
+    """Fraction of the trading session elapsed at ``now`` (09:30-16:00, or 09:30-13:00 on
+    an early-close half day): 0.0 pre-open, 1.0 at/after the close, clipped to
+    >= PACE_MIN_ELAPSED once trading has begun (the first minutes would otherwise explode
+    the pace ratio)."""
     mins = now.hour * 60 + now.minute - SESSION_OPEN_MIN
     if mins <= 0:
         return 0.0
-    return min(1.0, max(PACE_MIN_ELAPSED, mins / SESSION_LEN_MIN))
+    return min(1.0, max(PACE_MIN_ELAPSED, mins / _session_len_min(now.normalize())))
 
 
 def _volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
@@ -153,6 +180,7 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         "date_added": entry.get("date_added"), "note": entry.get("note", ""),
         "close": None, "last_bar": None, "stale": None, "close_above_pivot": None,
         "volume": None, "volume_ratio_50": None, "volume_ratio_20": None,
+        "volume_ratio_50_scaled": None, "early_close": bool(_early_close(t)),
         "volume_pace": None, "volume_confirmed": None, "triggered": False,
         "extended": None, "pct_from_pivot": None, "earnings_in": None,
         "earnings_soon": None, "error": None,
@@ -183,8 +211,15 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
             return out
 
         vr = out["volume_ratio_50"]
+        gate = vr
+        if vr is not None and out["stale"] is False and out["early_close"]:
+            # A half session's volume vs full-day averages understates ~1.86x — scale the
+            # GATE so a genuinely heavy half day can still confirm (user decision); the
+            # displayed ratio stays RAW, the scaled value is reported alongside.
+            gate = vr * (SESSION_LEN_MIN / _session_len_min(t))
+            out["volume_ratio_50_scaled"] = round(gate, 2)
         out["close_above_pivot"] = bool(close > pivot)
-        out["volume_confirmed"] = bool(vr is not None and vr >= TRIGGER_VOL_RATIO)
+        out["volume_confirmed"] = bool(gate is not None and gate >= TRIGGER_VOL_RATIO)
         out["extended"] = bool(close > pivot * (1.0 + EXTENDED_PCT))
         out["pct_from_pivot"] = round((close / pivot - 1.0) * 100.0, 2)
         out["triggered"] = bool(out["close_above_pivot"] and out["volume_confirmed"]
@@ -253,9 +288,11 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
         "generated_at": pd.Timestamp.now(tz="America/New_York").isoformat(),
         "spy": spy_note,
         "all_stale": bool(with_bars) and all(n["stale"] for n in with_bars),
-        # A live session bar: close/volume are provisional until ~16:05 ET.
+        "early_close": bool(_early_close(t)),
+        # A live session bar: close/volume are provisional until ~16:05 ET (~13:05 on an
+        # early-close half day).
         "intraday": bool(fresh
-                         and now_t.hour * 60 + now_t.minute < INTRADAY_CUTOFF_MIN),
+                         and now_t.hour * 60 + now_t.minute < _intraday_cutoff_min(t)),
         "names": names,
         "summary": summary,
     }
@@ -338,7 +375,12 @@ def format_report(report: dict) -> str:
     if report.get("all_stale"):
         lines.append("NOTE: no new bar on the report date (weekend/holiday?) -- "
                      "no trigger can fire from a stale bar.")
+    if report.get("early_close"):
+        lines.append("NOTE: early close (1:00 pm ET) -- volume gate scaled x"
+                     f"{SESSION_LEN_MIN / EARLY_CLOSE_LEN_MIN:.2f} for the short session; "
+                     "VOL50 shows the raw ratio.")
     if report.get("intraday"):
-        lines.append("NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; "
+        settle = "~13:00" if report.get("early_close") else "~16:00"
+        lines.append(f"NOTE: intraday bar -- close/volume are provisional until {settle} ET; "
                      "PACE = volume so far vs expected by this time of day.")
     return "\n".join(lines)

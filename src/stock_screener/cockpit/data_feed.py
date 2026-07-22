@@ -490,18 +490,52 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 raw = _download_batch(yf, part, retries, pause, period=lookback,
                                       interval="1d", auto_adjust=True,
                                       group_by="ticker", threads=True, progress=False)
+                got: Dict[str, pd.DataFrame] = {}
                 for sym in part:
-                    df = None
                     if raw is not None and len(raw):
                         sub = _extract_ticker(raw, sym)
                         df = _clean_prices(sub) if sub is not None else None
-                    if df is not None and len(df):
+                        if df is not None and len(df):
+                            got[sym] = df
+                # One subset retry for names the batch missed: _download_batch returns as
+                # soon as ANY rows exist, so its whole-batch retry never fires on the common
+                # PARTIAL failure. Skipped when the whole batch came back empty (that case
+                # was already retried inside _download_batch).
+                missing = [s for s in part if s not in got]
+                if missing and retries > 0 and raw is not None and len(raw):
+                    raw2 = _download_batch(yf, missing, retries, pause, period=lookback,
+                                           interval="1d", auto_adjust=True,
+                                           group_by="ticker", threads=True, progress=False)
+                    if raw2 is not None and len(raw2):
+                        for sym in missing:
+                            sub = _extract_ticker(raw2, sym)
+                            df = _clean_prices(sub) if sub is not None else None
+                            if df is not None and len(df):
+                                got[sym] = df
+                for sym in part:
+                    df = got.get(sym)
+                    if df is not None:
                         out[sym] = df
                         try:
                             df.to_parquet(PRICES_DIR / f"{sym}.parquet")
                         except Exception:
                             pass
-                    _emit(sym, f"full history ({lookback})")
+                        _emit(sym, f"full history ({lookback})")
+                        continue
+                    # Failed fetch: serve the stale parquet when one exists (gap>max_gap and
+                    # re-baseline names HAVE one) instead of silently dropping the name —
+                    # the same fallback get_prices uses. NOT re-persisted: don't bump the
+                    # mtime into the fresh window with data we know is stale.
+                    path = PRICES_DIR / f"{sym}.parquet"
+                    if path.exists():
+                        try:
+                            out[sym] = pd.read_parquet(path)
+                            _emit(sym, f"full history ({lookback}) FAILED — "
+                                       "stale cache served")
+                            continue
+                        except Exception:
+                            pass
+                    _emit(sym, f"full history ({lookback}) FAILED (no data)")
                 if i + chunk < len(full_fetch):
                     time.sleep(pause)
     return out

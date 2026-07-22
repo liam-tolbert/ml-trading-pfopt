@@ -31,8 +31,13 @@ def make_entry(ticker, judged_pivot=None, date_added=None, pivot_source=None,
     inside :func:`save_watchlist`'s swallow-all — a silent no-persist) and rounded to cents;
     non-positive/NaN/garbage pivots become ``None``. ``pivot_source`` is kept only when it
     names a known source AND a pivot is set — an unfrozen entry carries ``pivot_source=None``.
+
+    Tickers adopt the yfinance dash convention (``BRK.B`` → ``BRK-B``, mirroring
+    ``data_feed.normalize`` without importing it) so watchlist entries always match the
+    scan-payload keys — a dotted .txt-upload add would otherwise never find its data. This
+    single choke point also heals legacy dotted ``watchlist.json`` entries at load time.
     """
-    sym = str(ticker or "").strip().upper()
+    sym = str(ticker or "").strip().upper().replace(".", "-")
     if not sym:
         return None
     pivot = None

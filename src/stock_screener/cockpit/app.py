@@ -655,6 +655,12 @@ with st.sidebar:
         _tp = st.session_state.get("trade_plan")
         if _tp:
             _plan, _skip = _tp["plan"], _tp["skipped"]
+            # The account/credentials error renders for ANY built plan — a missing-creds
+            # build produces exactly the empty plan that used to hide it behind `if _plan:`
+            # (the user saw only "No tradable orders", never the actionable message).
+            _account = _tp.get("account") or {}
+            if _account.get("error"):
+                st.warning(_account["error"])
             if _plan:
                 # build_buy_plan is holdings-blind; submit sends NO buy for a held name (re-arm
                 # only). So the est-value total counts only names that actually execute as buys.
@@ -743,11 +749,9 @@ with st.sidebar:
                                f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "
                                "cushion to absorb an earnings gap, so these start "
                                "UNCHECKED — tick one to include it anyway.")
-                # Confirm WHICH account before submitting (each paper account has its own keys).
-                _account = _tp.get("account", {})
-                if _account.get("error"):
-                    st.warning(_account["error"])
-                else:
+                # Confirm WHICH account before submitting (each paper account has its own
+                # keys). The error case rendered above, outside `if _plan:`.
+                if not _account.get("error"):
                     _src = ("Minervini Trader keys" if _account.get("using_dedicated")
                             else "shared ALPACA_* keys — set ALPACA_API_KEY_MINERVINI / "
                                  "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
@@ -815,9 +819,14 @@ with st.sidebar:
         _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, best-effort
         st.markdown(f"**🔔 Trigger check — {_rep.get('date', '?')}"
                     + (f" {_hm}" if _hm else "") + "**")
+        if _rep.get("early_close"):
+            st.caption("🕐 early close (1pm ET) — half-day session; the volume gate is "
+                       "scaled ×1.86 for the short session (thin holiday tape — judge "
+                       "any trigger accordingly).")
         if _rep.get("intraday"):
-            st.caption("⏱ intraday — close/volume provisional until ~4pm; pace = volume "
-                       "so far vs expected by this time of day.")
+            _settle = "~1pm" if _rep.get("early_close") else "~4pm"
+            st.caption(f"⏱ intraday — close/volume provisional until {_settle}; pace = "
+                       "volume so far vs expected by this time of day.")
         if _rep.get("all_stale"):
             st.caption("💤 No new bar on the report date (weekend/holiday?) — "
                        "no trigger can fire from a stale bar.")

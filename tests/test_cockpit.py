@@ -686,6 +686,13 @@ def test_watchlist_entry_normalization():
     assert _coerce_entry({"ticker": "x", "judged_pivot": 5})["judged_pivot"] == 5.0
     assert _coerce_entry(42) is None and _coerce_entry(None) is None
 
+    # Item 15: dotted class shares adopt the yfinance dash convention at the make_entry
+    # choke point (so entries match scan-payload keys, and legacy dotted files heal at load).
+    from src.stock_screener.cockpit.export import watchlist_tickers
+    assert make_entry("brk.b")["ticker"] == "BRK-B"
+    assert _coerce_entry("BRK.B")["ticker"] == "BRK-B"         # legacy file entry heals
+    assert watchlist_tickers([{"ticker": "BRK.B"}, "BRK-B"]) == ["BRK-B"]   # collapse to one
+
 
 def test_watchlist_tickers_projection():
     """watchlist_tickers projects mixed dict/str input to ordered unique upper tickers."""
@@ -1400,6 +1407,42 @@ def test_trade_plan_preview_marks_held_names():
     assert "$2,500" not in rendered, rendered
 
 
+def test_trade_account_error_shown_with_empty_plan():
+    """Item 16: a missing-credentials build produces an EMPTY plan — the account error must
+    render anyway (it used to sit inside `if _plan:` and the user saw only 'No tradable
+    orders', never the actionable message)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_account_error_shown_with_empty_plan (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    _ERR = "No Alpaca credentials in .env"
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with patch.object(scanmod, "run_scan", return_value=result):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = [
+            {"ticker": "NEWX", "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""}]
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {"plan": [], "skipped": [],
+                                          "account": {"error": _ERR}, "build_ts": 1}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+
+    warnings = " ".join(str(getattr(w, "value", "")) for w in at.warning)
+    assert _ERR in warnings, f"credentials error must render with an empty plan: {warnings}"
+    rendered = " ".join(str(getattr(m, "value", ""))
+                        for m in list(at.markdown) + list(getattr(at, "caption", [])))
+    assert "No tradable orders" in rendered      # the empty-plan caption still shows too
+
+
 def test_trade_plan_buy_checkboxes_filter_submit():
     """Per-buy include/exclude checkboxes: an earnings-flagged buy starts UNCHECKED (the
     ~21-day no-fly), a clean buy starts checked, the selected-count caption tracks the
@@ -1626,6 +1669,67 @@ def test_rearm_gtc_stop_requantifies_grown_position():
     c3 = Client([_Pos("HELD", 40)], {"HELD": [_Order("n", "HELD", 110.0)]})
     r3 = {x["ticker"]: x for x in run(c3)["results"]}
     assert r3["HELD"]["status"] == "stop_kept" and not c3.submitted and not c3.cancelled
+
+
+def test_rearm_gtc_stop_restores_stop_on_failure():
+    """Item 14 (the cancel-before-place gap, re-arm side): if the replacement GTC stop is
+    rejected AFTER the old stop was cancelled, the previous stop is restored at its old
+    level for the full held qty; a failed restore says to arm one manually. Success-path
+    details/statuses are pinned by the two ratchet tests above and must not change."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.requests import StopOrderRequest
+    from alpaca.trading.enums import TimeInForce
+    Client, _Pos, _Order = _pos_fakes()
+
+    class FailFirstN(Client):
+        def __init__(self, *a, fail_n=1, **kw):
+            super().__init__(*a, **kw)
+            self._fail_n = fail_n
+
+        def submit_order(self, order_data=None):
+            if self._fail_n > 0:
+                self._fail_n -= 1
+                raise RuntimeError("rejected")
+            return super().submit_order(order_data=order_data)
+
+    def run(client, stop_price):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (client, True)
+        try:
+            return trade.rearm_stops([{"ticker": "HELD", "stop_price": stop_price,
+                                       "price": 130.0}])["results"][0]
+        finally:
+            trade._connect_paper = orig
+
+    # (A) RAISE path: replacement @95 rejected -> old stop @90 restored for the full 40.
+    cA = FailFirstN([_Pos("HELD", 40)], {"HELD": [_Order("lo", "HELD", 90.0)]}, fail_n=1)
+    rA = run(cA, 95.0)
+    assert rA["status"] == "failed" and "lo" in cA.cancelled
+    rest = [o for o in cA.submitted if isinstance(o, StopOrderRequest)]
+    assert len(rest) == 1 and int(rest[0].qty) == 40 and float(rest[0].stop_price) == 90.0
+    assert rest[0].time_in_force == TimeInForce.GTC
+    assert "previous stop restored @ 90.00" in rA["detail"] and rA["stop_price"] == 90.0
+
+    # (B) everything rejected -> loud manual-arm message, nothing successfully placed.
+    cB = FailFirstN([_Pos("HELD", 40)], {"HELD": [_Order("lo", "HELD", 90.0)]}, fail_n=99)
+    rB = run(cB, 95.0)
+    assert rB["status"] == "failed" and "arm a stop manually" in rB["detail"]
+    assert not cB.submitted
+
+    # (C) UNDER-COVER path (re-place at cur for the grown qty) rejected -> same restore.
+    cC = FailFirstN([_Pos("HELD", 40)], {"HELD": [_Order("u", "HELD", 110.0, qty=20)]},
+                    fail_n=1)
+    rC = run(cC, 95.0)                                   # 95 < 110 -> under-cover branch
+    assert rC["status"] == "failed" and "u" in cC.cancelled
+    restC = [o for o in cC.submitted if isinstance(o, StopOrderRequest)]
+    assert len(restC) == 1 and int(restC[0].qty) == 40 and float(restC[0].stop_price) == 110.0
+    assert "previous stop restored @ 110.00" in rC["detail"]
+
+    # first-arm failure (nothing cancelled) -> plain failed, no restore attempted
+    cD = FailFirstN([_Pos("HELD", 40)], {}, fail_n=99)
+    rD = run(cD, 95.0)
+    assert rD["status"] == "failed" and "restore" not in rD["detail"]
+    assert not cD.cancelled and not cD.submitted
 
 
 def test_fetch_positions_offline():
@@ -2362,11 +2466,84 @@ def test_get_many_prices_progress_labels():
                                   progress=prog)
             assert labels == [f"TODY: {_us(today)}"], labels
 
-            # (d) no cache at all -> the full-history pass
+            # (d) no cache at all AND the download fails -> honest FAILED label (item 13:
+            # a successful full fetch keeps the plain "full history (2y)" label)
             labels.clear()
             dfeed.get_many_prices(["COLD"], max_age_days=-1, pause=0, retries=0,
                                   progress=prog)
-            assert labels == ["COLD: full history (2y)"], labels
+            assert labels == ["COLD: full history (2y) FAILED (no data)"], labels
+
+
+def test_get_many_prices_full_fetch_serves_stale_cache():
+    """Item 13a: a name routed to the FULL pass (gap > max_gap_days) whose download fails
+    must fall back to its stale parquet instead of being silently dropped — without
+    re-persisting it (the mtime must not enter the fresh-serve window). A truly cold name
+    stays absent, with an honest label."""
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    today = pd.Timestamp.today().normalize()
+    idx = pd.bdate_range(end=today - pd.Timedelta(days=20), periods=30)   # gap 20 > max 10
+    stale = pd.DataFrame({"Open": [100.0] * 30, "High": [101.0] * 30, "Low": [99.0] * 30,
+                          "Close": [100.0] * 30, "Volume": [1000] * 30}, index=idx)
+    labels = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        with patch.object(dfeed, "PRICES_DIR", pdir), \
+                patch("yfinance.download", lambda *a, **kw: pd.DataFrame()):
+            stale.to_parquet(pdir / "STALE.parquet")
+            mtime = (pdir / "STALE.parquet").stat().st_mtime_ns
+            got = dfeed.get_many_prices(["STALE", "COLD"], max_age_days=-1, pause=0,
+                                        retries=0, progress=lambda d, t, s: labels.append(s))
+        assert "STALE" in got and len(got["STALE"]) == 30
+        assert float(got["STALE"]["Close"].iloc[-1]) == 100.0
+        assert "COLD" not in got
+        assert (pdir / "STALE.parquet").stat().st_mtime_ns == mtime, \
+            "stale fallback must not re-persist (mtime would enter the fresh window)"
+    by = {s.split(":")[0]: s for s in labels}
+    assert "stale cache served" in by["STALE"]
+    assert "FAILED (no data)" in by["COLD"]
+
+
+def test_get_many_prices_retries_failed_subset():
+    """Item 13b: when a batch download PARTIALLY fails (some tickers' frames missing),
+    the missing subset gets ONE retry batch before any fallback — _download_batch's own
+    retry only fires when the WHOLE batch is empty."""
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    today = pd.Timestamp.today().normalize()
+    idx = pd.bdate_range(end=today, periods=30)
+
+    def _flat(close):
+        return pd.DataFrame({"Open": close, "High": close, "Low": close,
+                             "Close": close, "Volume": [1000] * len(idx)}, index=idx)
+
+    good_multi = pd.concat({"GOOD": _flat([50.0] * 30)}, axis=1)    # group_by='ticker' shape
+    badd_flat = _flat([70.0] * 30)
+    calls = []
+
+    def fake_dl(tickers, **kw):
+        calls.append(list(tickers) if isinstance(tickers, (list, tuple)) else [tickers])
+        return good_multi if len(calls) == 1 else badd_flat
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(dfeed, "PRICES_DIR", Path(tmp)), \
+                patch("yfinance.download", fake_dl):
+            got = dfeed.get_many_prices(["GOOD", "BADD"], max_age_days=-1, pause=0,
+                                        retries=1)
+        assert len(calls) == 2, f"expected batch + one subset retry, got {calls}"
+        assert calls[1] == ["BADD"], "the retry must target only the missing subset"
+        assert "GOOD" in got and "BADD" in got
+        assert float(got["BADD"]["Close"].iloc[-1]) == 70.0
+        assert (Path(tmp) / "BADD.parquet").exists()     # retried data is persisted
 
 
 def test_run_scan_uses_topup_fetch():
@@ -2504,6 +2681,70 @@ def test_check_triggers_pure():
                           today="2026-07-13", now="2026-07-13 12:00")
     assert rep2["all_stale"] is True and rep2["summary"]["triggered"] == []
     assert rep2["intraday"] is False
+
+
+def test_early_close_calendar_and_gate():
+    """Item 17: NYSE half days (July 3 Mon-Thu, day after Thanksgiving, Dec 24 Mon-Thu).
+    The session clock shortens to 09:30-13:00 (pace divisor + intraday cutoff), and the
+    volume GATE is scaled x(390/210) so a heavy half session can still confirm — while the
+    reported ratio stays raw. Normal days are byte-identical to before."""
+    from src.stock_screener.cockpit.export import make_entry
+    from src.stock_screener.cockpit.triggers import (
+        _early_close, _intraday_cutoff_min, _session_len_min, check_one, check_triggers,
+        format_report)
+
+    # Calendar truth table (Fri Jul 3 / Dec 24 = OBSERVED full holidays, not half days).
+    for d, exp in (("2025-07-03", True), ("2026-07-03", False), ("2026-11-27", True),
+                   ("2025-11-28", True), ("2026-12-24", True), ("2027-12-24", False),
+                   ("2026-07-10", False), ("2026-11-26", False)):
+        assert _early_close(d) is exp, (d, exp)
+    assert _session_len_min("2026-11-27") == 210 and _session_len_min("2026-07-10") == 390
+    assert _intraday_cutoff_min("2026-11-27") == 13 * 60 + 5
+    assert _intraday_cutoff_min("2026-07-10") == 16 * 60 + 5
+
+    HALF = "2026-11-27"                                  # day after Thanksgiving (Friday)
+    flat = [100.0] * 60
+    even_vol = [1000] * 60                               # today's vol == prior-50 avg -> raw 1.0
+    E = make_entry("TRG", 98.0, date_added="2026-11-01", pivot_source="judged")
+
+    # Settled half day: raw 1.0 < 1.5, but scaled 1.0 x 390/210 = 1.86 >= 1.5 -> TRIGGERED.
+    r = check_one(E, _trigger_frame(HALF, flat, even_vol), None,
+                  today=HALF, now=f"{HALF} 13:30")
+    assert r["early_close"] is True
+    assert abs(r["volume_ratio_50"] - 1.0) < 1e-9        # displayed ratio stays RAW
+    assert abs(r["volume_ratio_50_scaled"] - 1.86) < 0.01
+    assert r["volume_confirmed"] is True and r["triggered"] is True, r
+    # ...and the same tape on a NORMAL Friday stays a watch (gate unscaled).
+    r_norm = check_one(E, _trigger_frame("2026-07-10", flat, even_vol), None,
+                       today="2026-07-10", now="2026-07-10 16:30")
+    assert r_norm["early_close"] is False and r_norm["volume_ratio_50_scaled"] is None
+    assert r_norm["volume_confirmed"] is False and r_norm["status"] == "watch"
+    # A genuinely quiet half day (raw 0.7 -> scaled 1.3) still fails the gate.
+    low_vol = [1000] * 59 + [700]
+    r_low = check_one(E, _trigger_frame(HALF, flat, low_vol), None,
+                      today=HALF, now=f"{HALF} 13:30")
+    assert r_low["volume_confirmed"] is False
+
+    # Pace divisor uses the 210-min session: at 11:15, 105 min in -> elapsed 0.5 -> pace 2x.
+    r_pace = check_one(E, _trigger_frame(HALF, flat, even_vol), None,
+                       today=HALF, now=f"{HALF} 11:15")
+    assert abs(r_pace["volume_pace"] - 2.0) < 1e-9
+
+    # Report-level: 13:30 on a half day is SETTLED (cutoff 13:05), 12:00 is intraday;
+    # the report carries early_close and format_report prints the scaled-gate note.
+    prices = {"TRG": _trigger_frame(HALF, flat, even_vol)}
+    rep = check_triggers([E], prices, today=HALF, now=f"{HALF} 13:30")
+    assert rep["early_close"] is True and rep["intraday"] is False
+    rep2 = check_triggers([E], prices, today=HALF, now=f"{HALF} 12:00")
+    assert rep2["intraday"] is True
+    txt = format_report(rep)
+    assert "early close (1:00 pm ET)" in txt and "x1.86" in txt
+
+    # A STALE bar on a half day never scales/fires (Wednesday's bar on Friday's run).
+    r_stale = check_one(E, _trigger_frame("2026-11-25", flat, even_vol), None,
+                        today=HALF, now=f"{HALF} 13:30")
+    assert r_stale["stale"] is True and r_stale["triggered"] is False
+    assert r_stale["volume_ratio_50_scaled"] is None
 
 
 def test_freeze_missing_pivots():

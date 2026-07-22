@@ -547,8 +547,14 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
     batched). The current in-force stop is ``max(_stop_price_of(existing))``. Returns a PARTIAL
     result dict — ``{status, detail}`` plus ``stop_price`` when a level is set — where status is
     ``"stop_only"`` (placed/raised), ``"stop_kept"`` (existing kept — a would-be lower/equal or
-    an invalid new stop) or ``"skipped"`` (no valid stop and none in force). NEVER lowers a stop:
-    it only cancels + replaces to RAISE. GTC so the stop persists across sessions."""
+    an invalid new stop), ``"skipped"`` (no valid stop and none in force) or ``"failed"``
+    (replacement rejected). NEVER lowers a stop: it only cancels + replaces to RAISE. GTC so
+    the stop persists across sessions.
+
+    Cancel-before-place is guarded (review finding #14, same pattern as
+    :func:`submit_position_sell`): if the replacement submit fails AFTER the old stop was
+    cancelled, the previous stop is RESTORED at its old level for the full held quantity —
+    the position is never silently left unprotected. A failed restore is loudly reported."""
     prices = [p for p in (_stop_price_of(od) for od in existing) if p is not None]
     cur = max(prices) if prices else None                # current stop level, if any
     new_stop = round(float(desired_stop), 2) if desired_stop else None
@@ -562,6 +568,29 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
         return {"status": "skipped",
                 "detail": "no valid stop (must be > 0 and < current price)"}
 
+    err = {}
+
+    def _try_place(level):
+        try:
+            return client.submit_order(order_data=StopOrderRequest(
+                symbol=symbol, qty=held_shares, side=OrderSide.SELL,
+                time_in_force=TimeInForce.GTC, stop_price=level,
+                client_order_id=f"SEPAstop-{symbol}-{int(time.time() * 1000)}"))
+        except Exception as e:
+            err["msg"] = str(e)
+            return None
+
+    def _failed(level, cancelled):
+        detail = f"stop placement FAILED @ {level:.2f}: {err.get('msg', '?')}"
+        out = {"status": "failed", "detail": detail}
+        if cancelled and cur is not None:                # one restore attempt, never a loop
+            if _try_place(cur) is not None:
+                out["stop_price"] = cur
+                out["detail"] += f"; previous stop restored @ {cur:.2f}"
+            else:
+                out["detail"] += "; stop restore FAILED — arm a stop manually"
+        return out
+
     # Ratchet: only replace to RAISE the stop; a lower-or-equal one is kept — UNLESS the in-force
     # stop under-covers the position (it grew via a manual pyramid buy Alpaca-side). Then re-place
     # at the SAME (never-lower) level for the full held qty so the added shares aren't left
@@ -572,22 +601,18 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
         if not (0 < covered < held_shares):
             return {"status": "stop_kept", "stop_price": cur,
                     "detail": f"kept existing stop @ {cur:.2f} — not lowering to {new_stop:.2f}"}
-        _cancel_orders(client, existing)                 # under-covered -> re-place at cur, full qty
-        req = StopOrderRequest(
-            symbol=symbol, qty=held_shares, side=OrderSide.SELL,
-            time_in_force=TimeInForce.GTC, stop_price=cur,
-            client_order_id=f"SEPAstop-{symbol}-{int(time.time() * 1000)}")
-        resp = client.submit_order(order_data=req)
+        cancelled = _cancel_orders(client, existing)     # under-covered -> re-place at cur, full qty
+        resp = _try_place(cur)
+        if resp is None:
+            return _failed(cur, cancelled)
         return {"status": "stop_only", "stop_price": cur,
                 "detail": f"GTC stop re-placed for full {held_shares} sh @ {cur:.2f} "
                           f"(was {covered} sh; id {getattr(resp, 'id', '?')})"}
 
-    _cancel_orders(client, existing)                     # replace the lower stop(s)
-    req = StopOrderRequest(
-        symbol=symbol, qty=held_shares, side=OrderSide.SELL,
-        time_in_force=TimeInForce.GTC, stop_price=new_stop,
-        client_order_id=f"SEPAstop-{symbol}-{int(time.time() * 1000)}")
-    resp = client.submit_order(order_data=req)
+    cancelled = _cancel_orders(client, existing)         # replace the lower stop(s)
+    resp = _try_place(new_stop)
+    if resp is None:
+        return _failed(new_stop, cancelled)
     verb = "raised" if cur is not None else "placed"
     detail = (f"GTC stop {verb}: SELL {held_shares} @ {new_stop:.2f} "
               f"(id {getattr(resp, 'id', '?')})")
