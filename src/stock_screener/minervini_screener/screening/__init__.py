@@ -2,12 +2,13 @@
 
 Pure rule logic (numpy/pandas only) lives in ``phase_indicators``, ``signal_engine``,
 ``benchmark`` and ``indicators`` and is re-exported below for convenience. The legacy
-DB-backed value screener (``.screener``) depends on the live data layer (SQLAlchemy,
-yfinance, ...); its import is GUARDED so the rule modules stay importable in
-environments without those extras (e.g. the backtest harness env).
+DB-backed value screener (``.screener``) is NOT imported here at all: it needs the live
+data layer (SQLAlchemy, yfinance, ...), and with those extras installed a guarded import
+silently dragged the whole dead layer into every process (~1.7s + sys.modules pollution).
+Import ``.screener`` directly if it is ever needed.
 
 NOTE (vendored — see PROVENANCE.md): modifications from the upstream MIT source are
-limited to (1) ``from src.`` -> relative imports and (2) this guard + re-exports.
+limited to (1) ``from src.`` -> relative imports and (2) this import/re-export shim.
 """
 
 # --- Pure rule logic: numpy/pandas only, always importable ------------------
@@ -56,22 +57,3 @@ __all__ = [
     "detect_volume_spike",
     "find_swing_lows",
 ]
-
-# --- Legacy value screener: needs the live data layer (SQLAlchemy). Guard so a
-#     missing extra doesn't break importing the pure rule modules above. --------
-try:
-    from .screener import (
-        calculate_value_score,
-        detect_support_levels,
-        calculate_support_score,
-        screen_candidates,
-    )
-    __all__ += [
-        "calculate_value_score",
-        "detect_support_levels",
-        "calculate_support_score",
-        "screen_candidates",
-    ]
-except ImportError:
-    # data-layer extras not installed; pure rule logic remains available.
-    pass

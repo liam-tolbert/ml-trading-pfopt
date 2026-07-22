@@ -31,7 +31,7 @@ from src.stock_screener.minervini_screener.screening import (
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
 from .indicators import (relative_measured_volatility,
-                         bollinger_bandwidth_percentile, ttm_squeeze)
+                         bollinger_bandwidth_percentile_last, ttm_squeeze)
 # Cockpit VCP detector: the vendored detect_vcp_pattern starves strong uptrends
 # (cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
 from .vcp import detect_vcp
@@ -171,6 +171,41 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
     }
 
 
+def filter_candidates(cand: Optional[pd.DataFrame], min_rs: float = 0.0,
+                      require_vcp: bool = False,
+                      min_fundamental_score: int = 0) -> pd.DataFrame:
+    """Post-scan row filters mirroring ``screen_universe``'s per-name gates EXACTLY
+    (min_rs: ``rsr is None or rsr < min_rs`` including the ``min_rs == 0`` off-switch;
+    require_vcp; min_fundamental_score). These three settings only SUBSET already-computed
+    rows, so the app scans once with the loosest gates and applies slider tweaks as
+    instant boolean masks instead of re-running the multi-minute screen (review item 18).
+    Returns a NEW frame — never mutates the memoized ScanResult (whose empty case is a
+    columnless ``pd.DataFrame()``)."""
+    if cand is None or len(cand) == 0:
+        return pd.DataFrame()
+    mask = pd.Series(True, index=cand.index)
+    if min_rs:
+        mask &= cand["rs"].notna() & (cand["rs"] >= min_rs)
+    if require_vcp:
+        mask &= cand["vcp"].astype(bool)
+    if min_fundamental_score:
+        mask &= cand["fund_score"] >= min_fundamental_score
+    return cand.loc[mask].reset_index(drop=True)
+
+
+def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
+    """The Step-4 display RMV, reusing the value ``detect_vcp`` already computed. Safe:
+    the last-bar RMV depends on at most ~60 trailing bars (a 10-bar ATR inside a 50-bar
+    min/max window), a subset of the detector's 325-bar base, so the two reads are equal
+    (the vcp copy is rounded to 1 dp — invisible at the app's whole-number display).
+    A ``_empty()`` result (dead tape / short frame) carries a sentinel ``rmv=100.0``
+    (``zz_threshold=None``); never surface that — compute the real value from ``df``."""
+    if vcp.get("zz_threshold") is not None:
+        return float(vcp["rmv"])
+    rmv_series = relative_measured_volatility(df).dropna()
+    return float(rmv_series.iloc[-1]) if len(rmv_series) else None
+
+
 def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                     spy: pd.DataFrame,
                     get_fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
@@ -231,12 +266,10 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             levels = _entry_levels(cp, breakout, stop, phase_info)
             # RMV (Relative Measured Volatility): advisory base-tightness read for Step 4.
             # Advisory only — does NOT feed the pivot/stop/target math.
-            rmv_series = relative_measured_volatility(df).dropna()
-            levels["rmv"] = float(rmv_series.iloc[-1]) if len(rmv_series) else None
+            levels["rmv"] = _rmv_display(df, vcp)
             # BBWP + TTM squeeze: Bollinger-side volatility read, an advisory cross-check on RMV.
             # BBWP low = a Bollinger squeeze; squeeze True = bands inside the Keltner channel.
-            bbwp_series = bollinger_bandwidth_percentile(df).dropna()
-            levels["bbwp"] = float(bbwp_series.iloc[-1]) if len(bbwp_series) else None
+            levels["bbwp"] = bollinger_bandwidth_percentile_last(df)
             sq = ttm_squeeze(df)
             levels["squeeze"] = bool(sq.iloc[-1]) if len(sq) else False
             # "squeeze fired": coiled within the last ~6 bars but expanding now — the

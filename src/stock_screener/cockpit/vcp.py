@@ -152,10 +152,15 @@ def _empty(reason: str) -> Dict[str, any]:
     }
 
 
-def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: float,
+def _detect_at(base: pd.DataFrame, current_price: float,
                phase_info: Dict, thr: float, min_contractions: int,
-               max_contractions: int) -> Dict[str, any]:
-    """One detection pass at a fixed ZigZag threshold; returns the full result dict."""
+               max_contractions: int, *, rmv_now: float, week_52_high: float,
+               breakout_volume_ratio: float) -> Dict[str, any]:
+    """One detection pass at a fixed ZigZag threshold; returns the full result dict.
+
+    ``rmv_now``/``week_52_high``/``breakout_volume_ratio`` are threshold-INDEPENDENT and
+    hoisted into :func:`detect_vcp` so the multi-threshold loop doesn't recompute them up
+    to 4x per ticker (they were this function's only uses of the full price frame)."""
     high = base['High'].to_numpy(dtype=float)
     low = base['Low'].to_numpy(dtype=float)
     vol = (base['Volume'].to_numpy(dtype=float) if 'Volume' in base.columns
@@ -255,23 +260,8 @@ def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: floa
     base_length_weeks = ((last_date - sel[0]['peak_date']).days / 7.0) if n else 0.0
     leg_age_weeks = ((last_date - sel[-1]['trough_date']).days / 7.0) if n else np.inf
 
-    week_52_high = phase_info.get('week_52_high') or float(price_data['High'].tail(252).max())
     dist_high = ((week_52_high - current_price) / week_52_high * 100.0) if week_52_high > 0 else 100.0
     near_high = dist_high <= NEAR_HIGH_PCT
-
-    v = price_data['Volume'] if 'Volume' in price_data.columns else pd.Series([], dtype=float)
-    if len(v) > 20:
-        avg20 = v.iloc[-21:-1].mean()
-        breakout_volume_ratio = float(v.iloc[-1] / avg20) if avg20 > 0 else 1.0
-    else:
-        breakout_volume_ratio = 1.0
-
-    # Volatility read. RMV is min-max normalized 0-100 over its lookback, so rmv_now <=
-    # RMV_TIGHT_MAX means volatility has contracted to the tight end of the base's own range.
-    # Below the pivot the base should be quiet, so RMV vetoes there; at/above the pivot a
-    # breakout is a burst of movement, so it stops vetoing and structure alone decides.
-    rmv_series = relative_measured_volatility(base).dropna()
-    rmv_now = float(rmv_series.iloc[-1]) if len(rmv_series) else 100.0
 
     pivot_price = max((c['peak_price'] for c in sel), default=None)
     below_pivot = bool(pivot_price and current_price < pivot_price)
@@ -279,6 +269,10 @@ def _detect_at(price_data: pd.DataFrame, base: pd.DataFrame, current_price: floa
                        and pivot_price * (1 - NEAR_PIVOT_BAND)
                        <= current_price
                        <= pivot_price * (1 + BUY_ZONE_PCT))
+    # RMV is min-max normalized 0-100 over its lookback, so rmv_now <= RMV_TIGHT_MAX means
+    # volatility has contracted to the tight end of the base's own range. Below the pivot
+    # the base should be quiet, so RMV vetoes there; at/above the pivot a breakout is a
+    # burst of movement, so it stops vetoing and structure alone decides.
     vol_confirms = rmv_now <= RMV_TIGHT_MAX
     rmv_ok = vol_confirms or not below_pivot
 
@@ -394,7 +388,22 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
                                                    THR_FIXED_TIGHT)},
                             reverse=True)
 
-    results = [_detect_at(price_data, base, current_price, phase_info, t,
-                          min_contractions, max_contractions) for t in candidates]
+    # Threshold-INDEPENDENT reads, hoisted out of the per-threshold loop (they were
+    # recomputed identically up to 4x per ticker in the scan's hot path).
+    week_52_high = phase_info.get('week_52_high') or float(price_data['High'].tail(252).max())
+    v = price_data['Volume'] if 'Volume' in price_data.columns else pd.Series([], dtype=float)
+    if len(v) > 20:
+        avg20 = v.iloc[-21:-1].mean()
+        breakout_volume_ratio = float(v.iloc[-1] / avg20) if avg20 > 0 else 1.0
+    else:
+        breakout_volume_ratio = 1.0
+    rmv_series = relative_measured_volatility(base).dropna()
+    rmv_now = float(rmv_series.iloc[-1]) if len(rmv_series) else 100.0
+
+    results = [_detect_at(base, current_price, phase_info, t,
+                          min_contractions, max_contractions, rmv_now=rmv_now,
+                          week_52_high=week_52_high,
+                          breakout_volume_ratio=breakout_volume_ratio)
+               for t in candidates]
     return min(results, key=lambda r: (0 if r['is_vcp'] else 1,
                                        _TIER_RANK[r['tier']], -r['vcp_quality']))

@@ -29,13 +29,19 @@ from src.stock_screener.cockpit.scan import ScanConfig, screen_universe  # noqa:
 
 
 def test_data_feed_isolated_from_vendored_data_layer():
-    """A fresh interpreter importing only cockpit.data_feed must NOT pull the vendored
-    ``minervini_screener.data`` package (whose __init__ needs SQLAlchemy)."""
+    """A fresh interpreter importing cockpit.data_feed AND cockpit.scan must NOT pull the
+    vendored ``minervini_screener.data`` package (SQLAlchemy) or the legacy ``.screener``
+    module. Item 20: the once-guarded .screener import silently succeeded when SQLAlchemy
+    was installed, dragging the whole dead layer into every cockpit process — the guard
+    block is now deleted, and this subprocess proves the full scan import chain is clean."""
     code = (
         "import sys\n"
         "import src.stock_screener.cockpit.data_feed\n"
-        "bad = [m for m in sys.modules if m == 'src.stock_screener.minervini_screener.data'"
-        " or m.startswith('src.stock_screener.minervini_screener.data.')]\n"
+        "import src.stock_screener.cockpit.scan\n"
+        "bad = [m for m in sys.modules\n"
+        "       if m == 'src.stock_screener.minervini_screener.data'\n"
+        "       or m.startswith('src.stock_screener.minervini_screener.data.')\n"
+        "       or m == 'src.stock_screener.minervini_screener.screening.screener']\n"
         "assert not bad, bad\n"
         "print('OK')\n"
     )
@@ -502,6 +508,89 @@ def test_streamlit_app_renders_offline():
             at.run()                                     # rerun -> memo hit, no replay
     assert not at.exception, f"app raised on the memoized rerun: {at.exception}"
     assert calls["n"] == 1, f"scan should run once and memoize, ran {calls['n']}x"
+
+
+def test_filter_candidates_matches_scan_gates():
+    """Item 18 parity: filtering a LOOSEST-gates scan with filter_candidates yields exactly
+    the tickers (order included) that screen_universe produces when the same gates run
+    inside the funnel — so the post-filter memo design changes nothing but speed."""
+    from src.stock_screener.cockpit.scan import filter_candidates
+
+    prices, spy, _ = _synthetic_slice()
+
+    def _fund(t):
+        # Varied fundamentals so min_fund actually splits the fixture: even-digit names
+        # score 4/4 checks, the rest have no data (score 0).
+        if t and t[-1] in "02468":
+            return {"revenue_yoy": 40.0, "eps_yoy": 60.0, "eps_yoy_prev": 50.0,
+                    "margin_trend": 1.0, "operating_margin": 25.0}
+        return None
+
+    loosest = screen_universe(list(prices), prices, spy, get_fundamentals=_fund,
+                              cfg=ScanConfig(min_rs=0.0))
+    assert len(loosest.candidates) >= 5, "fixture too small for a meaningful parity test"
+
+    cases = [dict(min_rs=r) for r in (0.0, 60.0, 70.0, 90.0, 99.0)]
+    cases += [dict(require_vcp=True), dict(min_fundamental_score=1),
+              dict(min_rs=70.0, min_fundamental_score=1)]
+    for kw in cases:
+        gated = screen_universe(list(prices), prices, spy, get_fundamentals=_fund,
+                                cfg=ScanConfig(min_rs=kw.get("min_rs", 0.0),
+                                               require_vcp=kw.get("require_vcp", False),
+                                               min_fundamental_score=kw.get(
+                                                   "min_fundamental_score", 0)))
+        post = filter_candidates(loosest.candidates, **kw)
+        g = (gated.candidates["ticker"].tolist()
+             if len(gated.candidates) else [])
+        assert (post["ticker"].tolist() if len(post) else []) == g, (kw, g)
+    # Columnless-empty edge: the memoized empty ScanResult frame has no columns.
+    import pandas as pd
+    assert len(filter_candidates(pd.DataFrame(), min_rs=70)) == 0
+    assert len(filter_candidates(None, min_rs=70)) == 0
+
+
+def test_filter_tweak_reuses_scan_memo():
+    """Item 18: moving the Min RS slider re-filters the memoized result INSTANTLY — the
+    scan body runs exactly once across all tweaks, including the toggle-back case the old
+    one-slot memo re-scanned twice on."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_filter_tweak_reuses_scan_memo (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    n_all = len(result.candidates)
+    calls = {"n": 0}
+
+    def _fake_scan(*a, **kw):
+        calls["n"] += 1
+        return result
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        with patch.object(scanmod, "run_scan", side_effect=_fake_scan), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+            rs = [s for s in at.slider if "RS" in str(getattr(s, "label", ""))]
+            assert rs, "Min RS slider not found"
+            rs[0].set_value(90).run()                     # tighten
+            assert not at.exception, f"app raised on tighten: {at.exception}"
+            n_tight = "".join(str(getattr(c, "value", "")) for c in at.caption)
+            rs[0].set_value(0).run()                      # toggle back past the original
+            assert not at.exception, f"app raised on loosen: {at.exception}"
+            n_loose = "".join(str(getattr(c, "value", "")) for c in at.caption)
+    assert calls["n"] == 1, f"filter tweaks must reuse the memo; scan ran {calls['n']}x"
+    assert f"{n_all} after filters" in n_loose, n_loose   # min_rs=0 shows everything
+    assert f"{n_all} after filters" not in n_tight        # min_rs=90 filtered some out
 
 
 def test_full_redownload_button_forces_scan():
@@ -1441,6 +1530,64 @@ def test_trade_account_error_shown_with_empty_plan():
     rendered = " ".join(str(getattr(m, "value", ""))
                         for m in list(at.markdown) + list(getattr(at, "caption", [])))
     assert "No tradable orders" in rendered      # the empty-plan caption still shows too
+
+
+def test_trade_plan_invalidated_on_events():
+    """Item 19: a built trade plan is a snapshot — a Re-scan, a watchlist mutation, or a
+    sizing change must drop it (and trade_result). A plain rerun must NOT: the four
+    seeded-plan tests rely on a plan surviving a render pass."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_plan_invalidated_on_events (AppTest unavailable: {e})")
+        return
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+
+    def _seed(at):
+        at.session_state["watchlist"] = [
+            {"ticker": "NEWX", "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""}]
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": [{"ticker": "NEWX", "shares": 10, "price": 50.0, "pivot": 50.0,
+                      "est_value": 500.0, "extended": False, "capped": False,
+                      "stop_price": 46.0, "earnings_in": None}],
+            "skipped": [], "account": {"account_number": "PA000123", "equity": 100000.0,
+                                       "using_dedicated": True}, "build_ts": 1}
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with patch.object(scanmod, "run_scan", return_value=result):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        _seed(at)
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        at.run()                                          # (a) plain rerun -> plan SURVIVES
+        assert "trade_plan" in at.session_state, "a plain rerun must not drop the plan"
+
+        rescan = [b for b in at.button if b.key == "rescan"]
+        assert rescan, "rescan button (key='rescan') not found"
+        rescan[0].click().run()                           # (b) Re-scan -> plan gone
+        assert "trade_plan" not in at.session_state, "Re-scan must invalidate the plan"
+
+        _seed(at)
+        at.run()
+        sel = [s for s in at.selectbox if s.key == "trade_mode"]
+        assert sel, "trade_mode selectbox not found"
+        sel[0].select("$ per name").run()                 # (c) sizing change -> plan gone
+        assert "trade_plan" not in at.session_state, "sizing change must invalidate the plan"
+
+        _seed(at)
+        at.run()
+        clear = [b for b in at.button
+                 if "Clear watchlist" in str(getattr(b, "label", ""))]
+        assert clear, "clear-watchlist button not found"
+        clear[0].click().run()                            # (d) watchlist mutation -> plan gone
+        assert "trade_plan" not in at.session_state, "watchlist edit must invalidate the plan"
 
 
 def test_trade_plan_buy_checkboxes_filter_submit():
@@ -3144,6 +3291,57 @@ def test_bbwp_and_squeeze_indicators():
     sq = ttm_squeeze(df)
     assert sq.dtype == bool and len(sq) == len(df)
     assert bool(sq.iloc[-1]) is True, "coiled tail should register a TTM squeeze"
+
+
+def test_bbwp_last_matches_series():
+    """Item 21: the scalar BBWP fast path equals the full rolling series' FINAL row for
+    every history length; sub-warm-up lengths yield None on both paths (band needs 20
+    bars, the percentile needs 20 band values -> first output at row 39)."""
+    import numpy as np
+    import pandas as pd
+    from src.stock_screener.cockpit.indicators import (
+        bollinger_bandwidth_percentile, bollinger_bandwidth_percentile_last)
+
+    rng = np.random.default_rng(7)
+    closes = 100 + np.cumsum(rng.normal(0, 1, 400))
+    full = pd.DataFrame({"Close": closes},
+                        index=pd.bdate_range(end="2026-07-17", periods=400))
+
+    for ln in (400, 165, 60, 45):                        # > lookback, partial, minimal
+        df = full.tail(ln)
+        last = float(bollinger_bandwidth_percentile(df).iloc[-1])
+        scalar = bollinger_bandwidth_percentile_last(df)
+        assert scalar is not None and abs(scalar - last) < 1e-12, (ln, scalar, last)
+    for ln in (30, 38):                                  # series all-NaN band -> both None
+        assert bollinger_bandwidth_percentile(full.tail(ln)).dropna().empty
+        assert bollinger_bandwidth_percentile_last(full.tail(ln)) is None
+    assert bollinger_bandwidth_percentile_last(full.tail(10)) is None     # < period
+
+
+def test_scan_rmv_display_reuses_vcp():
+    """Item 22: the scan's Step-4 RMV reuses the value detect_vcp already computed (the
+    last-bar RMV window is ~60 trailing bars, a subset of the detector's 325-bar base, so
+    the reads are equal) — and NEVER surfaces the _empty() sentinel rmv=100.0: a
+    dead-tape/short frame gets a real read computed from the full frame."""
+    import numpy as np
+    import pandas as pd
+    from src.stock_screener.cockpit.indicators import relative_measured_volatility
+    from src.stock_screener.cockpit.scan import _rmv_display
+
+    # Real detection result -> reuse the detector's (1-dp rounded) value; df untouched.
+    assert _rmv_display(None, {"zz_threshold": 0.04, "rmv": 31.4}) == 31.4
+
+    rng = np.random.default_rng(3)
+    closes = 100 + np.cumsum(rng.normal(0, 1, 400))
+    df = pd.DataFrame({"High": closes * 1.01, "Low": closes * 0.99, "Close": closes},
+                      index=pd.bdate_range(end="2026-07-17", periods=400))
+    real = float(relative_measured_volatility(df).dropna().iloc[-1])
+    got = _rmv_display(df, {"zz_threshold": None, "rmv": 100.0})   # the _empty sentinel
+    assert got is not None and abs(got - real) < 1e-12
+    # The window argument that makes the reuse safe: full-frame RMV last value == the
+    # 325-bar base's last value (rolling windows only look back ~60 bars).
+    base_last = float(relative_measured_volatility(df.tail(325)).dropna().iloc[-1])
+    assert abs(real - base_last) < 1e-9
 
 
 def test_rmv_gate_vetoes_below_pivot_only():

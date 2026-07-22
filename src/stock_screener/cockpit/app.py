@@ -26,7 +26,7 @@ from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
     watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
-from src.stock_screener.cockpit.scan import ScanConfig, run_scan  # noqa: E402
+from src.stock_screener.cockpit.scan import ScanConfig, filter_candidates, run_scan  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
     fetch_held_shares, freshen_prices, stop_is_valid, submit_buy_plan)
@@ -326,11 +326,21 @@ def _wl_persist() -> None:
     save_watchlist(cache.WATCHLIST_JSON, merged)
 
 
+def _invalidate_trade_plan() -> None:
+    """A built trade plan is a snapshot (prices, sizing, watchlist membership). Any event
+    that changes its inputs — re-scan, watchlist edit, sizing tweak — drops it so a stale
+    plan can't linger rendered and submittable (review item 19). Deliberately does NOT
+    bump trade_build_n: the next Build bumps it and re-seeds the buy/stop widget keys."""
+    st.session_state.pop("trade_plan", None)
+    st.session_state.pop("trade_result", None)
+
+
 def _wl_add(ticker: str, judged_pivot=None, note: str = "", persist: bool = True) -> None:
     entry = make_entry(ticker, judged_pivot, date_added=datetime.date.today().isoformat(),
                        pivot_source="judged" if judged_pivot else None, note=note)
     if entry and entry["ticker"] not in _wl_tickers():   # present ticker -> no-op (📌 re-freezes)
         _wl().append(entry)
+        _invalidate_trade_plan()                         # covers the picker/upload bulk adders too
         if persist:                                      # bulk adders persist ONCE at the end
             _wl_persist()
 
@@ -346,6 +356,7 @@ def _wl_freeze(ticker: str, pivot) -> None:
     ent["judged_pivot"] = probe["judged_pivot"]
     ent["date_added"] = datetime.date.today().isoformat()
     ent["pivot_source"] = "judged"
+    _invalidate_trade_plan()                             # frozen pivot feeds the plan's stops
     _wl_persist()
 
 
@@ -355,11 +366,13 @@ def _wl_remove(ticker: str) -> None:
             if (e.get("ticker") if isinstance(e, dict) else e) != ticker]
     if len(kept) != len(wl):
         st.session_state["watchlist"] = kept
+        _invalidate_trade_plan()
         _wl_persist()
 
 
 def _wl_clear() -> None:
     st.session_state["watchlist"] = []
+    _invalidate_trade_plan()
     _wl_persist()
 
 
@@ -395,21 +408,21 @@ def _wl_add_from_upload() -> None:
         f"Added {len(_wl()) - before} new ticker(s) from {getattr(up, 'name', 'the file')}.")
 
 
-def _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund, nonce,
-                 _force=False, _progress=None):
+def _cached_scan(universe, min_criteria, nonce, _force=False, _progress=None):
     # Hand-rolled SESSION-STATE memo, deliberately NOT @st.cache_data: cache_data REPLAYS any
     # st element emitted inside on every cache hit, so the in-scan progress bar died with
     # CacheReplayClosureError. A plain memo has no replay machinery, so the callback is legal.
     # `_force`/`_progress` stay OUT of the key. The body runs only on a genuine miss; Re-scan
     # pops the memo (run_scan always tops up the latest bars); `_force` is the Advanced
     # full-re-download escape hatch only.
-    key = (universe, int(min_criteria), float(min_rs), bool(require_vcp),
-           int(min_fund), int(nonce))
+    # The min_rs/require_vcp/min_fund sliders are NOT in the key: the scan runs once with the
+    # LOOSEST gates and the sliders apply as instant post-filters (`filter_candidates`) — a
+    # filter tweak used to re-run the whole multi-minute screen (review item 18).
+    key = (universe, int(min_criteria), int(nonce))
     memo = st.session_state.get("_scan_memo")
     if memo is not None and memo[0] == key:
         return memo[1]
-    cfg = ScanConfig(min_criteria=min_criteria, min_rs=float(min_rs),
-                     require_vcp=require_vcp, min_fundamental_score=min_fund)
+    cfg = ScanConfig(min_criteria=min_criteria)          # dataclass defaults = loosest gates
     res = run_scan(universe=universe, cfg=cfg, force=_force, progress=_progress)
     st.session_state["_scan_memo"] = (key, res)
     return res
@@ -458,9 +471,10 @@ if "nonce" not in st.session_state:
 # always-on incremental top-up refreshes the latest bars. (It used to pass force=True,
 # which re-downloaded the full 2y history for the whole universe on every click.)
 _force = False                       # per-run local, True only on a full-re-download click
-if st.sidebar.button("🔄 Re-scan (refresh prices)"):
+if st.sidebar.button("🔄 Re-scan (refresh prices)", key="rescan"):
     st.session_state.nonce += 1
     st.session_state.pop("_scan_memo", None)
+    _invalidate_trade_plan()                             # plan prices predate the re-scan
 # Escape hatch, tucked away so a misclick can't cost a multi-minute refetch. NOT needed
 # for newly listed tickers — a name with no cache is full-fetched automatically on any scan.
 with st.sidebar.expander("⚙ Advanced"):
@@ -473,6 +487,7 @@ with st.sidebar.expander("⚙ Advanced"):
         st.session_state.nonce += 1
         _force = True
         st.session_state.pop("_scan_memo", None)
+        _invalidate_trade_plan()
 
 # Price-fetch progress (the multi-minute part of a cold scan). On a memo hit the scan body
 # never runs, so the bar never appears; the slot is cleared right after.
@@ -503,10 +518,14 @@ def _scan_progress(done, total, label):
 
 
 with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"):
-    res = _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund,
-                       st.session_state.nonce, _force=_force, _progress=_scan_progress)
+    res = _cached_scan(universe, min_criteria, st.session_state.nonce,
+                       _force=_force, _progress=_scan_progress)
 _prog_slot.empty()
 _log_slot.empty()
+# Slider tweaks are instant: a boolean mask over the memoized result, not a re-screen.
+# The watchlist CSV export deliberately keeps the UNfiltered frame (a watchlisted name
+# keeps its decision columns regardless of slider position).
+cand_view = filter_candidates(res.candidates, min_rs, require_vcp, min_fund)
 
 # --------------------------------------------------------------------------- #
 # Sidebar — Watchlist (build by clicking ⭐ on charts / the picker; export to keep).
@@ -518,8 +537,8 @@ with st.sidebar:
     _watch = _wl()
     _watch_t = _wl_tickers()
     st.markdown(f"### ⭐ Watchlist ({len(_watch)})")
-    _all_tickers = (res.candidates["ticker"].tolist()
-                    if res.candidates is not None and len(res.candidates) else [])
+    _all_tickers = (cand_view["ticker"].tolist()
+                    if cand_view is not None and len(cand_view) else [])
     st.multiselect(
         "Add tickers", options=sorted(set(_all_tickers) | set(_watch_t)),
         key="wl_picker", on_change=_wl_add_from_picker,
@@ -584,7 +603,7 @@ with st.sidebar:
         # risk-to-stop (Minervini's sizer).
         _mode_label = st.selectbox(
             "Size each buy by", ["% of portfolio", "$ per name", "# shares", "Risk % to stop"],
-            key="trade_mode",
+            key="trade_mode", on_change=_invalidate_trade_plan,
             help="Applied to EACH watchlisted name. '% of portfolio' = that % of your Alpaca "
                  "equity per name; '$ per name' = that many dollars each; '# shares' = exactly "
                  "that many shares each; 'Risk % to stop' = size so a stop-out costs that % of "
@@ -593,22 +612,26 @@ with st.sidebar:
         if _mode_label == "% of portfolio":
             _mode = "pct"
             _amount = st.number_input("% of equity per name", min_value=0.0, value=5.0,
-                                      step=0.5, key="trade_amt_pct")
+                                      step=0.5, key="trade_amt_pct",
+                                      on_change=_invalidate_trade_plan)
             _size_note = f"{_amount:.1f}% of equity per name"
         elif _mode_label == "$ per name":
             _mode = "dollars"
             _amount = st.number_input("$ per name", min_value=0.0, value=5000.0,
-                                      step=500.0, key="trade_amt_dol")
+                                      step=500.0, key="trade_amt_dol",
+                                      on_change=_invalidate_trade_plan)
             _size_note = f"~${_amount:,.0f} per name"
         elif _mode_label == "# shares":
             _mode = "shares"
             _amount = float(st.number_input("Shares per name", min_value=0, value=100,
-                                            step=10, key="trade_amt_sh"))
+                                            step=10, key="trade_amt_sh",
+                                            on_change=_invalidate_trade_plan))
             _size_note = f"{int(_amount)} shares per name"
         else:                                    # Risk % to stop (Minervini position sizer)
             _mode = "risk"
             _amount = st.number_input("Risk % of equity per trade", min_value=0.0, value=1.0,
                                       step=0.25, key="trade_amt_risk",
+                                      on_change=_invalidate_trade_plan,
                                       help="A stop-out costs about this % of equity. Note a "
                                            "risk-sized position is roughly risk% ÷ stop-distance% "
                                            "of equity — e.g. 1% risk with an 8% stop wants a "
@@ -880,13 +903,13 @@ if not buy_ok:
                + "; ".join(reg.get("reasons", [])))
 
 st.caption(f"Scanned {res.n_scanned} names · {res.n_passed} pass the "
-           f"{min_criteria}/8 trend template"
+           f"{min_criteria}/8 trend template · {len(cand_view)} after filters"
            + (f" · {len(res.errors)} errors" if res.errors else ""))
 
 # --------------------------------------------------------------------------- #
 # Candidate table + per-name detail
 # --------------------------------------------------------------------------- #
-cand = res.candidates
+cand = cand_view
 if cand is None or len(cand) == 0:
     st.info("No candidates passed the current filters. "
             "Loosen the RS / fundamental filters, or wait for a better tape.")

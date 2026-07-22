@@ -6,6 +6,8 @@ part of the upstream Minervini screener — so it lives here rather than in the 
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
@@ -64,6 +66,26 @@ def bollinger_bandwidth_percentile(df: pd.DataFrame, period: int = 20,
         return float((x <= w[-1]).mean() * 100.0)
 
     return bandwidth.rolling(lookback, min_periods=period).apply(_pctrank, raw=True)
+
+
+def bollinger_bandwidth_percentile_last(df: pd.DataFrame, period: int = 20,
+                                        num_std: float = 2.0,
+                                        lookback: int = 126) -> Optional[float]:
+    """The FINAL value of :func:`bollinger_bandwidth_percentile`, without the per-row
+    Python rolling-apply over full history (the scan reads only ``.iloc[-1]``, so the
+    hundreds of `_pctrank` callbacks per ticker were pure waste). Bit-identical to the
+    series' last row — ``rolling(lookback, min_periods=period)`` at the final row sees
+    exactly ``tail(min(len, lookback))``. Returns ``None`` when the tail holds fewer than
+    ``period`` band values or the final one is NaN (no digging up a stale older read)."""
+    close = df["Close"]
+    sma = close.rolling(period, min_periods=period).mean()
+    std = close.rolling(period, min_periods=period).std(ddof=0)
+    bandwidth = (2.0 * num_std * std) / sma.replace(0, np.nan)
+    w = bandwidth.tail(lookback).to_numpy()
+    x = w[~np.isnan(w)] if len(w) else w
+    if len(w) == 0 or len(x) < period or np.isnan(w[-1]):
+        return None
+    return float((x <= w[-1]).mean() * 100.0)
 
 
 def bollinger_bands(df: pd.DataFrame, period: int = 20, num_std: float = 2.0):
