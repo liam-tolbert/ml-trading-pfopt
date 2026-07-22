@@ -193,6 +193,38 @@ def filter_candidates(cand: Optional[pd.DataFrame], min_rs: float = 0.0,
     return cand.loc[mask].reset_index(drop=True)
 
 
+def detect_breakout_prior_high(df: pd.DataFrame, cp: float, phase_info: Dict,
+                               vcp: Optional[Dict]) -> Dict:
+    """Cockpit wrapper around the vendored ``detect_breakout`` that makes its Base/Pivot
+    branches REACHABLE (review item 23). The vendored ``find_base_high``/``find_pivot_high``
+    windows INCLUDE the current bar while every cockpit caller passes ``cp`` = that same
+    bar's close, so ``cp > high-including-cp`` could never fire and the only reachable
+    non-VCP branch was the 50-SMA reclaim. Here the 60/20-day highs are taken over the bars
+    BEFORE today, so a genuine close above the prior base/pivot high fires with that level
+    as the breakout_level — a real base pivot for ``_entry_levels`` instead of its 52-week
+    -high fallback. Precedence mirrors the vendored order (VCP > Base > Pivot > 50-SMA/none)
+    and the phase-1/2 gate is respected; volume fields ride through from the vendored
+    result. The vendored file stays untouched (PROVENANCE) — the backtest's signal_engine
+    path deliberately keeps the old behavior."""
+    res = detect_breakout(df, cp, phase_info, vcp)
+    if res.get("is_breakout") and str(res.get("breakout_type") or "").startswith("VCP"):
+        return res                                       # top precedence — unaffected
+    if phase_info.get("phase") not in (1, 2):            # mirror the vendored phase gate
+        return res
+    close = df["Close"]
+    if len(close) < 21 or not cp:
+        return res
+    base_high = float(close.iloc[-61:-1].max()) if len(close) >= 61 else None
+    pivot_high = float(close.iloc[-21:-1].max())
+    if base_high and cp > base_high:
+        return {**res, "is_breakout": True, "breakout_level": round(base_high, 2),
+                "breakout_type": "Base Breakout"}
+    if pivot_high and cp > pivot_high and (base_high is None or pivot_high < base_high):
+        return {**res, "is_breakout": True, "breakout_level": round(pivot_high, 2),
+                "breakout_type": "Pivot Breakout"}
+    return res
+
+
 def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
     """The Step-4 display RMV, reusing the value ``detect_vcp`` already computed. Safe:
     the last-bar RMV depends on at most ~60 trailing bars (a 10-bar ATR inside a 50-bar
@@ -254,7 +286,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             if cfg.require_vcp and not vcp.get("is_vcp"):
                 continue
 
-            breakout = detect_breakout(df, cp, phase_info, vcp)
+            breakout = detect_breakout_prior_high(df, cp, phase_info, vcp)
             stop = calculate_stop_loss(df, cp, phase_info, phase_info.get("phase", 2))
 
             fund = get_fundamentals(t) if get_fundamentals else None
@@ -341,7 +373,7 @@ def _fmt(x) -> Optional[float]:
 
 # --------------------------------------------------------------------------- #
 def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
-             max_workers: int = 6, force: bool = False,
+             force: bool = False,
              progress: Optional[Callable[[int, int, str], None]] = None) -> ScanResult:
     """Live wrapper: fetch via data_feed, then screen. Fundamentals are fetched lazily
     inside the funnel (only for Step-1 passers).
@@ -365,8 +397,7 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
                 else lambda d, t, s: progress(d, t, f"Prices · {s}"))
     _p_screen = (None if progress is None
                  else lambda d, t, s: progress(d, t, f"Screening · {s}"))
-    prices = data_feed.get_many_prices(tickers, max_workers=max_workers,
-                                       force=force, max_age_days=fresh_age,
+    prices = data_feed.get_many_prices(tickers, force=force, max_age_days=fresh_age,
                                        progress=_p_fetch)
     return screen_universe(list(prices.keys()), prices, spy,
                            get_fundamentals=data_feed.get_fundamentals, cfg=cfg,

@@ -2749,7 +2749,7 @@ def test_check_triggers_pure():
     even when price+volume cleared, a stale bar never fires, below-pivot is a watch, and
     the earnings flag + summary lists come through."""
     from src.stock_screener.cockpit.export import make_entry
-    from src.stock_screener.cockpit.triggers import check_one, check_triggers
+    from src.stock_screener.cockpit.triggers import STATUSES, check_one, check_triggers
 
     TODAY = "2026-07-10"                                    # a Friday
     flat = [100.0] * 60
@@ -2817,6 +2817,9 @@ def test_check_triggers_pure():
     assert rep["all_stale"] is False and rep["date"] == TODAY
     assert rep["spy"] is not None and "phase" in rep["spy"]
     assert rep["intraday"] is True                       # fresh bar + mid-session run
+    # Item 29: STATUSES is the status vocabulary — every emitted status must come from it
+    # (a future status, e.g. §6.19's proposed "crossed", must register itself here).
+    assert all(n["status"] in STATUSES for n in rep["names"]), rep["names"]
 
     # the same report generated after the close is NOT intraday (settled bar)
     rep_eod = check_triggers(entries, prices, spy=spy, today=TODAY, now=f"{TODAY} 16:30")
@@ -2892,6 +2895,60 @@ def test_early_close_calendar_and_gate():
                         today=HALF, now=f"{HALF} 13:30")
     assert r_stale["stale"] is True and r_stale["triggered"] is False
     assert r_stale["volume_ratio_50_scaled"] is None
+
+
+def test_breakout_wrapper_fires_prior_bar_highs():
+    """Item 23: the vendored Base/Pivot branches are unreachable (their windowed highs
+    include the current bar while callers pass that bar's close). The cockpit wrapper
+    takes the highs over the PRIOR bars, so a genuine close above the old base/pivot high
+    fires with that level — while the VCP branch's precedence and the phase-1/2 gate are
+    preserved, and the vendored function itself stays byte-untouched."""
+    import pandas as pd
+    from src.stock_screener.minervini_screener.screening import detect_breakout
+    from src.stock_screener.cockpit.scan import detect_breakout_prior_high
+
+    def _frame(closes):
+        idx = pd.bdate_range(end="2026-07-17", periods=len(closes))
+        return pd.DataFrame({"Open": closes, "High": [c * 1.005 for c in closes],
+                             "Low": [c * 0.995 for c in closes], "Close": closes,
+                             "Volume": [1000] * len(closes)}, index=idx)
+
+    phase2 = {"phase": 2, "sma_50": None}
+
+    # (a) Fresh 60-day closing high: 95-flat base, final close 100. The VENDORED call
+    # cannot fire (its base high includes today's 100); the wrapper fires Base Breakout
+    # at the prior 60-bar high.
+    base = _frame([95.0] * 79 + [100.0])
+    vend = detect_breakout(base, 100.0, phase2, None)
+    assert not vend.get("is_breakout"), "vendored Base branch must still be unreachable"
+    got = got_base = detect_breakout_prior_high(base, 100.0, phase2, None)
+    assert got["is_breakout"] and got["breakout_type"] == "Base Breakout"
+    assert got["breakout_level"] == 95.0
+
+    # (b) Pivot case: an older 105 high sits inside the 60-bar window, the last 20 bars
+    # base at 95, close 100 -> above the 20-day pivot high but below the base high.
+    piv = _frame([95.0] * 30 + [105.0] + [95.0] * 48 + [100.0])
+    got2 = detect_breakout_prior_high(piv, 100.0, phase2, None)
+    assert got2["is_breakout"] and got2["breakout_type"] == "Pivot Breakout"
+    assert got2["breakout_level"] == 95.0
+
+    # (c) VCP precedence: a VCP breakout from the vendored call rides through untouched.
+    vcp = {"is_vcp": True, "contraction_count": 3,
+           "contractions": [{"peak_price": 98.0}]}
+    got3 = detect_breakout_prior_high(base, 100.0, phase2, vcp)
+    assert got3["is_breakout"] and str(got3["breakout_type"]).startswith("VCP")
+    assert got3["breakout_level"] == 98.0
+
+    # (d) The phase gate holds: same fresh high in phase 3 -> no breakout invented.
+    got4 = detect_breakout_prior_high(base, 100.0, {"phase": 3}, None)
+    assert not got4.get("is_breakout")
+
+    # (e) No breakout when the close is under the prior highs -> vendored result verbatim.
+    quiet = _frame([95.0] * 80)
+    assert detect_breakout_prior_high(quiet, 95.0, phase2, None) == \
+        detect_breakout(quiet, 95.0, phase2, None)
+
+    assert got_base.get("volume_ratio") is not None      # vendored volume fields ride along
 
 
 def test_freeze_missing_pivots():

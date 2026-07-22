@@ -22,12 +22,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-def calculate_sma(prices: pd.Series, period: int) -> pd.Series:
-    """Calculate Simple Moving Average."""
-    if len(prices) < period:
-        return pd.Series([np.nan] * len(prices), index=prices.index)
-    return prices.rolling(window=period, min_periods=period).mean()
+# VENDORED EDIT (host-repo review item 32; see PROVENANCE.md change #3): this module's
+# local calculate_sma duplicated the identical function in .indicators (which is what the
+# package __init__ exports) — the two copies could silently drift. Import-only dedup;
+# return values are identical (the .indicators copy adds a short-series log warning).
+from .indicators import calculate_sma  # noqa: E402
 
 
 def calculate_slope(series: pd.Series, periods: int = 20) -> float:

@@ -27,10 +27,10 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from src.stock_screener.minervini_screener.screening import (
-    analyze_spy_trend, calculate_stop_loss, classify_phase, detect_breakout)
+    analyze_spy_trend, calculate_stop_loss, classify_phase)
 from . import cache
 from .export import make_entry
-from .scan import _days_to_earnings, _entry_levels
+from .scan import _days_to_earnings, _entry_levels, detect_breakout_prior_high
 from .vcp import detect_vcp
 
 TRIGGER_VOL_RATIO = 1.5     # Minervini's breakout confirmation (mirrors trade.HEAVY_VOL_RATIO)
@@ -50,6 +50,8 @@ EARLY_CLOSE_LEN_MIN = 210         # NYSE half days close 13:00 -> a 09:30-13:00 
 EARLY_CLOSE_CUTOFF_MIN = 13 * 60 + 5  # ...and the bar settles ~13:05 on those days
 
 REPORT_SCHEMA = 1
+# The full per-name status vocabulary, pinned by the test suite — a new status (e.g. the
+# proposed "crossed") must be registered here or the report test fails.
 STATUSES = ("no_data", "no_pivot", "stale", "extended", "triggered", "watch")
 
 
@@ -128,7 +130,7 @@ def compute_scan_pivot(df: Optional[pd.DataFrame]) -> Optional[float]:
         cp = float(df["Close"].iloc[-1])
         phase_info = classify_phase(df, cp)
         vcp = detect_vcp(df, cp, phase_info)
-        breakout = detect_breakout(df, cp, phase_info, vcp)
+        breakout = detect_breakout_prior_high(df, cp, phase_info, vcp)
         stop = calculate_stop_loss(df, cp, phase_info, phase_info.get("phase", 2))
         pivot = _entry_levels(cp, breakout, stop, phase_info).get("pivot")
         return float(pivot) if pivot and pivot > 0 else None

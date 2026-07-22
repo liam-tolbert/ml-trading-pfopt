@@ -297,63 +297,14 @@ def _merge_incremental(cached: pd.DataFrame, new: Optional[pd.DataFrame],
 def get_prices(ticker: str, lookback: str = "2y", force: bool = False,
                max_age_days: float = 1.0, incremental: bool = True,
                overlap_days: int = 5, max_gap_days: int = 10) -> Optional[pd.DataFrame]:
-    """Daily OHLCV (auto-adjusted) for one name, parquet-cached and age-refreshed. When a
-    recent cache exists, only the bars since its last date are fetched and appended."""
-    ensure_dirs()
+    """Daily OHLCV (auto-adjusted) for one name — a thin wrapper over
+    :func:`get_many_prices`, which owns the whole cache/incremental/re-baseline pipeline
+    (this used to duplicate ~50 lines of it for the one SPY caller; the wrapper also
+    inherits the batch path's retry and stale-cache fallback)."""
     sym = normalize(ticker)
-    path = PRICES_DIR / f"{sym}.parquet"
-    if not force and age_days(path) <= max_age_days:
-        try:
-            return pd.read_parquet(path)
-        except Exception:
-            pass
-    import yfinance as yf
-
-    # Incremental: fetch only bars since the last cached date (small recent gap only).
-    if not force and incremental and path.exists():
-        try:
-            cached = pd.read_parquet(path)
-        except Exception:
-            cached = None
-        if cached is not None and len(cached):
-            last = pd.Timestamp(cached.index[-1]).normalize()
-            gap = (pd.Timestamp.today().normalize() - last).days
-            if 0 <= gap <= max_gap_days:
-                start = (last - pd.Timedelta(days=overlap_days)).strftime("%Y-%m-%d")
-                try:
-                    raw = yf.download(sym, start=start, interval="1d", auto_adjust=True,
-                                      progress=False, threads=False)
-                except Exception:
-                    raw = None
-                new = _clean_prices(raw)
-                merged, needs_full = _merge_incremental(cached, new, lookback)
-                if not needs_full:
-                    if new is not None and len(new):    # only persist when we got data
-                        try:
-                            merged.to_parquet(path)
-                        except Exception:
-                            pass
-                    return merged
-                # needs_full -> fall through to a full re-baseline fetch below
-
-    try:
-        raw = yf.download(sym, period=lookback, interval="1d",
-                          auto_adjust=True, progress=False, threads=False)
-    except Exception:
-        raw = None
-    df = _clean_prices(raw)
-    if df is None:                                      # network/empty -> stale cache
-        if path.exists():
-            try:
-                return pd.read_parquet(path)
-            except Exception:
-                return None
-        return None
-    try:
-        df.to_parquet(path)
-    except Exception:
-        pass
-    return df
+    return get_many_prices([sym], lookback=lookback, force=force,
+                           max_age_days=max_age_days, incremental=incremental,
+                           overlap_days=overlap_days, max_gap_days=max_gap_days).get(sym)
 
 
 def _fmt_us(ts) -> str:
@@ -389,7 +340,7 @@ def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
 
 def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = False,
                     max_age_days: float = 1.0,
-                    chunk: int = 100, max_workers: int = 6,  # max_workers kept for API compat
+                    chunk: int = 100,
                     pause: float = 0.5, retries: int = 2, incremental: bool = True,
                     overlap_days: int = 5, max_gap_days: int = 10,
                     progress: Optional[Callable[[int, int, str], None]] = None

@@ -442,21 +442,13 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
         "4. **Step 3:** click a row and *judge the VCP yourself* on the chart.\n"
         "5. **Step 4:** if it breaks out on volume, use the advisory entry/stop/size.\n\n"
         "Each section has its own **ℹ️** button. Full details on the **SEPA Guide** page.")
-# TESTING: sp500 / tickers universes disabled — full_us only (restore the list to re-enable).
-universe = st.sidebar.selectbox(
-    "Universe", ["full_us"], index=0,
-    # ["sp500", "full_us", "tickers"], index=0,
-    format_func=lambda k: {
-        "sp500": "S&P 500 (fast)",
-        "full_us": "All US common stocks (~3–4k · slow first scan)",
-        "tickers": "My tickers.txt",
-    }[k],
-    help="full_us = broad US common-stock universe from Nasdaq/NYSE listings (~3–4k names; "
-         "the FIRST cold scan pulls thousands of price histories and can take several "
-         "minutes — later scans reuse the cache and only fetch new days).")
-if universe == "full_us":
-    st.sidebar.caption("⏳ First full_us scan pulls ~3–4k price histories (several minutes). "
-                       "Later scans use the cache and fetch only new days.")
+# The app scans the full US common-stock universe, period — the old sp500/tickers picker
+# was TESTING scaffolding hardwired to one option. The sp500/tickers fetchers remain in
+# data_feed as offline fallbacks and programmatic run_scan(universe=...) options.
+universe = "full_us"
+st.sidebar.caption("Universe: **all US common stocks** (~3–4k names from Nasdaq/NYSE "
+                   "listings). ⏳ The first cold scan pulls every price history (several "
+                   "minutes); later scans use the cache and fetch only new days.")
 min_criteria = 8  # full Minervini trend template — all 8 criteria required (no 7/8)
 st.sidebar.caption("Gate: full **8/8** trend template")
 min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,

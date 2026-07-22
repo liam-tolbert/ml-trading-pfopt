@@ -28,7 +28,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from .indicators import relative_measured_volatility
+from .indicators import relative_measured_volatility, true_range_pct
 
 # --- Tunables (calibrated against the live full_us funnel + the 200-chart benchmark) --- #
 ZZ_THRESHOLD = 0.04        # fallback ZigZag reversal size (used when the adaptive estimate
@@ -119,14 +119,6 @@ def _zigzag_pivots(high: np.ndarray, low: np.ndarray, thr: float) -> List[tuple]
     return piv
 
 
-def _true_range_pct(df: pd.DataFrame) -> pd.Series:
-    """Per-bar true range as a fraction of the close (scale-free volatility)."""
-    high, low, close = df['High'], df['Low'], df['Close']
-    prev = close.shift()
-    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
-    return tr / close.replace(0, np.nan)
-
-
 def _adaptive_threshold(base: pd.DataFrame) -> float:
     """Scale the ZigZag reversal size to the stock's *own* volatility.
 
@@ -135,7 +127,7 @@ def _adaptive_threshold(base: pd.DataFrame) -> float:
     We use median true-range% over the base — the same scale-free volatility RMV is built on —
     so ``thr`` floats with the stock instead of being a magic 0.04. Clipped to [THR_MIN, THR_MAX].
     """
-    trp = _true_range_pct(base).rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
+    trp = true_range_pct(base).rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
     med = float(np.nanmedian(trp.to_numpy())) if len(trp) else np.nan
     if not np.isfinite(med) or med <= 0:
         return ZZ_THRESHOLD
@@ -377,7 +369,7 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     else:
         # Dead tape (threshold-independent): a stock pinned flat for months has no swings to
         # contract. Median daily true-range% below DEAD_TAPE_MEDIAN_TR can't be a live setup.
-        med_tr = float(np.nanmedian(_true_range_pct(base).tail(DEAD_TAPE_BARS).to_numpy()))
+        med_tr = float(np.nanmedian(true_range_pct(base).tail(DEAD_TAPE_BARS).to_numpy()))
         if np.isfinite(med_tr) and med_tr < DEAD_TAPE_MEDIAN_TR:
             return _empty(f'Dead tape: median daily range {med_tr * 100:.2f}% '
                           f'over the last {DEAD_TAPE_BARS} sessions')

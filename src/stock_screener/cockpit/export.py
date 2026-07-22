@@ -19,7 +19,6 @@ from typing import Dict, List, Optional, Sequence
 
 import pandas as pd
 
-WATCHLIST_KEYS = ("ticker", "judged_pivot", "date_added", "pivot_source", "note")
 PIVOT_SOURCES = ("judged", "auto")
 
 

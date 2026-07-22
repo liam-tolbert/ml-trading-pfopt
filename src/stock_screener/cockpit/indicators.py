@@ -12,6 +12,23 @@ import numpy as np
 import pandas as pd
 
 
+def _true_range(df: pd.DataFrame) -> pd.Series:
+    """Raw true range per bar: max of (H-L, |H-prev C|, |L-prev C|). PRICE units — the
+    Keltner ATR in :func:`ttm_squeeze` needs it unscaled; use :func:`true_range_pct` for
+    the scale-free variant."""
+    high, low, close = df["High"], df["Low"], df["Close"]
+    prev = close.shift()
+    return pd.concat([high - low, (high - prev).abs(), (low - prev).abs()],
+                     axis=1).max(axis=1)
+
+
+def true_range_pct(df: pd.DataFrame) -> pd.Series:
+    """True range as a FRACTION of price (scale-free across a $10 and a $500 stock).
+    Shared by RMV here and vcp.py's adaptive-threshold / dead-tape reads — one source of
+    truth for the TR% convention (zero closes -> NaN, never a division blow-up)."""
+    return _true_range(df) / df["Close"].replace(0, np.nan)
+
+
 def relative_measured_volatility(df: pd.DataFrame, atr_period: int = 10,
                                  lookback: int = 50) -> pd.Series:
     """Deepvue-style RMV: current volatility vs its own recent range, 0-100 (low = tight).
@@ -28,13 +45,7 @@ def relative_measured_volatility(df: pd.DataFrame, atr_period: int = 10,
 
     Returns a Series aligned to ``df`` (NaN until enough history exists).
     """
-    high, low, close = df["High"], df["Low"], df["Close"]
-    prev = close.shift()
-    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()],
-                   axis=1).max(axis=1)
-    # True range as a fraction of price, so a drifting price level doesn't read as volatility.
-    trp = tr / close.replace(0, np.nan)
-    vol = trp.rolling(atr_period, min_periods=atr_period).mean()
+    vol = true_range_pct(df).rolling(atr_period, min_periods=atr_period).mean()
     lo = vol.rolling(lookback, min_periods=atr_period).min()
     hi = vol.rolling(lookback, min_periods=atr_period).max()
     span = hi - lo
@@ -54,10 +65,8 @@ def bollinger_bandwidth_percentile(df: pd.DataFrame, period: int = 20,
 
     Returns a Series aligned to ``df`` (NaN until enough history exists).
     """
-    close = df["Close"]
-    sma = close.rolling(period, min_periods=period).mean()
-    std = close.rolling(period, min_periods=period).std(ddof=0)
-    bandwidth = (2.0 * num_std * std) / sma.replace(0, np.nan)
+    upper, mid, lower = bollinger_bands(df, period, num_std)
+    bandwidth = (upper - lower) / mid.replace(0, np.nan)
 
     def _pctrank(w: np.ndarray) -> float:
         x = w[~np.isnan(w)]
@@ -77,10 +86,8 @@ def bollinger_bandwidth_percentile_last(df: pd.DataFrame, period: int = 20,
     series' last row — ``rolling(lookback, min_periods=period)`` at the final row sees
     exactly ``tail(min(len, lookback))``. Returns ``None`` when the tail holds fewer than
     ``period`` band values or the final one is NaN (no digging up a stale older read)."""
-    close = df["Close"]
-    sma = close.rolling(period, min_periods=period).mean()
-    std = close.rolling(period, min_periods=period).std(ddof=0)
-    bandwidth = (2.0 * num_std * std) / sma.replace(0, np.nan)
+    upper, mid, lower = bollinger_bands(df, period, num_std)
+    bandwidth = (upper - lower) / mid.replace(0, np.nan)
     w = bandwidth.tail(lookback).to_numpy()
     x = w[~np.isnan(w)] if len(w) else w
     if len(w) == 0 or len(x) < period or np.isnan(w[-1]):
@@ -112,15 +119,12 @@ def ttm_squeeze(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.0,
 
     Returns a boolean Series aligned to ``df`` (False during warm-up).
     """
-    high, low, close = df["High"], df["Low"], df["Close"]
-    sma = close.rolling(bb_period, min_periods=bb_period).mean()
-    std = close.rolling(bb_period, min_periods=bb_period).std(ddof=0)
-    bb_upper, bb_lower = sma + bb_std * std, sma - bb_std * std
+    close = df["Close"]
+    bb_upper, _mid, bb_lower = bollinger_bands(df, bb_period, bb_std)
 
-    prev = close.shift()
-    tr = pd.concat([high - low, (high - prev).abs(), (low - prev).abs()],
-                   axis=1).max(axis=1)
-    atr = tr.rolling(kc_period, min_periods=kc_period).mean()
+    # RAW true range (price units) — the Keltner band is an absolute envelope, unlike the
+    # scale-free TR% that RMV/vcp use.
+    atr = _true_range(df).rolling(kc_period, min_periods=kc_period).mean()
     ema = close.ewm(span=kc_period, adjust=False, min_periods=kc_period).mean()
     kc_upper, kc_lower = ema + kc_mult * atr, ema - kc_mult * atr
 
