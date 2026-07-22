@@ -376,14 +376,27 @@ def _wl_clear() -> None:
     _wl_persist()
 
 
-def _wl_add_from_picker() -> None:
-    """Merge the bulk-add multiselect's picks into the watchlist, then clear the picker
-    (resetting a widget's value is allowed inside its own on_change callback)."""
-    before = len(_wl())
-    for t in st.session_state.get("wl_picker", []):
-        _wl_add(t, persist=False)                        # persist once below, not per pick
-    st.session_state["wl_picker"] = []
-    if len(_wl()) != before:
+def _wl_sync_from_picker() -> None:
+    """The watchlist multiselect is CONTROLLED — its selected pills ARE the watchlist
+    (the page re-seeds the widget from the list every run, so ⭐/📌/upload/EOD-merge
+    changes always show). This on_change syncs the other direction: a new pick becomes an
+    unfrozen entry (the EOD check auto-freezes it), and a pill dismissed via its × drops
+    the entry AND its frozen pivot (a later re-add auto-freezes at the CURRENT pivot)."""
+    picked = list(st.session_state.get("wl_picker", []))
+    have = set(_wl_tickers())
+    changed = False
+    for t in picked:
+        if t not in have:
+            _wl_add(t, persist=False)                    # persist once below, not per pick
+            changed = True
+    keep = set(picked)
+    kept = [e for e in _wl()
+            if (e.get("ticker") if isinstance(e, dict) else e) in keep]
+    if len(kept) != len(_wl()):
+        st.session_state["watchlist"] = kept
+        _invalidate_trade_plan()
+        changed = True
+    if changed:
         _wl_persist()
 
 
@@ -531,13 +544,19 @@ with st.sidebar:
     st.markdown(f"### ⭐ Watchlist ({len(_watch)})")
     _all_tickers = (cand_view["ticker"].tolist()
                     if cand_view is not None and len(cand_view) else [])
+    # CONTROLLED widget: the selected pills ARE the watchlist (× on a pill removes the
+    # entry — the box works like the uploader's). Re-seeded from the list every run so
+    # changes made elsewhere (⭐ add, 📌, .txt upload, the EOD job's auto-freeze merge)
+    # always show; the on_change syncs picks/dismissals back into the saved list.
+    st.session_state["wl_picker"] = _watch_t
     st.multiselect(
-        "Add tickers", options=sorted(set(_all_tickers) | set(_watch_t)),
-        key="wl_picker", on_change=_wl_add_from_picker,
+        "Watchlist tickers", options=sorted(set(_all_tickers) | set(_watch_t)),
+        key="wl_picker", on_change=_wl_sync_from_picker,
         placeholder="Pick tickers to add…",
-        help="Add several at once, or click the ⭐ button next to any chart. The list is "
-             "saved automatically and persists between sessions; the downloads below give "
-             "you a portable copy.")
+        help="Pick to add; click a pill's × to remove — removing forgets the frozen 📌 "
+             "pivot (a re-add auto-freezes at the CURRENT scan pivot, not the old level). "
+             "The ⭐ button next to any chart adds too. Saved automatically; persists "
+             "between sessions; the downloads below give you a portable copy.")
     st.file_uploader(
         "Upload tickers (.txt)", type=["txt"], key="wl_upload",
         on_change=_wl_add_from_upload,

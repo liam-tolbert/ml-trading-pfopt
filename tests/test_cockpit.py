@@ -631,6 +631,71 @@ def test_full_redownload_button_forces_scan():
     assert forces == [False, True], f"full re-download must re-scan with force=True, got {forces}"
 
 
+def test_watchlist_picker_pills_sync():
+    """The watchlist multiselect is CONTROLLED: its pills ARE the watchlist. The widget
+    seeds from the list every run (a STALE name absent from the scan still shows and is
+    removable — the chart toggle can never reach one); dismissing a pill removes the entry
+    (persisted, plan invalidated, survivor's frozen pivot intact); picking a new option
+    adds an unfrozen entry."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_watchlist_picker_pills_sync (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    from src.stock_screener.cockpit.export import load_watchlist
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    keep_t = result.candidates["ticker"].iloc[0]          # a real scanned name to keep
+    add_t = result.candidates["ticker"].iloc[1]           # a scanned name to add later
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        wl_path = Path(_tmp) / "watchlist.json"
+        with patch.object(scanmod, "run_scan", return_value=result), \
+                patch.object(cache, "WATCHLIST_JSON", wl_path), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.session_state["watchlist"] = [
+                {"ticker": keep_t, "judged_pivot": 55.5, "date_added": "2026-07-20",
+                 "pivot_source": "judged", "note": ""},
+                {"ticker": "GONEX", "judged_pivot": 12.0, "date_added": "2026-07-20",
+                 "pivot_source": "auto", "note": ""}]     # STALE: not in the scan at all
+            at.session_state["trade_build_n"] = 1
+            at.session_state["trade_plan"] = {"plan": [], "skipped": [],
+                                              "account": {}, "build_ts": 1}
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+
+            pick = [m for m in at.multiselect if m.key == "wl_picker"]
+            assert pick, "watchlist picker not rendered"
+            assert list(pick[0].value) == [keep_t, "GONEX"], \
+                "pills must seed from the watchlist (stale names included)"
+            assert "GONEX" in pick[0].options
+
+            # Dismiss the stale pill -> removed everywhere, survivor's pivot intact.
+            pick[0].set_value([keep_t]).run()
+            assert not at.exception, f"app raised on pill dismiss: {at.exception}"
+            tickers = [e["ticker"] for e in at.session_state["watchlist"]]
+            assert tickers == [keep_t], f"GONEX should be gone, got {tickers}"
+            assert at.session_state["watchlist"][0]["judged_pivot"] == 55.5
+            assert "trade_plan" not in at.session_state    # removal invalidates the plan
+            assert [e["ticker"] for e in load_watchlist(wl_path)] == [keep_t]
+
+            # Pick a new option -> added as an unfrozen entry and persisted.
+            pick = [m for m in at.multiselect if m.key == "wl_picker"]
+            pick[0].set_value([keep_t, add_t]).run()
+            assert not at.exception, f"app raised on pill add: {at.exception}"
+            by = {e["ticker"]: e for e in at.session_state["watchlist"]}
+            assert set(by) == {keep_t, add_t}
+            assert by[add_t]["judged_pivot"] is None       # picker adds are unfrozen
+            assert set(e["ticker"] for e in load_watchlist(wl_path)) == {keep_t, add_t}
+
+
 def test_watchlist_export_helpers():
     """The watchlist CSV builders: the decision list keeps user order and never drops a
     picked ticker (stale ones survive as ticker-only rows); the OHLCV dump stacks every
@@ -1414,15 +1479,19 @@ def test_trade_plan_preview_renders_stop_controls():
     except Exception as e:
         print(f"  SKIP test_trade_plan_preview_renders_stop_controls (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit import scan as scanmod, cache
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    with patch.object(scanmod, "run_scan", return_value=result):
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(app_path, default_timeout=60)
         at.session_state["watchlist"] = [                # non-empty -> trade section renders
             {"ticker": "AAA", "judged_pivot": None, "date_added": None,
@@ -1456,15 +1525,19 @@ def test_trade_plan_preview_marks_held_names():
     except Exception as e:
         print(f"  SKIP test_trade_plan_preview_marks_held_names (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit import scan as scanmod, cache
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    with patch.object(scanmod, "run_scan", return_value=result):
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(app_path, default_timeout=60)
         at.session_state["watchlist"] = [
             {"ticker": "NEWX", "judged_pivot": None, "date_added": None,
@@ -1505,16 +1578,20 @@ def test_trade_account_error_shown_with_empty_plan():
     except Exception as e:
         print(f"  SKIP test_trade_account_error_shown_with_empty_plan (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit import scan as scanmod, cache
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
     _ERR = "No Alpaca credentials in .env"
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    with patch.object(scanmod, "run_scan", return_value=result):
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(app_path, default_timeout=60)
         at.session_state["watchlist"] = [
             {"ticker": "NEWX", "judged_pivot": None, "date_added": None,
@@ -1541,9 +1618,10 @@ def test_trade_plan_invalidated_on_events():
     except Exception as e:
         print(f"  SKIP test_trade_plan_invalidated_on_events (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit import scan as scanmod, cache
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
@@ -1561,7 +1639,12 @@ def test_trade_plan_invalidated_on_events():
                                        "using_dedicated": True}, "build_ts": 1}
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    with patch.object(scanmod, "run_scan", return_value=result):
+    # WATCHLIST_JSON MUST be patched: scenario (d) clicks Clear-watchlist, which PERSISTS —
+    # an unpatched run wipes the user's real data/cockpit/watchlist.json (it did, once).
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(app_path, default_timeout=60)
         _seed(at)
         at.run()
@@ -1599,9 +1682,10 @@ def test_trade_plan_buy_checkboxes_filter_submit():
     except Exception as e:
         print(f"  SKIP test_trade_plan_buy_checkboxes_filter_submit (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod, trade as tradmod
+    from src.stock_screener.cockpit import scan as scanmod, trade as tradmod, cache
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
@@ -1619,8 +1703,11 @@ def test_trade_plan_buy_checkboxes_filter_submit():
                 "stop_price": 46.0, "earnings_in": earnings_in}
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    with patch.object(scanmod, "run_scan", return_value=result), \
-            patch.object(tradmod, "submit_buy_plan", _fake_submit):
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(tradmod, "submit_buy_plan", _fake_submit), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(app_path, default_timeout=60)
         at.session_state["watchlist"] = [
             {"ticker": t, "judged_pivot": None, "date_added": None,
