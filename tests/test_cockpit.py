@@ -484,8 +484,12 @@ def test_streamlit_app_renders_offline():
     def _fake_scan(*a, progress=None, **kw):
         calls["n"] += 1
         if progress:
+            # Price-phase labels carry the per-ticker download detail (drives the scrolling
+            # download-log slot); the screening phase exercises the log's skip branch.
             for i in (1, 20, 40):
-                progress(i, 40, "SYN")
+                progress(i, 40, "Prices · SYN: full history (2y)")
+            for i in (1, 40):
+                progress(i, 40, "Screening · SYN")
         return result
 
     with tempfile.TemporaryDirectory() as _tmp:
@@ -2302,15 +2306,79 @@ def test_incremental_price_cache_appends_delta():
     assert full4 is True, "divergence across settled prior days must still re-baseline"
 
 
+def test_get_many_prices_progress_labels():
+    """Download-transparency labels through the progress callback: 'SYM: cached (fresh)' for
+    a fresh-cache serve, 'SYM: M/D/YYYY - M/D/YYYY' (missing-days range) for an incremental
+    top-up, a single 'SYM: M/D/YYYY' when only today's bar needs refreshing, and
+    'SYM: full history (2y)' for a cold name. Offline (empty fake yfinance)."""
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    def _ohlcv(idx, close):
+        return pd.DataFrame({"Open": close, "High": [c + 1 for c in close],
+                             "Low": [c - 1 for c in close], "Close": close,
+                             "Volume": [1000] * len(idx)}, index=pd.DatetimeIndex(idx))
+
+    today = pd.Timestamp.today().normalize()
+
+    def _us(d):
+        return f"{d.month}/{d.day}/{d.year}"
+
+    labels = []
+
+    def prog(done, total, label):
+        labels.append(label)
+
+    fake_empty = lambda *a, **kw: pd.DataFrame()          # noqa: E731 — download "fails"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        with patch.object(dfeed, "PRICES_DIR", pdir), patch("yfinance.download", fake_empty):
+            # (a) fresh cache (mtime = now) under max_age_days=7 -> served, no fetch
+            fresh_idx = pd.bdate_range(end=today, periods=15)
+            _ohlcv(fresh_idx, [100.0] * 15).to_parquet(pdir / "FRESH.parquet")
+            labels.clear()
+            dfeed.get_many_prices(["FRESH"], max_age_days=7.0, pause=0, retries=0,
+                                  progress=prog)
+            assert labels == ["FRESH: cached (fresh)"], labels
+
+            # (b) cache with a gap -> incremental; label = the missing-days range
+            gap_idx = pd.bdate_range(end=today - pd.Timedelta(days=4), periods=15)
+            _ohlcv(gap_idx, [100.0] * 15).to_parquet(pdir / "GAPPY.parquet")
+            last = gap_idx[-1]
+            labels.clear()
+            dfeed.get_many_prices(["GAPPY"], max_age_days=-1, pause=0, retries=0,
+                                  progress=prog)
+            exp = f"GAPPY: {_us(last + pd.Timedelta(days=1))} - {_us(today)}"
+            assert labels == [exp], (labels, exp)
+
+            # (c) cache already ends TODAY (provisional bar) -> single-date refresh label
+            _ohlcv(fresh_idx, [100.0] * 15).to_parquet(pdir / "TODY.parquet")
+            labels.clear()
+            dfeed.get_many_prices(["TODY"], max_age_days=-1, pause=0, retries=0,
+                                  progress=prog)
+            assert labels == [f"TODY: {_us(today)}"], labels
+
+            # (d) no cache at all -> the full-history pass
+            labels.clear()
+            dfeed.get_many_prices(["COLD"], max_age_days=-1, pause=0, retries=0,
+                                  progress=prog)
+            assert labels == ["COLD: full history (2y)"], labels
+
+
 def test_run_scan_uses_topup_fetch():
-    """run_scan routes ALL price fetches (universe + SPY) through the incremental top-up
-    (max_age_days=0.0): a cache holding today's bar re-fetches just the latest bars, a
-    cache from an earlier day fetches only the missing days, and only cold names pay the
-    full 2y download. force is not passed by the app's Re-scan anymore (top-up instead)."""
+    """run_scan routes ALL price fetches (universe + SPY) through the incremental top-up,
+    gated by a 30-minute freshness window (a cache fetched within PRICE_FRESH_MINUTES is
+    served as-is — reopening the app minutes later costs zero network). Older caches fetch
+    only their missing days; only cold names pay the full 2y download. force is not passed
+    by the app's Re-scan anymore (top-up instead)."""
     from unittest.mock import patch
 
     from src.stock_screener.cockpit import data_feed as dfeed
-    from src.stock_screener.cockpit.scan import run_scan
+    from src.stock_screener.cockpit.scan import PRICE_FRESH_MINUTES, run_scan
 
     TODAY = "2026-07-10"
     frame = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)])
@@ -2330,8 +2398,11 @@ def test_run_scan_uses_topup_fetch():
             patch.object(dfeed, "get_many_prices", fake_many), \
             patch.object(dfeed, "get_fundamentals", lambda t, **kw: None):
         run_scan(universe="full_us")
-    assert seen["many"].get("max_age_days") == 0.0, "universe fetch must use the top-up path"
-    assert seen["spy"].get("max_age_days") == 0.0, "SPY fetch must use the top-up path"
+    assert PRICE_FRESH_MINUTES == 30                     # the user-chosen freshness window
+    _exp = PRICE_FRESH_MINUTES / (24.0 * 60.0)
+    assert seen["many"].get("max_age_days") == _exp, \
+        "universe fetch must use the top-up path with the 30-min freshness window"
+    assert seen["spy"].get("max_age_days") == _exp, "SPY fetch must match"
     assert not seen["many"].get("force") and not seen["spy"].get("force")
 
 

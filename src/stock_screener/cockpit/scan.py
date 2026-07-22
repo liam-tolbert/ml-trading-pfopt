@@ -40,6 +40,11 @@ from .vcp import detect_vcp
 # stop this far below the pivot so a price-anchored engine stop can't breach max-loss.
 MAX_STOP_FROM_PIVOT = 0.10
 
+# Price caches fetched within this window are served AS-IS by a scan — reopening the app or
+# clicking Re-scan minutes after the last fetch costs zero network calls. Anything older goes
+# through the incremental top-up. The Advanced full re-download (force=True) bypasses it.
+PRICE_FRESH_MINUTES = 30
+
 
 @dataclass
 class ScanConfig:
@@ -308,14 +313,17 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     """Live wrapper: fetch via data_feed, then screen. Fundamentals are fetched lazily
     inside the funnel (only for Step-1 passers).
 
-    Prices always go through the cheap incremental top-up (``max_age_days=0.0``): a cache
-    that already has today's bar re-fetches just the latest bars; a cache last written on
-    an earlier day fetches only the missing days; only cold names (or a genuine
+    Price caches fetched within the last ``PRICE_FRESH_MINUTES`` are served as-is (no
+    network); anything older goes through the cheap incremental top-up: a cache that
+    already has today's bar re-fetches just the latest bars; a cache last written on an
+    earlier day fetches only the missing days; only cold names (or a genuine
     split/dividend re-baseline) pay the full 2y download. ``force=True`` is the explicit
-    full-re-download escape hatch (the app's Advanced ⟳ button)."""
+    full-re-download escape hatch (the app's Advanced ⟳ button) and bypasses the
+    freshness window too."""
     from . import data_feed
+    fresh_age = PRICE_FRESH_MINUTES / (24.0 * 60.0)
     tickers = data_feed.get_universe(universe, force=force)
-    spy = data_feed.get_spy(force=force, max_age_days=0.0)
+    spy = data_feed.get_spy(force=force, max_age_days=fresh_age)
     if spy is None or len(spy) < 200:
         raise RuntimeError("Could not fetch SPY benchmark data (needed for RS/regime).")
     # Two sequential progress phases share one (done, total, label) callback; the label
@@ -325,7 +333,8 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     _p_screen = (None if progress is None
                  else lambda d, t, s: progress(d, t, f"Screening · {s}"))
     prices = data_feed.get_many_prices(tickers, max_workers=max_workers,
-                                       force=force, max_age_days=0.0, progress=_p_fetch)
+                                       force=force, max_age_days=fresh_age,
+                                       progress=_p_fetch)
     return screen_universe(list(prices.keys()), prices, spy,
                            get_fundamentals=data_feed.get_fundamentals, cfg=cfg,
                            progress=_p_screen)

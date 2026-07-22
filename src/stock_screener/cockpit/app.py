@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import sys
+from collections import deque
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -476,16 +477,27 @@ with st.sidebar.expander("⚙ Advanced"):
 # Price-fetch progress (the multi-minute part of a cold scan). On a memo hit the scan body
 # never runs, so the bar never appears; the slot is cleared right after.
 _prog_slot = st.empty()
+# Scrolling per-ticker download log under the bar ("Downloading AAPL: 7/20/2026 - 7/22/2026"
+# / "full history (2y)" / "cached (fresh)") — the detail rides in from get_many_prices
+# through the progress label ("Prices · SYM: detail"), so the fetch phase shows exactly
+# what each name is costing instead of just a ticker count.
+_log_slot = st.empty()
+_dl_tail = deque(maxlen=14)                       # the visible window of the log
+_dl_n = {"i": 0}
 
 
 def _scan_progress(done, total, label):
-    # `label` arrives phase-prefixed from run_scan ("Prices · AAPL" / "Screening · AAPL");
-    # the bar walks 0→100% once per phase. Throttled: one repaint per ~25 names.
-    if done % 25 and done != total:
-        return
+    # `label` arrives phase-prefixed from run_scan ("Prices · AAPL: …" / "Screening · AAPL");
+    # the bar walks 0→100% once per phase. Throttled: bar ~every 25 names, log ~every 5.
     try:
-        _prog_slot.progress(min(done / max(total, 1), 1.0),
-                            text=f"{label} — {done}/{total}")
+        if label.startswith("Prices · "):
+            _dl_tail.append(f"Downloading {label[len('Prices · '):]}")
+            _dl_n["i"] += 1
+            if _dl_n["i"] % 5 == 0 or done == total:
+                _log_slot.code("\n".join(_dl_tail), language=None)
+        if done % 25 == 0 or done == total:
+            _prog_slot.progress(min(done / max(total, 1), 1.0),
+                                text=f"{label} — {done}/{total}")
     except Exception:                             # progress must never kill a scan
         pass
 
@@ -494,6 +506,7 @@ with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"
     res = _cached_scan(universe, min_criteria, min_rs, require_vcp, min_fund,
                        st.session_state.nonce, _force=_force, _progress=_scan_progress)
 _prog_slot.empty()
+_log_slot.empty()
 
 # --------------------------------------------------------------------------- #
 # Sidebar — Watchlist (build by clicking ⭐ on charts / the picker; export to keep).

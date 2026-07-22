@@ -356,6 +356,24 @@ def get_prices(ticker: str, lookback: str = "2y", force: bool = False,
     return df
 
 
+def _fmt_us(ts) -> str:
+    """M/D/YYYY (no leading zeros) — the per-ticker download-log date format."""
+    ts = pd.Timestamp(ts)
+    return f"{ts.month}/{ts.day}/{ts.year}"
+
+
+def _incr_detail(last, today) -> str:
+    """Human description of an incremental top-up: the missing-days range ('7/20/2026 -
+    7/22/2026'), or just today's date when the cache already holds today's (provisional)
+    bar / is only one day behind. The overlap days re-fetched for split detection are an
+    implementation detail and deliberately not shown."""
+    start = pd.Timestamp(last).normalize() + pd.Timedelta(days=1)
+    today = pd.Timestamp(today).normalize()
+    if start >= today:
+        return _fmt_us(today)
+    return f"{_fmt_us(start)} - {_fmt_us(today)}"
+
+
 def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
     """Pull one ticker's sub-frame out of a multi-ticker yf.download result, tolerant
     of either column orientation; for a flat single-ticker frame, return it as-is."""
@@ -397,11 +415,13 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     total = len(syms)
     done = 0
 
-    def _emit(sym: str) -> None:
+    def _emit(sym: str, detail: str = "") -> None:
+        # ``detail`` says WHAT was fetched for this name (missing-days range / full history /
+        # cache-served) so the UI can log one transparent line per ticker.
         nonlocal done
         done += 1
         if progress:
-            progress(done, total, sym)
+            progress(done, total, f"{sym}: {detail}" if detail else sym)
 
     # Emit progress for cache-served names too — on a warm cache reading thousands of
     # parquets is real wall-clock time.
@@ -410,7 +430,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
         if not force and age_days(path) <= max_age_days:
             try:
                 out[sym] = pd.read_parquet(path)
-                _emit(sym)
+                _emit(sym, "cached (fresh)")
                 continue
             except Exception:
                 pass
@@ -459,7 +479,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                             merged.to_parquet(PRICES_DIR / f"{sym}.parquet")
                         except Exception:
                             pass
-                    _emit(sym)
+                    _emit(sym, _incr_detail(_last, today))
                 if i + chunk < len(incr_syms):
                     time.sleep(pause)
 
@@ -481,7 +501,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                             df.to_parquet(PRICES_DIR / f"{sym}.parquet")
                         except Exception:
                             pass
-                    _emit(sym)
+                    _emit(sym, f"full history ({lookback})")
                 if i + chunk < len(full_fetch):
                     time.sleep(pause)
     return out
