@@ -369,13 +369,6 @@ def _wl_remove(ticker: str) -> None:
         _invalidate_trade_plan()
         _wl_persist()
 
-
-def _wl_clear() -> None:
-    st.session_state["watchlist"] = []
-    _invalidate_trade_plan()
-    _wl_persist()
-
-
 def _wl_sync_from_picker() -> None:
     """The watchlist multiselect is CONTROLLED — its selected pills ARE the watchlist
     (the page re-seeds the widget from the list every run, so ⭐/📌/upload/EOD-merge
@@ -593,8 +586,6 @@ with st.sidebar:
             mime="text/plain", width="stretch",
             help="Just the tickers, comma-separated — the format the uploader above reads "
                  "back in.")
-        st.button("🗑 Clear watchlist", on_click=_wl_clear, width="stretch",
-                  help="Empties the list — including the saved copy on disk.")
         _missing = [t for t in _watch_t if t not in res.payloads]
         if _missing:
             st.caption(f"⚠︎ {', '.join(_missing)} not in the current scan — the list CSV "
