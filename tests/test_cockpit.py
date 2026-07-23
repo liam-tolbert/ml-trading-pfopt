@@ -696,6 +696,69 @@ def test_watchlist_picker_pills_sync():
             assert set(e["ticker"] for e in load_watchlist(wl_path)) == {keep_t, add_t}
 
 
+def test_trigger_sidebar_chart_button():
+    """Each trigger-report row carries a 📈 button: clicking it jumps the MAIN chart to
+    that ticker (overriding the table's row selection for that run); a name outside the
+    scan payloads still renders a (disabled) button instead of crashing."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trigger_sidebar_chart_button (AppTest unavailable: {e})")
+        return
+    import json as _json
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    assert len(result.candidates) >= 2, "need two candidates for a distinct jump target"
+    # Put TWO real candidates in the report: the displayed table's default row is sort-
+    # dependent, so the jump target is chosen at runtime as whichever one ISN'T default.
+    t_a, t_b = result.candidates["ticker"].iloc[0], result.candidates["ticker"].iloc[1]
+
+    rep = {"schema": 1, "date": "2026-07-22", "generated_at": "2026-07-22T16:31:00-04:00",
+           "spy": None, "all_stale": False, "early_close": False, "intraday": False,
+           "names": [
+               {"ticker": t_a, "status": "watch", "judged_pivot": 55.5, "close": 50.0,
+                "volume_ratio_50": 1.0},
+               {"ticker": t_b, "status": "watch", "judged_pivot": 44.0, "close": 40.0,
+                "volume_ratio_50": 1.0},
+               {"ticker": "GONEX", "status": "untracked", "judged_pivot": 12.0}],
+           "summary": {"n": 3, "triggered": [], "extended": [], "stale": [],
+                       "untracked": ["GONEX"], "earnings_soon": [], "no_data": [],
+                       "no_pivot": [], "auto_frozen": []}}
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        trg = Path(_tmp) / "triggers"
+        trg.mkdir(parents=True)
+        (trg / "triggers_2026-07-22.json").write_text(_json.dumps(rep), encoding="utf-8")
+        with patch.object(scanmod, "run_scan", return_value=result), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", trg):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+            # The ⭐/✓ toggle label names the charted pick — learn the default, then jump
+            # to the OTHER candidate so the change is observable.
+            _toggle = [b for b in at.button if b.key == "wl_toggle"]
+            assert _toggle, "chart toggle not rendered"
+            jump_t = t_b if t_a in str(_toggle[0].label) else t_a
+            # The out-of-scan name renders a button too (disabled, not a crash).
+            assert [b for b in at.button if b.key == "trg_chart_GONEX"]
+
+            jump = [b for b in at.button if b.key == f"trg_chart_{jump_t}"]
+            assert jump, "per-row chart button not rendered"
+            jump[0].click().run()
+            assert not at.exception, f"app raised on chart jump: {at.exception}"
+            _toggle = [b for b in at.button if b.key == "wl_toggle"]
+            assert _toggle and jump_t in str(_toggle[0].label), \
+                f"chart should have jumped to {jump_t}: {_toggle[0].label}"
+            assert "chart_pick" not in at.session_state    # consumed (one-run override)
+
+
 def test_watchlist_export_helpers():
     """The watchlist CSV builders: the decision list keeps user order and never drops a
     picked ticker (stale ones survive as ticker-only rows); the OHLCV dump stacks every
@@ -1639,8 +1702,9 @@ def test_trade_plan_invalidated_on_events():
                                        "using_dedicated": True}, "build_ts": 1}
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    # WATCHLIST_JSON MUST be patched: scenario (d) clicks Clear-watchlist, which PERSISTS —
-    # an unpatched run wipes the user's real data/cockpit/watchlist.json (it did, once).
+    # WATCHLIST_JSON MUST be patched: scenario (d) dismisses a watchlist pill, which
+    # PERSISTS — an unpatched run mutates the user's real data/cockpit/watchlist.json
+    # (the old Clear-watchlist variant of this scenario wiped it, once).
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(scanmod, "run_scan", return_value=result), \
             patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
@@ -1666,10 +1730,9 @@ def test_trade_plan_invalidated_on_events():
 
         _seed(at)
         at.run()
-        clear = [b for b in at.button
-                 if "Clear watchlist" in str(getattr(b, "label", ""))]
-        assert clear, "clear-watchlist button not found"
-        clear[0].click().run()                            # (d) watchlist mutation -> plan gone
+        pills = [m for m in at.multiselect if m.key == "wl_picker"]
+        assert pills, "watchlist pills picker not found"
+        pills[0].set_value([]).run()                      # (d) dismiss the pill -> plan gone
         assert "trade_plan" not in at.session_state, "watchlist edit must invalidate the plan"
 
 
@@ -3036,6 +3099,46 @@ def test_breakout_wrapper_fires_prior_bar_highs():
         detect_breakout(quiet, 95.0, phase2, None)
 
     assert got_base.get("volume_ratio") is not None      # vendored volume fields ride along
+
+
+def test_untracked_watchlist_names():
+    """A watchlist name that no longer passes the 8/8 trend template is UNTRACKED: it
+    stays on the list, but its trigger is NOT evaluated (a close above the frozen pivot
+    on huge volume must NOT fire), it files under summary['untracked'], outranks 'stale',
+    and the console report explains it. A template-passing name is unaffected, and short
+    (<200-row) frames fail open (keep evaluating — the existing flat-frame tests pin
+    that side)."""
+    from src.stock_screener.cockpit.export import make_entry
+    from src.stock_screener.cockpit.triggers import check_one, check_triggers, format_report
+
+    TODAY = "2026-07-10"
+    E = make_entry("BRKN", 130.0, date_added="2026-07-01", pivot_source="judged")
+    # 260-bar DOWNTREND: close under its falling SMAs -> fails the template. Frozen pivot
+    # 130 sits BELOW the last close (150) and volume spikes 3x — a would-be trigger.
+    down = _trigger_frame(TODAY, [280.0 - i * 0.5 for i in range(260)],
+                          [1000] * 259 + [3000])
+    r = check_one(E, down, None, today=TODAY, now=f"{TODAY} 16:30")
+    assert r["untracked"] is True and r["status"] == "untracked", r
+    assert r["triggered"] is False, "an untracked name's trigger must NOT be evaluated"
+
+    # Untracked outranks stale: the same broken-down frame on a later run date.
+    r2 = check_one(E, down, None, today="2026-07-13", now="2026-07-13 12:00")
+    assert r2["status"] == "untracked" and r2["stale"] is True
+
+    # Control: a template-passing uptrend with the same would-be trigger still fires.
+    # (Pivot within 5% of the 177.70 close — further out would file as "extended".)
+    up = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)],
+                        [1000] * 259 + [3000])
+    E_up = make_entry("UPUP", 176.0, date_added="2026-07-01", pivot_source="judged")
+    r3 = check_one(E_up, up, None, today=TODAY, now=f"{TODAY} 16:30")
+    assert r3["untracked"] is False and r3["triggered"] is True, r3
+
+    rep = check_triggers([E, E_up], {"BRKN": down, "UPUP": up},
+                         today=TODAY, now=f"{TODAY} 16:30")
+    assert rep["summary"]["untracked"] == ["BRKN"]
+    assert rep["summary"]["triggered"] == ["UPUP"]
+    txt = format_report(rep)
+    assert "UNTRACKED" in txt and "BRKN" in txt
 
 
 def test_freeze_missing_pivots():

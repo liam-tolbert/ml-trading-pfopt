@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:                       # so `from src.X import ...`
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st  # noqa: E402
+from streamlit.errors import StreamlitAPIException  # noqa: E402
 
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
@@ -856,12 +857,13 @@ with st.sidebar:
             st.caption("💤 No new bar on the report date (weekend/holiday?) — "
                        "no trigger can fire from a stale bar.")
         _ticons = {"triggered": "🔔", "extended": "⬆", "watch": "👀", "stale": "💤",
-                   "no_pivot": "⚠", "no_data": "⚠"}
+                   "no_pivot": "⚠", "no_data": "⚠", "untracked": "🚫"}
         for _n in _rep.get("names", []):
             _st = _n.get("status", "?")
+            _t = _n.get("ticker", "?")
             _pv, _cl = _n.get("judged_pivot"), _n.get("close")
             _vr = _n.get("volume_ratio_50")
-            _bits = [f"{_ticons.get(_st, '•')} **{_n.get('ticker', '?')}** {_st}"]
+            _bits = [f"{_ticons.get(_st, '•')} **{_t}** {_st}"]
             if _cl is not None and _pv:
                 _bits.append(f"{_cl:,.2f} vs pivot {_pv:,.2f}"
                              + (" (a)" if _n.get("pivot_source") == "auto" else ""))
@@ -872,7 +874,24 @@ with st.sidebar:
                 _bits.append(f"pace {_pc:.1f}×")
             if _n.get("earnings_soon"):
                 _bits.append(f"⚠ earnings in {_n.get('earnings_in')}d")
-            st.caption(" · ".join(_bits))
+            _cA, _cB = st.columns([6, 1], vertical_alignment="center")
+            _cA.caption(" · ".join(_bits))
+            _in_scan = _t in res.payloads
+            if _cB.button("📈", key=f"trg_chart_{_t}", disabled=not _in_scan,
+                          help=(f"Chart {_t}" if _in_scan
+                                else f"{_t} is not in the scan table — no chart data")):
+                # Jump the main chart to this name. The panel is a FRAGMENT, so escalate
+                # to an app-scope rerun; AppTest executes fragments inline where the
+                # scoped call isn't valid — fall back to a plain rerun there.
+                st.session_state["chart_pick"] = _t
+                try:
+                    st.rerun(scope="app")
+                except StreamlitAPIException:
+                    st.rerun()
+        if _rep.get("summary", {}).get("untracked"):
+            st.caption("🚫 untracked = fell out of the 8/8 trend template — kept on the "
+                       "watchlist, but the trigger is not evaluated until it "
+                       "re-qualifies.")
         if _rep.get("summary", {}).get("triggered"):
             st.caption("🔔 Triggered = closed above the frozen pivot on ≥1.5× 50-day "
                        "volume — judge it (chart + fuel), then buy at/near the next "
@@ -955,6 +974,14 @@ _rows = (_sel.get("rows", []) if isinstance(_sel, dict)
          else getattr(_sel, "rows", [])) if _sel else []
 row_pos = _rows[0] if _rows and _rows[0] < len(view) else 0
 pick = view.iloc[row_pos]["ticker"]
+
+# A 📈 jump from the trigger sidebar overrides the table selection for THIS run only
+# (popped, so the next interaction hands control back to the table). Payloads are the
+# authority — the button is disabled for names outside the scan, so the miss case is
+# only a stale session key.
+_jump = st.session_state.pop("chart_pick", None)
+if _jump in res.payloads:
+    pick = _jump
 
 payload = res.payloads[pick]
 

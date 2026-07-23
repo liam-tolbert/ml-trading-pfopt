@@ -27,7 +27,8 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from src.stock_screener.minervini_screener.screening import (
-    analyze_spy_trend, calculate_stop_loss, classify_phase)
+    analyze_spy_trend, calculate_sma, calculate_stop_loss, classify_phase,
+    validate_minervini_trend_template)
 from . import cache
 from .export import make_entry
 from .scan import _days_to_earnings, _entry_levels, detect_breakout_prior_high
@@ -39,6 +40,7 @@ VOL_CONTEXT_DAYS = 20       # the scan's window — reported as context, never t
 EXTENDED_PCT = 0.05         # close > pivot * 1.05 = past the buy zone ("don't chase")
 EARNINGS_SOON_DAYS = 21     # mirror the app's ⚠ earnings window
 MIN_ROWS_FOR_PIVOT = 200    # classify_phase needs >= 200 rows to compute a pivot
+TEMPLATE_CRITERIA = 8       # mirror ScanConfig.min_criteria — the scan table's hard gate
 
 # Intraday half-hourly runs: the session clock for the volume-pace read and the
 # provisional-bar flag.
@@ -51,8 +53,10 @@ EARLY_CLOSE_CUTOFF_MIN = 13 * 60 + 5  # ...and the bar settles ~13:05 on those d
 
 REPORT_SCHEMA = 1
 # The full per-name status vocabulary, pinned by the test suite — a new status (e.g. the
-# proposed "crossed") must be registered here or the report test fails.
-STATUSES = ("no_data", "no_pivot", "stale", "extended", "triggered", "watch")
+# proposed "crossed") must be registered here or the report test fails. "untracked" = the
+# name no longer passes the 8/8 trend template (it left the scan table): kept on the
+# watchlist, but its trigger is NOT evaluated until it re-qualifies.
+STATUSES = ("no_data", "untracked", "no_pivot", "stale", "extended", "triggered", "watch")
 
 
 def _today_et(today=None) -> pd.Timestamp:
@@ -168,8 +172,8 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
     """Evaluate ONE watchlist entry against its (already-refreshed) daily frame.
 
     Returns the per-name report dict (see ``check_triggers``). ``status`` is a display
-    convenience with precedence no_data -> no_pivot -> stale -> extended -> triggered ->
-    watch; the booleans stay authoritative. ``triggered`` requires close above the frozen
+    convenience with precedence no_data -> untracked -> no_pivot -> stale -> extended ->
+    triggered -> watch; the booleans stay authoritative. ``triggered`` requires close above the frozen
     pivot AND the 50-day volume gate AND a bar dated today (a Friday bar must not re-fire
     on a Monday-holiday run). ``volume_pace`` (intraday context, NEVER the gate) is the
     50-day ratio divided by the fraction of the session elapsed at ``now`` — "is volume
@@ -184,6 +188,7 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         "volume": None, "volume_ratio_50": None, "volume_ratio_20": None,
         "volume_ratio_50_scaled": None, "early_close": bool(_early_close(t)),
         "volume_pace": None, "volume_confirmed": None, "triggered": False,
+        "untracked": False,
         "extended": None, "pct_from_pivot": None, "earnings_in": None,
         "earnings_soon": None, "error": None,
     }
@@ -206,6 +211,25 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
             frac = _session_elapsed(_now_et(now))
             if frac > 0:                                  # pre-open -> no pace read
                 out["volume_pace"] = round(out["volume_ratio_50"] / frac, 2)
+
+        # A name that no longer passes the trend template has LEFT the scan table — keep
+        # it on the watchlist but don't evaluate its trigger (a "breakout" on a
+        # broken-down base is noise, not a Minervini entry). Judged on the name's own
+        # frame so the headless half-hourly job needs no universe scan; frames too short
+        # to judge (< MIN_ROWS_FOR_PIVOT — the scan couldn't table them either) and any
+        # template-chain error fail OPEN (keep evaluating, never blind the check).
+        if len(df) >= MIN_ROWS_FOR_PIVOT:
+            try:
+                phase_info = classify_phase(df, close)
+                sma200 = calculate_sma(df["Close"], 200)
+                tmpl = validate_minervini_trend_template(close, phase_info, sma200)
+                out["untracked"] = bool(
+                    tmpl.get("criteria_passed", 0) < TEMPLATE_CRITERIA)
+            except Exception:
+                out["untracked"] = False
+        if out["untracked"]:
+            out["status"] = "untracked"
+            return out
 
         pivot = entry.get("judged_pivot")
         if not pivot or pivot <= 0:
@@ -278,6 +302,7 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
         "triggered": [n["ticker"] for n in names if n["status"] == "triggered"],
         "extended": [n["ticker"] for n in names if n["status"] == "extended"],
         "stale": [n["ticker"] for n in names if n.get("stale")],
+        "untracked": [n["ticker"] for n in names if n["status"] == "untracked"],
         "earnings_soon": [n["ticker"] for n in names if n.get("earnings_soon")],
         "no_data": [n["ticker"] for n in names if n["status"] == "no_data"],
         "no_pivot": [n["ticker"] for n in names if n["status"] == "no_pivot"],
@@ -370,6 +395,10 @@ def format_report(report: dict) -> str:
     lines.append(f"summary: {len(s.get('triggered', []))} triggered, "
                  f"{len(s.get('extended', []))} extended, {len(s.get('stale', []))} stale, "
                  f"{len(s.get('no_pivot', []))} without a pivot, of {s.get('n', 0)}")
+    if s.get("untracked"):
+        lines.append(f"UNTRACKED ({', '.join(s['untracked'])}): no longer passes the "
+                     f"{TEMPLATE_CRITERIA}/8 trend template -- kept on the watchlist, but "
+                     "the trigger is NOT evaluated until it re-qualifies.")
     if s.get("auto_frozen"):
         lines.append(f"auto-froze pivots (first sight): {', '.join(s['auto_frozen'])}"
                      " -- chart + pin (freeze button in the app) to override with your"
