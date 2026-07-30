@@ -759,6 +759,65 @@ def test_trigger_sidebar_chart_button():
             assert "chart_pick" not in at.session_state    # consumed (one-run override)
 
 
+def test_trigger_check_now_button():
+    """The 🔔 Check-triggers-now button runs the eod_trigger pipeline in-process, writes
+    the report to cache.TRIGGERS_DIR, and renders it in the SAME pass (the check runs
+    before the report load). A failing check degrades to a warning, never a crash."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trigger_check_now_button (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache, eod_trigger
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+
+    rep = {"schema": 1, "date": "2026-07-27", "generated_at": "2026-07-27T10:31:00-04:00",
+           "spy": None, "all_stale": False, "early_close": False, "intraday": True,
+           "names": [{"ticker": "MANUX", "status": "watch", "judged_pivot": 55.5,
+                      "close": 50.0, "volume_ratio_50": 1.0}],
+           "summary": {"n": 1, "triggered": [], "extended": [], "stale": [],
+                       "untracked": [], "earnings_soon": [], "no_data": [],
+                       "no_pivot": [], "auto_frozen": []}}
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        trg = Path(_tmp) / "triggers"                       # left EMPTY: no report yet
+        with patch.object(scanmod, "run_scan", return_value=result), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", trg), \
+                patch.object(eod_trigger, "build_report", return_value=rep) as _br:
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+            # No report on disk: the empty-state caption points at the button.
+            assert any("No trigger report yet" in str(c.value) for c in at.caption)
+            btn = [b for b in at.button if b.key == "trigger_check_now"]
+            assert btn, "Check-triggers-now button not rendered"
+
+            btn[0].click().run()
+            assert not at.exception, f"app raised on manual check: {at.exception}"
+            assert _br.call_count == 1, "build_report should run exactly once per click"
+            assert (trg / "triggers_2026-07-27.json").exists(), \
+                "manual check should persist the dated report"
+            # Rendered in the same pass: the canned name's row is in the panel.
+            assert any("MANUX" in str(c.value) for c in at.caption), \
+                "fresh report should render without another click/rerun"
+
+            # Failure path: the pipeline raising surfaces a warning, not a crash, and the
+            # last good report stays up.
+            _br.side_effect = RuntimeError("yfinance down")
+            _btn = [b for b in at.button if b.key == "trigger_check_now"]
+            _btn[0].click().run()
+            assert not at.exception, f"app raised on failing check: {at.exception}"
+            assert any("Trigger check failed" in str(w.value) for w in at.warning)
+            assert any("MANUX" in str(c.value) for c in at.caption)
+
+
 def test_watchlist_export_helpers():
     """The watchlist CSV builders: the decision list keeps user order and never drops a
     picked ticker (stale ones survive as ticker-only rows); the OHLCV dump stacks every

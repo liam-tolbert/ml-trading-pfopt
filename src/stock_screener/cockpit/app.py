@@ -31,7 +31,8 @@ from src.stock_screener.cockpit.scan import ScanConfig, filter_candidates, run_s
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
     fetch_held_shares, freshen_prices, stop_is_valid, submit_buy_plan)
-from src.stock_screener.cockpit.triggers import load_latest_trigger_report  # noqa: E402
+from src.stock_screener.cockpit.triggers import (load_latest_trigger_report,  # noqa: E402
+                                                 save_trigger_report)
 
 st.set_page_config(page_title="SEPA Cockpit", layout="wide")
 
@@ -836,12 +837,26 @@ with st.sidebar:
     # so a hand-edited or older-schema report renders degraded instead of crashing the sidebar.
     @st.fragment(run_every="60s")
     def _trigger_report_panel() -> None:
+        st.markdown("---")
+        # Manual escape hatch for the scheduled job (laptop asleep / task missed a run):
+        # the SAME pipeline as scripts/eod_trigger.bat, in-process. It runs BEFORE the
+        # report load below, so the fresh report renders in this same pass — no rerun.
+        if st.button("🔔 Check triggers now", key="trigger_check_now",
+                     help="Run the watchlist trigger check immediately — tops up the "
+                          "watchlist names' daily bars, freezes any missing pivots, and "
+                          "writes today's report (same as the scheduled half-hourly run)."):
+            with st.spinner("Checking watchlist triggers…"):
+                try:
+                    from src.stock_screener.cockpit.eod_trigger import build_report
+                    save_trigger_report(build_report())
+                except Exception as _e:      # network/data failure — panel stays alive
+                    st.warning(f"Trigger check failed: {_e}")
         _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
         if not _rep:
-            st.caption("No trigger report yet — schedule scripts/eod_trigger.bat "
-                       "(HANDOFF §6.18) for half-hourly watchlist trigger checks.")
+            st.caption("No trigger report yet — click 🔔 Check triggers now, or schedule "
+                       "scripts/eod_trigger.bat (HANDOFF §6.18) for half-hourly "
+                       "watchlist trigger checks.")
             return
-        st.markdown("---")
         _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, best-effort
         st.markdown(f"**🔔 Trigger check — {_rep.get('date', '?')}"
                     + (f" {_hm}" if _hm else "") + "**")

@@ -1,2 +1,760 @@
 ---- Mon 07/13/2026 17:30:00.83 ---- 
 ---- Tue 07/14/2026 17:30:00.88 ---- 
+---- Thu 07/16/2026 12:39:43.55 ---- 
+2026-07-16 12:41:47,314 - yfinance - ERROR - 
+2 Failed downloads:
+2026-07-16 12:41:47,314 - yfinance - ERROR - ['ADT']: Timeout('Failed to perform, curl: (28) Connection timed out after 18248 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:41:47,314 - yfinance - ERROR - ['ADGM']: Timeout('Failed to perform, curl: (28) Connection timed out after 10348 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:43:41,783 - yfinance - ERROR - 
+1 Failed download:
+2026-07-16 12:43:41,783 - yfinance - ERROR - ['CCS']: Timeout('Failed to perform, curl: (28) Connection timed out after 12531 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - 
+7 Failed downloads:
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['INMB']: Timeout('Failed to perform, curl: (28) Connection time-out. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['IMO']: Timeout('Failed to perform, curl: (28) Connection timed out after 12075 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['JAGX']: Timeout('Failed to perform, curl: (28) Connection timed out after 12351 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['IPST']: Timeout('Failed to perform, curl: (28) Connection timed out after 12110 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['INUV']: Timeout('Failed to perform, curl: (28) Connection timed out after 12078 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['INGN']: Timeout('Failed to perform, curl: (28) Connection timed out after 12103 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:45:50,515 - yfinance - ERROR - ['IRD']: Timeout('Failed to perform, curl: (28) Connection timed out after 12106 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:48:54,905 - yfinance - ERROR - 
+2 Failed downloads:
+2026-07-16 12:48:54,905 - yfinance - ERROR - ['TIL']: Timeout('Failed to perform, curl: (28) Connection timed out after 11186 milliseconds. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:48:54,905 - yfinance - ERROR - ['SVV']: Timeout('Failed to perform, curl: (28) Operation timed out after 11275 milliseconds with 0 bytes received. See https://curl.se/libcurl/c/libcurl-errors.html first for more details.')
+2026-07-16 12:50:52,125 - yfinance - ERROR - 
+1 Failed download:
+2026-07-16 12:50:52,125 - yfinance - ERROR - ['FBYDP']: YFPricesMissingError('possibly delisted; no price data found  (period=2y)')
+EOD TRIGGER CHECK  2026-07-16   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50  STATUS    EARNINGS  
+EBAY       110.14   111.86  judged   -1.5%   0.3x  WATCH     in 13d !  
+BAP        390.91   403.30  judged   -3.1%   0.2x  WATCH     in 28d    
+PECO        43.31    40.96  judged   +5.7%   0.2x  EXTENDED  in 7d !   
+EIX         77.65    75.01  judged   +3.5%   0.3x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+prewarm: topping up 3739 full_us price histories...
+prewarm: 500/3739 (BTSG)
+prewarm: 1000/3739 (EMBC)
+prewarm: 1500/3739 (ING)
+prewarm: 2000/3739 (NFG)
+prewarm: 2500/3739 (RYAM)
+prewarm: 3000/3739 (VNT)
+prewarm: 3500/3739 (ONIT)
+prewarm: 3739/3739 (ZONE)
+prewarm: done.
+---- Thu 07/16/2026 14:00:01.21 ---- 
+TRIGGER CHECK  2026-07-16 14:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.75   111.86  judged   -1.0%   0.4x   0.5x  WATCH     in 13d !  
+BAP        389.83   403.30  judged   -3.3%   0.3x   0.4x  WATCH     in 28d    
+PECO        43.44    40.96  judged   +6.0%   0.2x   0.3x  EXTENDED  in 7d !   
+EIX         77.78    75.01  judged   +3.7%   0.3x   0.5x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+---- Thu 07/16/2026 14:30:00.95 ---- 
+TRIGGER CHECK  2026-07-16 14:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.08   111.86  judged   -0.7%   0.4x   0.5x  WATCH     in 13d !  
+BAP        390.01   403.30  judged   -3.3%   0.4x   0.5x  WATCH     in 28d    
+PECO        43.60    40.96  judged   +6.5%   0.2x   0.3x  EXTENDED  in 7d !   
+EIX         77.73    75.01  judged   +3.6%   0.4x   0.5x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+---- Thu 07/16/2026 15:00:00.93 ---- 
+TRIGGER CHECK  2026-07-16 15:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.33   111.86  judged   -0.5%   0.4x   0.5x  WATCH     in 13d !  
+BAP        389.27   403.30  judged   -3.5%   0.4x   0.5x  WATCH     in 28d    
+PECO        43.62    40.96  judged   +6.5%   0.3x   0.3x  EXTENDED  in 7d !   
+EIX         77.81    75.01  judged   +3.7%   0.4x   0.5x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+---- Thu 07/16/2026 15:30:01.13 ---- 
+TRIGGER CHECK  2026-07-16 15:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.44   111.86  judged   -1.3%   0.5x   0.5x  WATCH     in 20d !  
+BAP        388.79   403.30  judged   -3.6%   0.4x   0.5x  WATCH     in 28d    
+PECO        43.62    40.96  judged   +6.5%   0.3x   0.3x  EXTENDED  in 7d !   
+EIX         77.81    75.01  judged   +3.7%   0.4x   0.5x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+---- Thu 07/16/2026 16:00:01.16 ---- 
+TRIGGER CHECK  2026-07-16 16:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.93   111.86  judged   -0.8%   0.6x   0.6x  WATCH     in 20d !  
+BAP        388.02   403.30  judged   -3.8%   0.6x   0.6x  WATCH     in 28d    
+PECO        43.70    40.96  judged   +6.7%   0.5x   0.5x  EXTENDED  in 7d !   
+EIX         77.97    75.01  judged   +4.0%   0.6x   0.6x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+---- Thu 07/16/2026 16:30:00.96 ---- 
+TRIGGER CHECK  2026-07-16 16:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.91   111.86  judged   -0.8%   0.9x   0.9x  WATCH     in 20d !  
+BAP        387.44   403.30  judged   -3.9%   0.6x   0.6x  WATCH     in 28d    
+PECO        43.73    40.96  judged   +6.8%   0.8x   0.8x  EXTENDED  in 7d !   
+EIX         78.05    75.01  judged   +4.0%   0.6x   0.6x  WATCH     in 14d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-16.json
+---- Fri 07/17/2026 11:11:22.78 ---- 
+TRIGGER CHECK  2026-07-17 11:11   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.28   111.86  judged   -1.4%   0.1x   0.5x  WATCH     in 19d !  
+BAP        384.80   403.30  judged   -4.6%   0.1x   0.3x  WATCH     in 27d    
+PECO        44.30    40.96  judged   +8.2%   0.2x   0.7x  EXTENDED  in 6d !   
+EIX         78.88    75.01  judged   +5.2%   0.2x   0.9x  EXTENDED  in 13d !  
+summary: 0 triggered, 2 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 11:41:24.38 ---- 
+TRIGGER CHECK  2026-07-17 11:41   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.42   111.86  judged   -1.3%   0.1x   0.4x  WATCH     in 19d !  
+BAP        387.43   403.30  judged   -3.9%   0.1x   0.4x  WATCH     in 27d    
+PECO        44.05    40.96  judged   +7.5%   0.2x   0.6x  EXTENDED  in 6d !   
+EIX         78.60    75.01  judged   +4.8%   0.3x   0.8x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 12:11:22.64 ---- 
+TRIGGER CHECK  2026-07-17 12:11   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.31   111.86  judged   -1.4%   0.1x   0.4x  WATCH     in 19d !  
+BAP        390.15   403.30  judged   -3.3%   0.1x   0.3x  WATCH     in 27d    
+PECO        43.89    40.96  judged   +7.2%   0.2x   0.6x  EXTENDED  in 6d !   
+EIX         78.17    75.01  judged   +4.2%   0.3x   0.7x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 12:41:22.97 ---- 
+TRIGGER CHECK  2026-07-17 12:41   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.66   111.86  judged   -1.1%   0.2x   0.3x  WATCH     in 19d !  
+BAP        389.77   403.30  judged   -3.4%   0.2x   0.3x  WATCH     in 27d    
+PECO        43.72    40.96  judged   +6.7%   0.3x   0.5x  EXTENDED  in 6d !   
+EIX         77.72    75.01  judged   +3.6%   0.3x   0.7x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 13:11:22.57 ---- 
+TRIGGER CHECK  2026-07-17 13:11   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.96   111.86  judged   -0.8%   0.2x   0.3x  WATCH     in 19d !  
+BAP        390.36   403.30  judged   -3.2%   0.2x   0.3x  WATCH     in 27d    
+PECO        43.67    40.96  judged   +6.6%   0.3x   0.5x  EXTENDED  in 6d !   
+EIX         77.50    75.01  judged   +3.3%   0.4x   0.6x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 13:41:22.83 ---- 
+TRIGGER CHECK  2026-07-17 13:41   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.01   111.86  judged   +0.1%   0.2x   0.4x  WATCH     in 19d !  
+BAP        390.58   403.30  judged   -3.2%   0.2x   0.3x  WATCH     in 27d    
+PECO        43.67    40.96  judged   +6.6%   0.3x   0.5x  EXTENDED  in 6d !   
+EIX         77.55    75.01  judged   +3.4%   0.4x   0.6x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 14:11:24.26 ---- 
+TRIGGER CHECK  2026-07-17 14:11   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.57   111.86  judged   -0.3%   0.3x   0.4x  WATCH     in 19d !  
+BAP        389.86   403.30  judged   -3.3%   0.2x   0.3x  WATCH     in 27d    
+PECO        43.74    40.96  judged   +6.8%   0.3x   0.5x  EXTENDED  in 6d !   
+EIX         77.35    75.01  judged   +3.1%   0.4x   0.6x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 14:41:22.88 ---- 
+TRIGGER CHECK  2026-07-17 14:41   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.67   111.86  judged   -0.2%   0.4x   0.4x  WATCH     in 19d !  
+BAP        389.67   403.30  judged   -3.4%   0.2x   0.3x  WATCH     in 27d    
+PECO        43.77    40.96  judged   +6.9%   0.4x   0.5x  EXTENDED  in 6d !   
+EIX         77.43    75.01  judged   +3.2%   0.5x   0.6x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 16:02:50.19 ---- 
+TRIGGER CHECK  2026-07-17 16:02   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.06   111.86  judged   +0.2%   1.0x   1.0x  WATCH     in 19d !  
+BAP        390.70   403.30  judged   -3.1%   0.4x   0.4x  WATCH     in 27d    
+PECO        44.01    40.96  judged   +7.5%   0.8x   0.8x  EXTENDED  in 6d !   
+EIX         77.63    75.01  judged   +3.5%   0.7x   0.7x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 16:11:22.64 ---- 
+TRIGGER CHECK  2026-07-17 16:11   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.06   111.86  judged   +0.2%   1.0x   1.0x  WATCH     in 19d !  
+BAP        390.70   403.30  judged   -3.1%   0.4x   0.4x  WATCH     in 27d    
+PECO        44.01    40.96  judged   +7.5%   0.8x   0.8x  EXTENDED  in 6d !   
+EIX         77.63    75.01  judged   +3.5%   0.7x   0.7x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 16:41:22.86 ---- 
+TRIGGER CHECK  2026-07-17 16:41   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.06   111.86  judged   +0.2%   1.0x   1.0x  WATCH     in 19d !  
+BAP        390.58   403.30  judged   -3.1%   0.4x   0.4x  WATCH     in 27d    
+PECO        44.01    40.96  judged   +7.5%   0.8x   0.8x  EXTENDED  in 6d !   
+EIX         77.63    75.01  judged   +3.5%   0.7x   0.7x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 17:11:23.08 ---- 
+TRIGGER CHECK  2026-07-17 17:11   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.06   111.86  judged   +0.2%   1.2x   1.2x  WATCH     in 19d !  
+BAP        390.58   403.30  judged   -3.1%   0.4x   0.4x  WATCH     in 27d    
+PECO        44.01    40.96  judged   +7.5%   0.8x   0.8x  EXTENDED  in 6d !   
+EIX         77.63    75.01  judged   +3.5%   1.0x   1.0x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 18:37:28.53 ---- 
+TRIGGER CHECK  2026-07-17 18:37   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.06   111.86  judged   +0.2%   1.2x   1.2x  WATCH     in 19d !  
+BAP        390.58   403.30  judged   -3.1%   0.4x   0.4x  WATCH     in 27d    
+PECO        44.01    40.96  judged   +7.5%   0.8x   0.8x  EXTENDED  in 6d !   
+EIX         77.63    75.01  judged   +3.5%   1.0x   1.0x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Fri 07/17/2026 18:41:23.13 ---- 
+TRIGGER CHECK  2026-07-17 18:41   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.06   111.86  judged   +0.2%   1.2x   1.2x  WATCH     in 19d !  
+BAP        390.58   403.30  judged   -3.1%   0.4x   0.4x  WATCH     in 27d    
+PECO        44.01    40.96  judged   +7.5%   0.8x   0.8x  EXTENDED  in 6d !   
+EIX         77.63    75.01  judged   +3.5%   1.0x   1.0x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-17.json
+---- Mon 07/20/2026 12:36:04.94 ---- 
+TRIGGER CHECK  2026-07-20 12:36   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.03   111.86  judged   +1.9%   0.2x   0.5x  WATCH     in 16d !  
+BAP        390.07   403.30  judged   -3.3%   0.1x   0.2x  WATCH     in 24d    
+EIX         77.36    75.01  judged   +3.1%   0.2x   0.4x  WATCH     in 10d !  
+XMTR       100.07   102.00  judged   -1.9%   0.3x   0.6x  WATCH     in 15d !  
+DBD         84.54    89.05  judged   -5.1%   0.1x   0.3x  WATCH     in 9d !   
+PBI         18.55    18.63  judged   -0.5%   0.1x   0.2x  WATCH     in 9d !   
+AIZ        277.05   284.12  judged   -2.5%   0.2x   0.4x  WATCH     in 15d !  
+EXEL        56.26    57.57  judged   -2.3%   0.2x   0.5x  WATCH     in 15d !  
+WST        354.56   367.66  judged   -3.6%   0.3x   0.6x  WATCH     in 3d !   
+CYRX        15.90    16.89  judged   -5.9%   0.2x   0.5x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 13:06:04.76 ---- 
+TRIGGER CHECK  2026-07-20 13:06   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       113.83   111.86  judged   +1.8%   0.3x   0.5x  WATCH     in 16d !  
+BAP        387.65   403.30  judged   -3.9%   0.1x   0.2x  WATCH     in 24d    
+EIX         77.52    75.01  judged   +3.4%   0.2x   0.4x  WATCH     in 10d !  
+XMTR        99.35   102.00  judged   -2.6%   0.3x   0.5x  WATCH     in 15d !  
+DBD         84.70    89.05  judged   -4.9%   0.2x   0.3x  WATCH     in 9d !   
+PBI         18.52    18.63  judged   -0.6%   0.1x   0.2x  WATCH     in 9d !   
+AIZ        276.39   284.12  judged   -2.7%   0.2x   0.3x  WATCH     in 15d !  
+EXEL        56.23    57.57  judged   -2.3%   0.3x   0.5x  WATCH     in 15d !  
+WST        356.92   367.66  judged   -2.9%   0.3x   0.6x  WATCH     in 3d !   
+CYRX        15.92    16.89  judged   -5.7%   0.3x   0.5x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 13:36:05.20 ---- 
+TRIGGER CHECK  2026-07-20 13:36   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       113.41   111.86  judged   +1.4%   0.3x   0.4x  WATCH     in 16d !  
+BAP        388.02   403.30  judged   -3.8%   0.1x   0.2x  WATCH     in 24d    
+EIX         77.59    75.01  judged   +3.4%   0.3x   0.4x  WATCH     in 10d !  
+XMTR        99.47   102.00  judged   -2.5%   0.3x   0.5x  WATCH     in 15d !  
+DBD         84.68    89.05  judged   -4.9%   0.2x   0.3x  WATCH     in 9d !   
+PBI         18.49    18.63  judged   -0.8%   0.1x   0.1x  WATCH     in 9d !   
+AIZ        276.24   284.12  judged   -2.8%   0.2x   0.3x  WATCH     in 15d !  
+EXEL        56.22    57.57  judged   -2.3%   0.3x   0.5x  WATCH     in 15d !  
+WST        355.46   367.66  judged   -3.3%   0.4x   0.6x  WATCH     in 3d !   
+CYRX        15.92    16.89  judged   -5.7%   0.3x   0.4x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 14:06:05.29 ---- 
+TRIGGER CHECK  2026-07-20 14:06   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       113.50   111.86  judged   +1.5%   0.3x   0.4x  WATCH     in 16d !  
+BAP        388.92   403.30  judged   -3.6%   0.2x   0.2x  WATCH     in 24d    
+EIX         77.55    75.01  judged   +3.4%   0.3x   0.4x  WATCH     in 10d !  
+XMTR       100.43   102.00  judged   -1.5%   0.3x   0.4x  WATCH     in 15d !  
+DBD         84.70    89.05  judged   -4.9%   0.2x   0.3x  WATCH     in 9d !   
+PBI         18.50    18.63  judged   -0.7%   0.1x   0.1x  WATCH     in 9d !   
+AIZ        275.97   284.12  judged   -2.9%   0.3x   0.4x  WATCH     in 15d !  
+EXEL        56.20    57.57  judged   -2.4%   0.3x   0.5x  WATCH     in 15d !  
+WST        355.30   367.66  judged   -3.4%   0.4x   0.5x  WATCH     in 3d !   
+CYRX        15.86    16.89  judged   -6.1%   0.3x   0.4x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 14:36:04.93 ---- 
+TRIGGER CHECK  2026-07-20 14:36   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       113.58   111.86  judged   +1.5%   0.3x   0.4x  WATCH     in 16d !  
+BAP        388.11   403.30  judged   -3.8%   0.2x   0.2x  WATCH     in 24d    
+EIX         77.53    75.01  judged   +3.4%   0.3x   0.4x  WATCH     in 10d !  
+XMTR       100.01   102.00  judged   -1.9%   0.3x   0.4x  WATCH     in 15d !  
+DBD         84.79    89.05  judged   -4.8%   0.2x   0.3x  WATCH     in 9d !   
+PBI         18.56    18.63  judged   -0.4%   0.1x   0.1x  WATCH     in 9d !   
+AIZ        276.02   284.12  judged   -2.9%   0.3x   0.4x  WATCH     in 15d !  
+EXEL        55.95    57.57  judged   -2.8%   0.4x   0.5x  WATCH     in 15d !  
+WST        354.64   367.66  judged   -3.5%   0.4x   0.5x  WATCH     in 3d !   
+CYRX        15.78    16.89  judged   -6.6%   0.3x   0.4x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 15:06:04.90 ---- 
+TRIGGER CHECK  2026-07-20 15:06   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.15   111.86  judged   +2.0%   0.3x   0.4x  WATCH     in 16d !  
+BAP        388.54   403.30  judged   -3.7%   0.2x   0.3x  WATCH     in 24d    
+EIX         77.49    75.01  judged   +3.3%   0.4x   0.4x  WATCH     in 10d !  
+XMTR        99.30   102.00  judged   -2.6%   0.4x   0.4x  WATCH     in 15d !  
+DBD         84.87    89.05  judged   -4.7%   0.3x   0.3x  WATCH     in 9d !   
+PBI         18.57    18.63  judged   -0.3%   0.1x   0.1x  WATCH     in 9d !   
+AIZ        275.76   284.12  judged   -2.9%   0.3x   0.4x  WATCH     in 15d !  
+EXEL        55.99    57.57  judged   -2.7%   0.4x   0.5x  WATCH     in 15d !  
+WST        353.84   367.66  judged   -3.8%   0.4x   0.5x  WATCH     in 3d !   
+CYRX        15.77    16.89  judged   -6.6%   0.3x   0.4x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 15:36:04.79 ---- 
+TRIGGER CHECK  2026-07-20 15:36   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.19   111.86  judged   +2.1%   0.4x   0.4x  WATCH     in 16d !  
+BAP        387.49   403.30  judged   -3.9%   0.3x   0.3x  WATCH     in 24d    
+EIX         77.33    75.01  judged   +3.1%   0.4x   0.4x  WATCH     in 10d !  
+XMTR        99.89   102.00  judged   -2.1%   0.4x   0.5x  WATCH     in 15d !  
+DBD         85.02    89.05  judged   -4.5%   0.4x   0.4x  WATCH     in 9d !   
+PBI         18.51    18.63  judged   -0.6%   0.2x   0.2x  WATCH     in 9d !   
+AIZ        275.86   284.12  judged   -2.9%   0.4x   0.4x  WATCH     in 15d !  
+EXEL        55.76    57.57  judged   -3.1%   0.5x   0.5x  WATCH     in 15d !  
+WST        353.73   367.66  judged   -3.8%   0.5x   0.5x  WATCH     in 3d !   
+CYRX        15.73    16.89  judged   -6.9%   0.4x   0.4x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 16:06:04.94 ---- 
+TRIGGER CHECK  2026-07-20 16:06   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.19   111.86  judged   +2.1%   0.7x   0.7x  WATCH     in 16d !  
+BAP        386.86   403.30  judged   -4.1%   0.4x   0.4x  WATCH     in 24d    
+EIX         77.26    75.01  judged   +3.0%   0.5x   0.5x  WATCH     in 10d !  
+XMTR       100.12   102.00  judged   -1.8%   0.9x   0.9x  WATCH     in 15d !  
+DBD         85.35    89.05  judged   -4.2%   0.5x   0.5x  WATCH     in 9d !   
+PBI         18.52    18.63  judged   -0.6%   0.2x   0.2x  WATCH     in 9d !   
+AIZ        275.42   284.12  judged   -3.1%   0.5x   0.5x  WATCH     in 15d !  
+EXEL        55.53    57.57  judged   -3.5%   0.9x   0.9x  WATCH     in 15d !  
+WST        352.41   367.66  judged   -4.2%   0.6x   0.6x  WATCH     in 3d !   
+CYRX        15.71    16.89  judged   -7.0%   0.6x   0.6x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 16:36:04.90 ---- 
+TRIGGER CHECK  2026-07-20 16:36   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.19   111.86  judged   +2.1%   0.7x   0.7x  WATCH     in 16d !  
+BAP        386.85   403.30  judged   -4.1%   0.4x   0.4x  WATCH     in 24d    
+EIX         77.25    75.01  judged   +3.0%   0.5x   0.5x  WATCH     in 10d !  
+XMTR       100.12   102.00  judged   -1.8%   0.9x   0.9x  WATCH     in 15d !  
+DBD         85.34    89.05  judged   -4.2%   0.5x   0.5x  WATCH     in 9d !   
+PBI         18.51    18.63  judged   -0.6%   0.2x   0.2x  WATCH     in 9d !   
+AIZ        275.47   284.12  judged   -3.0%   0.5x   0.5x  WATCH     in 15d !  
+EXEL        55.53    57.57  judged   -3.5%   0.9x   0.9x  WATCH     in 15d !  
+WST        352.32   367.66  judged   -4.2%   0.6x   0.6x  WATCH     in 3d !   
+CYRX        15.71    16.89  judged   -7.0%   0.6x   0.6x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 17:06:04.94 ---- 
+TRIGGER CHECK  2026-07-20 17:06   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.19   111.86  judged   +2.1%   0.7x   0.7x  WATCH     in 16d !  
+BAP        386.85   403.30  judged   -4.1%   0.4x   0.4x  WATCH     in 24d    
+EIX         77.25    75.01  judged   +3.0%   0.5x   0.5x  WATCH     in 10d !  
+XMTR       100.12   102.00  judged   -1.8%   0.9x   0.9x  WATCH     in 15d !  
+DBD         85.34    89.05  judged   -4.2%   0.5x   0.5x  WATCH     in 9d !   
+PBI         18.51    18.63  judged   -0.6%   0.2x   0.2x  WATCH     in 9d !   
+AIZ        275.47   284.12  judged   -3.0%   0.5x   0.5x  WATCH     in 15d !  
+EXEL        55.53    57.57  judged   -3.5%   0.9x   0.9x  WATCH     in 15d !  
+WST        352.32   367.66  judged   -4.2%   0.6x   0.6x  WATCH     in 3d !   
+CYRX        15.71    16.89  judged   -7.0%   0.6x   0.6x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 18:25:27.02 ---- 
+TRIGGER CHECK  2026-07-20 18:25   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.19   111.86  judged   +2.1%   0.7x   0.7x  WATCH     in 16d !  
+BAP        386.85   403.30  judged   -4.1%   0.4x   0.4x  WATCH     in 24d    
+EIX         77.25    75.01  judged   +3.0%   0.5x   0.5x  WATCH     in 10d !  
+XMTR       100.12   102.00  judged   -1.8%   0.9x   0.9x  WATCH     in 15d !  
+DBD         85.34    89.05  judged   -4.2%   0.5x   0.5x  WATCH     in 9d !   
+PBI         18.51    18.63  judged   -0.6%   0.2x   0.2x  WATCH     in 9d !   
+AIZ        275.47   284.12  judged   -3.0%   0.5x   0.5x  WATCH     in 15d !  
+EXEL        55.53    57.57  judged   -3.5%   0.9x   0.9x  WATCH     in 15d !  
+WST        352.32   367.66  judged   -4.2%   0.6x   0.6x  WATCH     in 3d !   
+CYRX        15.71    16.89  judged   -7.0%   0.6x   0.6x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Mon 07/20/2026 20:28:57.28 ---- 
+TRIGGER CHECK  2026-07-20 20:29   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       114.19   111.86  judged   +2.1%   0.7x   0.7x  WATCH     in 16d !  
+BAP        386.85   403.30  judged   -4.1%   0.4x   0.4x  WATCH     in 24d    
+EIX         77.25    75.01  judged   +3.0%   0.5x   0.5x  WATCH     in 10d !  
+XMTR       100.12   102.00  judged   -1.8%   0.9x   0.9x  WATCH     in 15d !  
+DBD         85.34    89.05  judged   -4.2%   0.5x   0.5x  WATCH     in 9d !   
+PBI         18.51    18.63  judged   -0.6%   0.2x   0.2x  WATCH     in 9d !   
+AIZ        275.47   284.12  judged   -3.0%   0.5x   0.5x  WATCH     in 15d !  
+EXEL        55.53    57.57  judged   -3.5%   0.9x   0.9x  WATCH     in 15d !  
+WST        352.32   367.66  judged   -4.2%   0.6x   0.6x  WATCH     in 3d !   
+CYRX        15.71    16.89  judged   -7.0%   0.6x   0.6x  WATCH     in 15d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-20.json
+---- Tue 07/21/2026 11:59:04.46 ---- 
+TRIGGER CHECK  2026-07-21 11:59   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.58   111.86  judged   +0.6%   0.2x   0.5x  WATCH     in 15d !  
+BAP        394.46   403.30  judged   -2.2%   0.1x   0.3x  WATCH     in 23d    
+EIX         77.71    75.01  judged   +3.6%   0.2x   0.5x  WATCH     in 9d !   
+XMTR       103.43   102.00  judged   +1.4%   0.2x   0.6x  WATCH     in 14d !  
+DBD         86.49    89.05  judged   -2.9%   0.3x   0.7x  WATCH     in 8d !   
+PBI         18.36    18.63  judged   -1.4%   0.1x   0.3x  WATCH     in 8d !   
+AIZ        274.36   284.12  judged   -3.4%   0.1x   0.3x  WATCH     in 14d !  
+EXEL        55.62    57.57  judged   -3.4%   0.2x   0.4x  WATCH     in 14d !  
+WST        357.26   367.66  judged   -2.8%   0.2x   0.6x  WATCH     in 2d !   
+CYRX        15.59    16.89  judged   -7.7%   0.6x   1.5x  WATCH     in 14d !  
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-21.json
+---- Wed 07/22/2026 11:58:07.37 ---- 
+TRIGGER CHECK  2026-07-22 11:58   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.14   111.86  judged   +0.2%   0.2x   0.5x  WATCH     in 14d !  
+BAP        390.18   403.30  judged   -3.2%   0.6x   1.5x  WATCH     in 22d    
+EIX         79.97    75.01  judged   +6.6%   0.3x   0.7x  EXTENDED  in 8d !   
+XMTR       102.79   102.00  judged   +0.8%   0.3x   0.7x  WATCH     in 13d !  
+DBD         86.91    89.05  judged   -2.4%   0.2x   0.5x  WATCH     in 7d !   
+PBI         18.07    18.63  judged   -3.0%   0.1x   0.3x  WATCH     in 7d !   
+AIZ        273.19   284.12  judged   -3.9%   0.1x   0.3x  WATCH     in 13d !  
+EXEL        55.48    57.57  judged   -3.6%   0.2x   0.5x  WATCH     in 13d !  
+WST        358.75   367.66  judged   -2.4%   0.2x   0.6x  WATCH     in 1d !   
+CYRX        16.63    16.89  judged   -1.5%   0.2x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 12:28:07.84 ---- 
+2026-07-22 12:28:10,837 - yfinance - ERROR - 
+1 Failed download:
+2026-07-22 12:28:10,837 - yfinance - ERROR - ['PBI']: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')
+TRIGGER CHECK  2026-07-22 12:28   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.99   111.86  judged   +0.1%   0.2x   0.5x  WATCH     in 14d !  
+BAP        389.27   403.30  judged   -3.5%   0.7x   1.5x  WATCH     in 22d    
+EIX         80.28    75.01  judged   +7.0%   0.3x   0.7x  EXTENDED  in 8d !   
+XMTR       103.32   102.00  judged   +1.3%   0.3x   0.7x  WATCH     in 13d !  
+DBD         86.81    89.05  judged   -2.5%   0.2x   0.5x  WATCH     in 7d !   
+PBI         18.08    18.63  judged   -2.9%   0.1x   0.2x  WATCH     in 7d !   
+AIZ        273.47   284.12  judged   -3.8%   0.1x   0.3x  WATCH     in 13d !  
+EXEL        55.51    57.57  judged   -3.6%   0.2x   0.5x  WATCH     in 13d !  
+WST        358.03   367.66  judged   -2.6%   0.3x   0.6x  WATCH     in 1d !   
+CYRX        16.64    16.89  judged   -1.5%   0.2x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 12:58:08.00 ---- 
+TRIGGER CHECK  2026-07-22 12:58   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.59   111.86  judged   +0.7%   0.3x   0.5x  WATCH     in 14d !  
+BAP        387.99   403.30  judged   -3.8%   0.8x   1.4x  WATCH     in 22d    
+EIX         80.59    75.01  judged   +7.4%   0.4x   0.7x  EXTENDED  in 8d !   
+XMTR       103.19   102.00  judged   +1.2%   0.4x   0.7x  WATCH     in 13d !  
+DBD         86.88    89.05  judged   -2.4%   0.2x   0.5x  WATCH     in 7d !   
+PBI         18.05    18.63  judged   -3.1%   0.1x   0.3x  WATCH     in 7d !   
+AIZ        273.50   284.12  judged   -3.7%   0.2x   0.3x  WATCH     in 13d !  
+EXEL        55.34    57.57  judged   -3.9%   0.2x   0.4x  WATCH     in 13d !  
+WST        358.04   367.66  judged   -2.6%   0.3x   0.6x  WATCH     in 1d !   
+CYRX        16.74    16.89  judged   -0.9%   0.2x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 13:28:08.15 ---- 
+TRIGGER CHECK  2026-07-22 13:28   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       112.11   111.86  judged   +0.2%   0.3x   0.5x  WATCH     in 14d !  
+BAP        387.83   403.30  judged   -3.8%   0.8x   1.3x  WATCH     in 22d    
+EIX         80.57    75.01  judged   +7.4%   0.4x   0.6x  EXTENDED  in 8d !   
+XMTR       102.36   102.00  judged   +0.3%   0.4x   0.6x  WATCH     in 13d !  
+DBD         86.48    89.05  judged   -2.9%   0.3x   0.4x  WATCH     in 7d !   
+PBI         18.07    18.63  judged   -3.0%   0.2x   0.3x  WATCH     in 7d !   
+AIZ        273.71   284.12  judged   -3.7%   0.2x   0.3x  WATCH     in 13d !  
+EXEL        55.24    57.57  judged   -4.0%   0.3x   0.4x  WATCH     in 13d !  
+WST        358.82   367.66  judged   -2.4%   0.4x   0.6x  WATCH     in 1d !   
+CYRX        16.59    16.89  judged   -1.8%   0.3x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 13:58:07.77 ---- 
+TRIGGER CHECK  2026-07-22 13:58   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.57   111.86  judged   -0.3%   0.3x   0.4x  WATCH     in 14d !  
+BAP        388.66   403.30  judged   -3.6%   0.8x   1.2x  WATCH     in 22d    
+EIX         80.69    75.01  judged   +7.6%   0.4x   0.7x  EXTENDED  in 8d !   
+XMTR       101.42   102.00  judged   -0.6%   0.4x   0.6x  WATCH     in 13d !  
+DBD         86.49    89.05  judged   -2.9%   0.3x   0.4x  WATCH     in 7d !   
+PBI         18.03    18.63  judged   -3.2%   0.2x   0.2x  WATCH     in 7d !   
+AIZ        274.13   284.12  judged   -3.5%   0.2x   0.3x  WATCH     in 13d !  
+EXEL        55.32    57.57  judged   -3.9%   0.3x   0.4x  WATCH     in 13d !  
+WST        358.71   367.66  judged   -2.4%   0.4x   0.6x  WATCH     in 1d !   
+CYRX        16.61    16.89  judged   -1.7%   0.3x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 14:28:08.22 ---- 
+TRIGGER CHECK  2026-07-22 14:28   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.38   111.86  judged   -0.4%   0.3x   0.4x  WATCH     in 14d !  
+BAP        391.31   403.30  judged   -3.0%   0.9x   1.2x  WATCH     in 22d    
+EIX         80.68    75.01  judged   +7.5%   0.5x   0.6x  EXTENDED  in 8d !   
+XMTR       100.43   102.00  judged   -1.5%   0.5x   0.6x  WATCH     in 13d !  
+DBD         86.22    89.05  judged   -3.2%   0.3x   0.4x  WATCH     in 7d !   
+PBI         18.04    18.63  judged   -3.2%   0.2x   0.2x  WATCH     in 7d !   
+AIZ        273.46   284.12  judged   -3.8%   0.3x   0.4x  WATCH     in 13d !  
+EXEL        55.42    57.57  judged   -3.7%   0.3x   0.4x  WATCH     in 13d !  
+WST        358.49   367.66  judged   -2.5%   0.5x   0.6x  WATCH     in 1d !   
+CYRX        16.48    16.89  judged   -2.4%   0.4x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 14:58:07.73 ---- 
+TRIGGER CHECK  2026-07-22 14:58   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.91   111.86  judged   -0.8%   0.4x   0.4x  WATCH     in 14d !  
+BAP        391.22   403.30  judged   -3.0%   1.0x   1.2x  WATCH     in 22d    
+EIX         80.57    75.01  judged   +7.4%   0.5x   0.6x  EXTENDED  in 8d !   
+XMTR       100.71   102.00  judged   -1.3%   0.5x   0.7x  WATCH     in 13d !  
+DBD         85.97    89.05  judged   -3.5%   0.4x   0.4x  WATCH     in 7d !   
+PBI         18.02    18.63  judged   -3.3%   0.2x   0.2x  WATCH     in 7d !   
+AIZ        273.32   284.12  judged   -3.8%   0.3x   0.3x  WATCH     in 13d !  
+EXEL        55.36    57.57  judged   -3.8%   0.3x   0.4x  WATCH     in 13d !  
+WST        357.91   367.66  judged   -2.6%   0.5x   0.6x  WATCH     in 1d !   
+CYRX        16.49    16.89  judged   -2.4%   0.4x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 15:28:07.73 ---- 
+TRIGGER CHECK  2026-07-22 15:28   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       111.05   111.86  judged   -0.7%   0.4x   0.4x  WATCH     in 14d !  
+BAP        389.41   403.30  judged   -3.4%   1.0x   1.1x  WATCH     in 22d    
+EIX         80.40    75.01  judged   +7.2%   0.6x   0.6x  EXTENDED  in 8d !   
+XMTR        98.85   102.00  judged   -3.1%   0.7x   0.8x  WATCH     in 13d !  
+DBD         86.26    89.05  judged   -3.1%   0.5x   0.6x  WATCH     in 7d !   
+PBI         18.06    18.63  judged   -3.1%   0.2x   0.2x  WATCH     in 7d !   
+AIZ        272.67   284.12  judged   -4.0%   0.4x   0.4x  WATCH     in 13d !  
+EXEL        55.15    57.57  judged   -4.2%   0.4x   0.4x  WATCH     in 13d !  
+WST        357.22   367.66  judged   -2.8%   0.6x   0.7x  WATCH     in 1d !   
+CYRX        16.45    16.89  judged   -2.6%   0.4x   0.5x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 15:58:07.72 ---- 
+TRIGGER CHECK  2026-07-22 15:58   SPY: Bullish (phase 2)
+watchlist is empty -- nothing to check.
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 0
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 16:28:07.78 ---- 
+TRIGGER CHECK  2026-07-22 16:28   SPY: Bullish (phase 2)
+watchlist is empty -- nothing to check.
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 0
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 16:58:07.63 ---- 
+TRIGGER CHECK  2026-07-22 16:58   SPY: Bullish (phase 2)
+watchlist is empty -- nothing to check.
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 0
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 17:28:08.17 ---- 
+TRIGGER CHECK  2026-07-22 17:28   SPY: Bullish (phase 2)
+watchlist is empty -- nothing to check.
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 0
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 17:58:07.77 ---- 
+TRIGGER CHECK  2026-07-22 17:58   SPY: Bullish (phase 2)
+watchlist is empty -- nothing to check.
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 0
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 18:28:07.83 ---- 
+2026-07-22 18:28:10,108 - yfinance - ERROR - 
+1 Failed download:
+2026-07-22 18:28:10,109 - yfinance - ERROR - ['SPY']: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')
+TRIGGER CHECK  2026-07-22 18:28   SPY: Bullish (phase 2)
+watchlist is empty -- nothing to check.
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 0
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Wed 07/22/2026 18:58:07.70 ---- 
+TRIGGER CHECK  2026-07-22 18:58   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+EBAY       110.95   111.86  judged   -0.8%   0.9x   0.9x  WATCH     in 14d !  
+BAP        393.67   403.30  judged   -2.4%   1.3x   1.3x  WATCH     in 22d    
+EIX         80.38    75.01  judged   +7.2%   1.1x   1.1x  EXTENDED  in 8d !   
+XMTR        98.44   102.00  judged   -3.5%   1.4x   1.4x  WATCH     in 13d !  
+DBD         87.11    89.05  judged   -2.2%   0.6x   0.6x  WATCH     in 7d !   
+PBI         17.99    18.63  judged   -3.4%   0.3x   0.3x  WATCH     in 7d !   
+AIZ        273.15   284.12  judged   -3.9%   0.6x   0.6x  WATCH     in 13d !  
+EXEL        54.98    57.57  judged   -4.5%   0.6x   0.6x  WATCH     in 13d !  
+WST        358.41   367.66  judged   -2.5%   1.1x   1.1x  WATCH     in 1d !   
+CYRX        16.42    16.89  judged   -2.8%   0.7x   0.7x  WATCH     in 13d !  
+summary: 0 triggered, 1 extended, 0 stale, 0 without a pivot, of 10
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-22.json
+---- Tue 07/28/2026 13:34:38.66 ---- 
+TRIGGER CHECK  2026-07-28 13:34   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        255.22   243.50  judged   +4.8%   0.8x   1.2x  WATCH     in 85d    
+TMP        101.12    97.12  judged   +4.1%   1.1x   1.8x  WATCH     in -4d    
+FAF         78.68    73.50  judged   +7.0%   0.3x   0.5x  EXTENDED  in 85d    
+NMM         79.25    75.85  judged   +4.5%   0.3x   0.5x  WATCH     in 23d    
+STBA        53.24    50.40  judged   +5.6%   0.4x   0.7x  EXTENDED  in 86d    
+UNP        296.22   303.15  judged   -2.3%   0.7x   1.1x  WATCH     in 86d    
+summary: 0 triggered, 2 extended, 0 stale, 0 without a pivot, of 6
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-28.json
+---- Thu 07/30/2026  0:01:27.55 ---- 
+TRIGGER CHECK  2026-07-30 00:01   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  0:31:27.83 ---- 
+TRIGGER CHECK  2026-07-30 00:31   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  1:01:27.60 ---- 
+TRIGGER CHECK  2026-07-30 01:01   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  1:31:27.65 ---- 
+TRIGGER CHECK  2026-07-30 01:31   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  3:31:01.05 ---- 
+TRIGGER CHECK  2026-07-30 03:31   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  3:31:27.57 ---- 
+TRIGGER CHECK  2026-07-30 03:31   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  4:01:28.15 ---- 
+TRIGGER CHECK  2026-07-30 04:01   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026  4:31:27.59 ---- 
+TRIGGER CHECK  2026-07-30 04:31   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        249.43   243.50  judged   +2.4%   1.3x      -  STALE     in 83d    
+TMP         99.44    97.12  judged   +2.4%   1.1x      -  STALE     in -6d    
+FAF         78.17    73.50  judged   +6.3%   0.8x      -  STALE     in 83d    
+NMM         78.01    75.85  judged   +2.9%   0.7x      -  STALE     in 21d !  
+STBA        52.95    50.40  judged   +5.1%   1.5x      -  STALE     in 84d    
+UNP        292.19   303.15  judged   -3.6%   1.0x      -  STALE     in 84d    
+summary: 0 triggered, 0 extended, 6 stale, 0 without a pivot, of 6
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026 13:30:01.75 ---- 
+TRIGGER CHECK  2026-07-30 13:30   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+PKG        245.70   243.50  judged   +0.9%   0.3x   0.4x  WATCH     in 83d    
+TMP        100.47    97.12  judged   +3.5%   0.6x   0.9x  WATCH     in -6d    
+FAF         75.57    73.50  judged   +2.8%   0.2x   0.4x  WATCH     in 83d    
+NMM         78.54    75.85  judged   +3.5%   0.4x   0.6x  WATCH     in 21d !  
+STBA        52.74    50.40  judged   +4.7%   0.2x   0.3x  WATCH     in 84d    
+UNP        287.08   303.15  judged   -5.3%   0.6x   0.9x  WATCH     in 84d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 6
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026 14:00:01.70 ---- 
+TRIGGER CHECK  2026-07-30 14:00   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.27    63.91  auto     -1.0%   0.3x   0.5x  WATCH     in 83d    
+BOKF       141.92   143.65  auto     -1.2%   0.2x   0.3x  WATCH     -         
+WSM        233.27   243.84  auto     -4.3%   0.2x   0.3x  WATCH     in 27d    
+PEBK        43.35    45.78  auto     -5.3%   0.6x   0.8x  WATCH     in 81d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026 15:02:25.85 ---- 
+TRIGGER CHECK  2026-07-30 15:02   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.21    63.91  auto     -1.1%   0.4x   0.5x  WATCH     in 83d    
+BOKF       141.75   143.65  auto     -1.3%   0.3x   0.4x  WATCH     -         
+WSM        232.71   243.84  auto     -4.6%   0.2x   0.3x  WATCH     in 27d    
+PEBK        43.74    45.78  auto     -4.5%   0.6x   0.7x  WATCH     in 81d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
