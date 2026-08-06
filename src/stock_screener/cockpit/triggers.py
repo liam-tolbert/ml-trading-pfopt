@@ -52,11 +52,15 @@ EARLY_CLOSE_LEN_MIN = 210         # NYSE half days close 13:00 -> a 09:30-13:00 
 EARLY_CLOSE_CUTOFF_MIN = 13 * 60 + 5  # ...and the bar settles ~13:05 on those days
 
 REPORT_SCHEMA = 1
-# The full per-name status vocabulary, pinned by the test suite — a new status (e.g. the
-# proposed "crossed") must be registered here or the report test fails. "untracked" = the
-# name no longer passes the 8/8 trend template (it left the scan table): kept on the
-# watchlist, but its trigger is NOT evaluated until it re-qualifies.
-STATUSES = ("no_data", "untracked", "no_pivot", "stale", "extended", "triggered", "watch")
+# The full per-name status vocabulary, pinned by the test suite — a new status must be
+# registered here or the report test fails. "untracked" = the name no longer passes the
+# 8/8 trend template (it left the scan table): kept on the watchlist, but its trigger is
+# NOT evaluated until it re-qualifies. "crossed" (§6.19 open item, built §6.36) = above
+# the frozen pivot WITHOUT volume confirmation — the quiet drift the volume gate will
+# never fire on (PECO). Rendered loud so "it left without me" stops looking identical to
+# "still basing"; NOT a buy signal.
+STATUSES = ("no_data", "untracked", "no_pivot", "stale", "extended", "triggered",
+            "crossed", "watch")
 
 
 def _today_et(today=None) -> pd.Timestamp:
@@ -106,6 +110,35 @@ def _session_elapsed(now: pd.Timestamp) -> float:
     if mins <= 0:
         return 0.0
     return min(1.0, max(PACE_MIN_ELAPSED, mins / _session_len_min(now.normalize())))
+
+
+def no_session_since(mtime_epoch: float, now=None) -> bool:
+    """True when NO market-session time falls between ``mtime_epoch`` (a cache file's
+    write time, epoch seconds) and ``now`` — no new price data can exist, so the cache
+    is still CURRENT regardless of wall-clock age. Written after the settled close
+    (~16:05 ET; ~13:05 on an early close) it stays good all evening, over the weekend,
+    and through Monday pre-open. Sessions are weekday 09:30 → the settled-bar cutoff —
+    the 16:00-16:05 settle window counts as session time, so a cache written at 16:02
+    (possibly provisional volume) correctly reads stale. Full-market holidays are NOT
+    modeled (same stance as ``_early_close``): a holiday weekday counts as a session,
+    which fails SAFE — a needless cheap top-up, never a stale serve."""
+    try:
+        m = (pd.Timestamp(mtime_epoch, unit="s", tz="UTC")
+             .tz_convert("America/New_York").tz_localize(None))
+    except Exception:
+        return False
+    n = _now_et(now)
+    if m >= n:
+        return True
+    day = m.normalize()
+    while day <= n.normalize():
+        if day.weekday() < 5:                             # Mon-Fri
+            s_open = day + pd.Timedelta(minutes=SESSION_OPEN_MIN)
+            s_end = day + pd.Timedelta(minutes=_intraday_cutoff_min(day))
+            if max(s_open, m) < min(s_end, n):            # (m, n) overlaps the session
+                return False
+        day += pd.Timedelta(days=1)
+    return True
 
 
 def _volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
@@ -173,9 +206,11 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
 
     Returns the per-name report dict (see ``check_triggers``). ``status`` is a display
     convenience with precedence no_data -> untracked -> no_pivot -> stale -> extended ->
-    triggered -> watch; the booleans stay authoritative. ``triggered`` requires close above the frozen
+    triggered -> crossed -> watch; the booleans stay authoritative. ``triggered`` requires close above the frozen
     pivot AND the 50-day volume gate AND a bar dated today (a Friday bar must not re-fire
-    on a Monday-holiday run). ``volume_pace`` (intraday context, NEVER the gate) is the
+    on a Monday-holiday run). ``crossed`` = close above the pivot WITHOUT the volume
+    confirm — the quiet drift the trigger can't fire on (a name frozen post-breakout may
+    sit here forever); informational, never a buy signal. ``volume_pace`` (intraday context, NEVER the gate) is the
     50-day ratio divided by the fraction of the session elapsed at ``now`` — "is volume
     running hot for this time of day?"; equals the plain ratio after the close."""
     t = _today_et(today)
@@ -188,7 +223,7 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         "volume": None, "volume_ratio_50": None, "volume_ratio_20": None,
         "volume_ratio_50_scaled": None, "early_close": bool(_early_close(t)),
         "volume_pace": None, "volume_confirmed": None, "triggered": False,
-        "untracked": False,
+        "crossed": None, "untracked": False,
         "extended": None, "pct_from_pivot": None, "earnings_in": None,
         "earnings_soon": None, "error": None,
     }
@@ -250,10 +285,12 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         out["pct_from_pivot"] = round((close / pivot - 1.0) * 100.0, 2)
         out["triggered"] = bool(out["close_above_pivot"] and out["volume_confirmed"]
                                 and not out["stale"])
+        out["crossed"] = bool(out["close_above_pivot"] and not out["volume_confirmed"])
 
         out["status"] = ("stale" if out["stale"]
                          else "extended" if out["extended"]
                          else "triggered" if out["triggered"]
+                         else "crossed" if out["crossed"]
                          else "watch")
     except Exception as e:                                # per-name failures never abort the run
         out["error"] = str(e)
@@ -300,6 +337,7 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
         # by STATUS, not the raw booleans: an extended name that also cleared price+volume
         # keeps triggered=True in its row, but the summary files it under "don't chase".
         "triggered": [n["ticker"] for n in names if n["status"] == "triggered"],
+        "crossed": [n["ticker"] for n in names if n["status"] == "crossed"],
         "extended": [n["ticker"] for n in names if n["status"] == "extended"],
         "stale": [n["ticker"] for n in names if n.get("stale")],
         "untracked": [n["ticker"] for n in names if n["status"] == "untracked"],
@@ -393,8 +431,14 @@ def format_report(report: dict) -> str:
                 + (f"  ERR: {n['error']}" if n.get("error") else ""))
     s = report.get("summary", {})
     lines.append(f"summary: {len(s.get('triggered', []))} triggered, "
+                 f"{len(s.get('crossed', []))} crossed, "
                  f"{len(s.get('extended', []))} extended, {len(s.get('stale', []))} stale, "
                  f"{len(s.get('no_pivot', []))} without a pivot, of {s.get('n', 0)}")
+    if s.get("crossed"):
+        lines.append(f"CROSSED ({', '.join(s['crossed'])}): above the frozen pivot WITHOUT "
+                     f"volume confirmation -- a quiet drift is not a buy; wait for a "
+                     f">={TRIGGER_VOL_RATIO}x volume close, or plan a pullback/secondary "
+                     "entry off the pivot.")
     if s.get("untracked"):
         lines.append(f"UNTRACKED ({', '.join(s['untracked'])}): no longer passes the "
                      f"{TEMPLATE_CRITERIA}/8 trend template -- kept on the watchlist, but "

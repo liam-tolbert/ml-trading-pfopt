@@ -254,11 +254,27 @@ def _trading_days_since(last, today) -> Optional[int]:
         return None
 
 
+def _stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload) -> dict:
+    """A zero-share plan row for a HELD name whose buy failed the sizing gates: submit's
+    held path sends no buy anyway and only re-arms the GTC stop, so this row exists purely
+    to carry ``stop_price`` there instead of the name silently losing stop maintenance
+    (§6.3's build-time stop gap, closed §6.39)."""
+    return {"ticker": t, "shares": 0, "price": round(price, 2),
+            "pivot": round(float(pivot), 2) if pivot else None,
+            "pivot_frozen": bool(frozen),
+            "est_value": 0.0,
+            "extended": bool(buy_hi and price > buy_hi),
+            "capped": False, "stop_only": True,
+            "stop_price": round(float(stop), 2),
+            "earnings_in": payload.get("earnings_in")}
+
+
 def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                    mode: str, amount: float,
                    equity: Optional[float] = None, asof=None,
                    max_bar_age_days: Optional[float] = None,
-                   pivots: Optional[Dict[str, float]] = None) -> Tuple[List[dict], List[dict]]:
+                   pivots: Optional[Dict[str, float]] = None,
+                   held: Optional[Dict[str, int]] = None) -> Tuple[List[dict], List[dict]]:
     """Size a market-BUY for EACH watchlisted name by the chosen ``mode``:
 
     * ``"pct"``     — ``amount`` % of the account ``equity`` per name (needs ``equity``);
@@ -299,6 +315,13 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     below — mirroring ``scan._entry_levels``; a tighter engine stop below the frozen pivot is
     kept). Each plan entry carries ``pivot_frozen`` (True when its pivot came from ``pivots``).
     Omit ``pivots`` and every name uses its scan-derived levels as before.
+
+    ``held`` (optional ``{ticker: shares}``) closes §6.3's build-time stop gap: a HELD
+    name whose buy fails a sizing gate (rounds < 1 share, or under the $50 floor) is
+    emitted as a zero-share ``stop_only=True`` row instead of skipped, so submit's held
+    path still re-arms its protective stop. Names skipped before levels exist (not in
+    scan / no price / stale) or without a computable stop still skip — there's no level
+    to arm. Omit ``held`` (the default) and behavior is unchanged.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
@@ -376,13 +399,22 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
         else:                                                        # "shares"
             shares = int(amount)
 
+        # A held name failing a sizing gate still needs its stop maintained — emit a
+        # stop-only row (shares=0) instead of dropping it (§6.3 gap; needs a valid stop).
+        _held_fallback = bool(held and held.get(t, 0) > 0 and stop and stop > 0)
         if shares < 1:
-            skipped.append({"ticker": t, "reason": "sizing rounds to < 1 share"})
+            if _held_fallback:
+                plan.append(_stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload))
+            else:
+                skipped.append({"ticker": t, "reason": "sizing rounds to < 1 share"})
             continue
         est_value = shares * price
         if mode != "shares" and est_value < MIN_TRADE_USD:
-            skipped.append({"ticker": t,
-                            "reason": f"under the ${MIN_TRADE_USD:.0f} order minimum"})
+            if _held_fallback:
+                plan.append(_stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload))
+            else:
+                skipped.append({"ticker": t,
+                                "reason": f"under the ${MIN_TRADE_USD:.0f} order minimum"})
             continue
 
         plan.append({
@@ -636,9 +668,12 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       10%-cap since a protective stop is risk-reducing.
     * **not held** — a market BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
       leg (the stop activates only after the buy fills, so it works even when the buy is queued
-      to the next open). That OTO stop leg rides the market entry as a DAY order (Alpaca market
-      entries can't be GTC); it's promoted to a GTC ratcheted stop by the held-name path on the
-      next re-arm. Without ``attach_stop``, a plain market BUY.
+      to the next open). The whole OTO is **GTC** — verified live on paper 2026-08-04: the stop
+      leg is held until the buy fills, then rests as a GTC stop that SURVIVES the close.
+      (Previously DAY on the belief a market entry couldn't be GTC: an intraday fill's stop leg
+      expired at that day's close minutes later — the PEBK incident — leaving the position
+      unprotected until a manual re-arm.) The held-name ratchet manages (only ever raises) the
+      same stop from the next re-arm on. Without ``attach_stop``, a plain market BUY.
 
     Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap (buys only).
     Returns ``{equity, cash, account_number, using_dedicated, results}`` where each result is
@@ -713,12 +748,13 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
                     continue
-                # OTO = DAY (Alpaca market entries can't be GTC), so this initial stop leg is a
-                # DAY order; the held-name path promotes it to a persistent GTC ratcheted stop on
-                # the next re-arm once the fill shows up as a position.
+                # GTC OTO (verified live 2026-08-04): the paper API accepts a GTC market
+                # parent and the stop leg inherits GTC ("held" until the fill), so the
+                # protective stop persists past the close. A DAY leg expired AT the close —
+                # a 15:58 buy left its stop dead two minutes later (the PEBK incident).
                 req = MarketOrderRequest(
                     symbol=t, qty=o["shares"], side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY, order_class=OrderClass.OTO,
+                    time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
                     stop_loss=StopLossRequest(stop_price=round(float(stop), 2)),
                     client_order_id=f"SEPAoto-{t}-{int(time.time() * 1000)}")
                 detail_head = f"buy {o['shares']} + stop @ {stop:.2f}"

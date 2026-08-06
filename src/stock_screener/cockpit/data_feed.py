@@ -338,6 +338,19 @@ def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
     return raw
 
 
+def _cache_settled(path) -> bool:
+    """True when ``path`` was written with NO market session since (post-close evenings,
+    weekends, pre-open) — the cache holds the settled close and is current regardless of
+    the wall-clock ``max_age_days`` window. Calendar logic lives in
+    ``triggers.no_session_since`` (session clock + early-close single source). Never
+    raises; missing file / any error reads as not-settled (the normal gates decide)."""
+    try:
+        from .triggers import no_session_since
+        return no_session_since(path.stat().st_mtime)
+    except Exception:
+        return False
+
+
 def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = False,
                     max_age_days: float = 1.0,
                     chunk: int = 100,
@@ -356,6 +369,13 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     ``lookback`` refetch, which also re-baselines auto-adjusted history. ``max_age_days=0`` sends
     every cached name through the cheap incremental top-up (the nightly EOD path — finalized
     close without a full 2y refetch).
+
+    Independent of the age window, a cache written with NO market session since (after the
+    settled close → evenings, weekends, pre-open; see ``triggers.no_session_since``) is served
+    as-is — no new bars can exist, so wall-clock age is irrelevant. Even ``max_age_days=0``
+    honors this (a post-close fetch IS the finalized close). A NEGATIVE ``max_age_days`` (the
+    tests' sentinel for "never serve from cache freshness") bypasses the settled gate too;
+    ``force=True`` bypasses everything.
     """
     ensure_dirs()
     syms = [normalize(t) for t in tickers]
@@ -382,6 +402,17 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             try:
                 out[sym] = pd.read_parquet(path)
                 _emit(sym, "cached (fresh)")
+                continue
+            except Exception:
+                pass
+        elif not force and max_age_days >= 0 and _cache_settled(path):
+            # Written after the settled close with no session since — current no matter
+            # how old the wall clock says it is (evening/weekend/pre-open scans). A
+            # NEGATIVE max_age_days (the tests' skip-every-fresh-serve sentinel) bypasses
+            # this gate too, keeping the top-up paths deterministically reachable.
+            try:
+                out[sym] = pd.read_parquet(path)
+                _emit(sym, "cached (settled close)")
                 continue
             except Exception:
                 pass

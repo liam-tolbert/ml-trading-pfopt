@@ -1119,6 +1119,79 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
     # without raising (asserted above) means the CSV builders ran cleanly on real payloads.
 
 
+def test_rs_line_new_high_flag():
+    """§6.39 RS line at new high before price (IBD blue dot): the ÷SPY line at its 52-wk
+    high while the stock still bases -> True; underperformance -> False; too little
+    overlapping history -> None (unknown, never a failed check). Funnel: `rs_nh` lands in
+    the candidates frame and every payload."""
+    import pandas as pd
+    from src.stock_screener.cockpit.scan import rs_line_at_high
+
+    idx = pd.bdate_range(end="2026-06-30", periods=300)
+    # SPY drifts down 5% while the stock holds flat -> RS line rises to its high
+    spy_dn = pd.Series([300.0 * (1 - 0.05 * i / 299) for i in range(300)], index=idx)
+    flat = pd.DataFrame({"Close": [100.0] * 300}, index=idx)
+    assert rs_line_at_high(flat, spy_dn) is True
+
+    # stock falls 10% while SPY holds flat -> RS line at its LOWS
+    spy_flat = pd.Series([300.0] * 300, index=idx)
+    falling = pd.DataFrame(
+        {"Close": [100.0 * (1 - 0.10 * i / 299) for i in range(300)]}, index=idx)
+    assert rs_line_at_high(falling, spy_flat) is False
+
+    # under min_days of overlap -> None
+    short = pd.DataFrame({"Close": [100.0] * 50}, index=idx[-50:])
+    assert rs_line_at_high(short, spy_flat) is None
+
+    # funnel integration: the flag reaches rows + payloads (value bool or None)
+    prices, spy, _ = _synthetic_slice()
+    res = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                          cfg=ScanConfig(min_rs=0.0))
+    assert "rs_nh" in res.candidates.columns
+    assert all("rs_nh" in p for p in res.payloads.values())
+    for v in res.candidates["rs_nh"]:
+        assert v is None or v is True or v is False or pd.isna(v)
+
+
+def test_build_buy_plan_held_stop_only():
+    """§6.39 (closes §6.3's build-time stop gap): a HELD name whose buy fails a sizing
+    gate becomes a zero-share `stop_only` row — its stop still reaches submit's re-arm
+    path — instead of silently vanishing. Un-held, the same names skip exactly as before;
+    a pre-level skip (not in the scan) stays a skip even when held."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan
+
+    def _payload(price, pivot):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        return {"df": df, "levels": {"pivot": pivot, "buy_zone": (pivot, pivot * 1.05),
+                                     "stop": round(pivot * 0.925, 2)}}
+
+    pl = {"BIG": _payload(500.0, 500.0),     # $300/name -> rounds to 0 shares
+          "TIN": _payload(40.0, 40.0)}       # $45/name -> 1 share = $40, under the floor
+
+    # un-held: both skip (behavior unchanged when `held` is omitted)
+    plan0, skip0 = build_buy_plan(["BIG"], pl, mode="dollars", amount=300.0)
+    assert not plan0 and skip0[0]["reason"] == "sizing rounds to < 1 share"
+    plan1, skip1 = build_buy_plan(["TIN"], pl, mode="dollars", amount=45.0)
+    assert not plan1 and "order minimum" in skip1[0]["reason"]
+
+    # held: zero-share stop-only rows carrying the stop, nothing skipped
+    held = {"BIG": 10, "TIN": 100}
+    plan2, skip2 = build_buy_plan(["BIG"], pl, mode="dollars", amount=300.0, held=held)
+    assert not skip2 and plan2[0]["stop_only"] is True and plan2[0]["shares"] == 0
+    assert plan2[0]["stop_price"] == round(500.0 * 0.925, 2)
+    assert plan2[0]["est_value"] == 0.0
+    plan3, skip3 = build_buy_plan(["TIN"], pl, mode="dollars", amount=45.0, held=held)
+    assert not skip3 and plan3[0]["stop_only"] is True
+
+    # pre-level skips unchanged: a held name absent from the scan has no level to arm
+    plan4, skip4 = build_buy_plan(["GONE"], pl, mode="dollars", amount=300.0,
+                                  held={"GONE": 5})
+    assert not plan4 and skip4[0]["reason"] == "not in the current scan"
+
+
 def test_build_buy_plan_sizing_modes():
     """The paper-trade plan builder sizes each name by the chosen mode — % of equity,
     $ per name, an explicit share count, or risk-to-stop — flags extended names, and skips
@@ -1462,6 +1535,9 @@ def test_submit_buy_plan_stop_logic():
     mreq = [r for r in fa.submitted if isinstance(r, MarketOrderRequest)][0]
     assert mreq.order_class == OrderClass.OTO and mreq.side == OrderSide.BUY
     assert int(mreq.qty) == 5 and float(mreq.stop_loss.stop_price) == 46.0
+    # §6.38: the OTO must be GTC end-to-end — a DAY parent made the stop leg a DAY order
+    # that EXPIRED at that day's close (PEBK 2026-08-04: bought 15:58, stop dead 16:00).
+    assert mreq.time_in_force == TimeInForce.GTC
 
     # --- B: attach OFF -> naked buy for a fresh name; held name skipped -------------------
     fb = FakeClient()
@@ -2985,10 +3061,13 @@ def test_check_triggers_pure():
     assert abs(r_mid["volume_pace"] - 6.0) < 1e-9        # 3.0 / 0.5
     assert r_mid["triggered"] is True                    # gate = actual ratio, not pace
 
-    # (b) same but flat volume -> price cleared, volume didn't -> watch, not triggered
+    # (b) same but flat volume -> price cleared, volume didn't -> CROSSED (§6.19's quiet
+    # drift, built §6.36): loud in the report, distinct from a below-pivot "watch", and
+    # still NOT triggered — a volume-less cross is never a buy signal.
     r2 = check_one(E("NOV", 98.0), _trigger_frame(TODAY, flat), None, today=TODAY)
-    assert r2["status"] == "watch" and r2["triggered"] is False
+    assert r2["status"] == "crossed" and r2["triggered"] is False, r2
     assert r2["close_above_pivot"] is True and r2["volume_confirmed"] is False
+    assert r2["crossed"] is True
 
     # (c) extended: close 100 vs pivot 90 (+11%) on volume -> don't chase beats triggered
     r3 = check_one(E("EXT", 90.0), _trigger_frame(TODAY, flat, spike_vol), None, today=TODAY)
@@ -3001,9 +3080,10 @@ def test_check_triggers_pure():
     assert r4["status"] == "stale" and r4["stale"] is True and r4["triggered"] is False
     assert r4["volume_pace"] is None
 
-    # (e) below the pivot -> watch, negative distance
+    # (e) below the pivot -> watch, negative distance, and NOT crossed
     r5 = check_one(E("BLW", 105.0), _trigger_frame(TODAY, flat), None, today=TODAY)
     assert r5["status"] == "watch" and r5["pct_from_pivot"] < 0
+    assert r5["crossed"] is False
 
     # earnings flag rides in from the fundamentals dict (10 days out -> soon)
     r6 = check_one(E("ERN", 98.0), _trigger_frame(TODAY, flat),
@@ -3011,23 +3091,25 @@ def test_check_triggers_pure():
     assert r6["earnings_in"] == 10 and r6["earnings_soon"] is True
 
     # full report: summary buckets by STATUS; missing frame -> no_data; spy note present
-    entries = [E("TRG", 98.0), E("EXT", 90.0), E("BLW", 105.0),
+    entries = [E("TRG", 98.0), E("NOV", 98.0), E("EXT", 90.0), E("BLW", 105.0),
                make_entry("GONE"), make_entry("UNF")]      # GONE: no frame; UNF: no pivot
     prices = {"TRG": _trigger_frame(TODAY, flat, spike_vol),
+              "NOV": _trigger_frame(TODAY, flat),
               "EXT": _trigger_frame(TODAY, flat, spike_vol),
               "BLW": _trigger_frame(TODAY, flat),
               "UNF": _trigger_frame(TODAY, flat)}
     spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
     rep = check_triggers(entries, prices, spy=spy, today=TODAY, now=f"{TODAY} 11:00")
     s = rep["summary"]
-    assert s["n"] == 5
+    assert s["n"] == 6
     assert s["triggered"] == ["TRG"] and s["extended"] == ["EXT"]
+    assert s["crossed"] == ["NOV"]
     assert s["no_data"] == ["GONE"] and s["no_pivot"] == ["UNF"]
     assert rep["all_stale"] is False and rep["date"] == TODAY
     assert rep["spy"] is not None and "phase" in rep["spy"]
     assert rep["intraday"] is True                       # fresh bar + mid-session run
     # Item 29: STATUSES is the status vocabulary — every emitted status must come from it
-    # (a future status, e.g. §6.19's proposed "crossed", must register itself here).
+    # (any future status must register itself there; "crossed" did in §6.36).
     assert all(n["status"] in STATUSES for n in rep["names"]), rep["names"]
 
     # the same report generated after the close is NOT intraday (settled bar)
@@ -3073,11 +3155,12 @@ def test_early_close_calendar_and_gate():
     assert abs(r["volume_ratio_50"] - 1.0) < 1e-9        # displayed ratio stays RAW
     assert abs(r["volume_ratio_50_scaled"] - 1.86) < 0.01
     assert r["volume_confirmed"] is True and r["triggered"] is True, r
-    # ...and the same tape on a NORMAL Friday stays a watch (gate unscaled).
+    # ...and the same tape on a NORMAL Friday fails the (unscaled) gate — above the pivot
+    # without volume that's a §6.36 "crossed", not a trigger.
     r_norm = check_one(E, _trigger_frame("2026-07-10", flat, even_vol), None,
                        today="2026-07-10", now="2026-07-10 16:30")
     assert r_norm["early_close"] is False and r_norm["volume_ratio_50_scaled"] is None
-    assert r_norm["volume_confirmed"] is False and r_norm["status"] == "watch"
+    assert r_norm["volume_confirmed"] is False and r_norm["status"] == "crossed"
     # A genuinely quiet half day (raw 0.7 -> scaled 1.3) still fails the gate.
     low_vol = [1000] * 59 + [700]
     r_low = check_one(E, _trigger_frame(HALF, flat, low_vol), None,
@@ -3388,11 +3471,14 @@ def test_trigger_report_sidebar_renders():
              "earnings_in": 12},
             {"ticker": "AUTX", "status": "watch", "judged_pivot": 50.0,
              "pivot_source": "auto", "close": 48.0, "volume_ratio_50": 0.9},
+            {"ticker": "CRSX", "status": "crossed", "judged_pivot": 100.0,
+             "pivot_source": "judged", "close": 100.8, "volume_ratio_50": 0.7,
+             "crossed": True},                             # §6.36 quiet drift above pivot
             {"ticker": "NOPX", "status": "no_pivot"},      # sparse row must render too
         ],
-        "summary": {"n": 3, "triggered": ["TRGX"], "extended": [], "stale": [],
-                    "earnings_soon": ["TRGX"], "no_data": [], "no_pivot": ["NOPX"],
-                    "auto_frozen": []},
+        "summary": {"n": 4, "triggered": ["TRGX"], "crossed": ["CRSX"], "extended": [],
+                    "stale": [], "earnings_soon": ["TRGX"], "no_data": [],
+                    "no_pivot": ["NOPX"], "auto_frozen": []},
     }
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
     with tempfile.TemporaryDirectory() as _tmp:
@@ -3410,6 +3496,127 @@ def test_trigger_report_sidebar_renders():
     assert "14:31" in rendered, "check time (from generated_at) not rendered"
     assert "TRGX" in rendered and "triggered" in rendered, "triggered name not rendered"
     assert "pace 2.8" in rendered, "intraday volume pace not rendered"
+    assert "CRSX" in rendered and "crossed" in rendered, "crossed name not rendered"
+    assert "quiet drift" in rendered, "crossed explainer caption not rendered"
+
+
+def test_freeze_warning_post_breakout():
+    """§6.19/§6.36 freeze-time warning: when the charted name already trades ABOVE the
+    pivot the ⭐/📌 buttons would freeze, the Step-3 panel warns that the armed trigger
+    may never re-fire (post-breakout freeze — the PECO case); a name still below its
+    pivot renders no such warning."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_freeze_warning_post_breakout (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    assert len(result.candidates) >= 1, "fixture must yield >=1 candidate"
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+
+    def _render(pivot_vs_close: float) -> str:
+        # Reposition EVERY payload's app pivot relative to its own last close, so the
+        # assertion holds regardless of which table row the app picks for the chart.
+        for pl in result.payloads.values():
+            last_close = float(pl["df"]["Close"].iloc[-1])
+            pl["levels"]["pivot"] = round(last_close * pivot_vs_close, 2)
+        with tempfile.TemporaryDirectory() as _tmp:
+            with patch.object(scanmod, "run_scan", return_value=result), \
+                    patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                    patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+                at = AppTest.from_file(app_path, default_timeout=60)
+                at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        return " ".join(str(getattr(c, "value", "")) for c in at.caption)
+
+    caps = _render(0.95)                                 # price ABOVE pivot -> warning
+    assert "post-breakout" in caps, "freeze warning missing for a name above its pivot"
+    caps2 = _render(1.05)                                # price BELOW pivot -> silent
+    assert "post-breakout" not in caps2, "freeze warning must not fire below the pivot"
+
+
+def test_no_session_since_calendar():
+    """§6.37 settled-cache calendar: no-session-between predicate under a pinned now.
+    A cache written after the settled close is current all evening / over the weekend /
+    through pre-open; the 16:00-16:05 settle window, any session overlap, and early-close
+    (13:05) days behave; a future mtime is trivially current."""
+    import pandas as pd
+    from src.stock_screener.cockpit.triggers import no_session_since
+
+    def ep(s):                                            # ET wall time -> epoch seconds
+        return pd.Timestamp(s, tz="America/New_York").timestamp()
+
+    # Tuesday evening: cache 16:35, now 20:00 -> current (the user-reported case)
+    assert no_session_since(ep("2026-08-04 16:35"), now="2026-08-04 20:00") is True
+    # inside the 16:00-16:05 settle window -> possibly provisional volume -> NOT current
+    assert no_session_since(ep("2026-08-04 16:02"), now="2026-08-04 20:00") is False
+    # weekend: Friday 17:00 cache is current Sunday and Monday pre-open, stale mid-session
+    assert no_session_since(ep("2026-07-31 17:00"), now="2026-08-02 12:00") is True
+    assert no_session_since(ep("2026-07-31 17:00"), now="2026-08-03 08:00") is True
+    assert no_session_since(ep("2026-07-31 17:00"), now="2026-08-03 10:00") is False
+    # same-day intraday gap -> the 30-min window governs, not this predicate
+    assert no_session_since(ep("2026-08-04 14:00"), now="2026-08-04 15:00") is False
+    # early close (day after Thanksgiving): cutoff 13:05 — 13:30 cache current, 12:59 not
+    assert no_session_since(ep("2026-11-27 13:30"), now="2026-11-27 18:00") is True
+    assert no_session_since(ep("2026-11-27 12:59"), now="2026-11-27 18:00") is False
+    # future mtime (clock skew) -> nothing newer can exist -> current
+    assert no_session_since(ep("2026-08-04 21:00"), now="2026-08-04 20:00") is True
+
+
+def test_get_many_prices_settled_cache_served():
+    """§6.37: a parquet hours past the 30-min freshness window is still served AS-IS when
+    no market session has elapsed since it was written (post-close/weekend), yfinance
+    untouched — and goes through the normal top-up when a session HAS elapsed. The
+    calendar predicate is patched for determinism; its truth table is pinned by
+    ``test_no_session_since_calendar``."""
+    import os
+    import tempfile
+    import time as _time
+    from unittest.mock import patch
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed, triggers as trg
+
+    idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=60)
+    closes = [100.0 + i for i in range(60)]
+    cached = pd.DataFrame({"Open": closes, "High": [c + 1 for c in closes],
+                           "Low": [c - 1 for c in closes], "Close": closes,
+                           "Volume": [1000] * 60}, index=idx)
+    calls = []
+
+    def fake_download(*a, **kw):
+        calls.append(kw)
+        return pd.DataFrame()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        with patch.object(dfeed, "PRICES_DIR", pdir), patch("yfinance.download",
+                                                            fake_download):
+            path = pdir / "AAPL.parquet"
+            cached.to_parquet(path)
+            old = _time.time() - 3 * 3600                  # 3h old — far past 30 min
+            os.utime(path, (old, old))
+
+            # No session since the write -> served as-is even at max_age_days ~ 30 min
+            with patch.object(trg, "no_session_since", lambda *a, **k: True):
+                got = dfeed.get_many_prices(["AAPL"], max_age_days=30 / (24 * 60),
+                                            pause=0, retries=0)
+            assert not calls, "settled cache must not touch yfinance"
+            assert len(got["AAPL"]) == 60
+
+            # A session HAS elapsed -> normal top-up path fires (fetch attempted)
+            with patch.object(trg, "no_session_since", lambda *a, **k: False):
+                got2 = dfeed.get_many_prices(["AAPL"], max_age_days=30 / (24 * 60),
+                                             pause=0, retries=0)
+            assert calls, "elapsed session must leave the settled gate"
+            assert len(got2["AAPL"]) == 60                 # empty fetch degrades to cache
 
 
 def test_get_many_prices_max_age_days():

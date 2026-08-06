@@ -42,7 +42,9 @@ MAX_STOP_FROM_PIVOT = 0.10
 
 # Price caches fetched within this window are served AS-IS by a scan — reopening the app or
 # clicking Re-scan minutes after the last fetch costs zero network calls. Anything older goes
-# through the incremental top-up. The Advanced full re-download (force=True) bypasses it.
+# through the incremental top-up — UNLESS no market session has elapsed since the cache was
+# written (post-close evenings, weekends, pre-open: `data_feed._cache_settled`), in which case
+# it's current at any wall-clock age. The Advanced full re-download (force=True) bypasses both.
 PRICE_FRESH_MINUTES = 30
 
 
@@ -225,6 +227,24 @@ def detect_breakout_prior_high(df: pd.DataFrame, cp: float, phase_info: Dict,
     return res
 
 
+def rs_line_at_high(df: pd.DataFrame, spy_close: pd.Series, window: int = 252,
+                    tol: float = 0.002, min_days: int = 126) -> Optional[bool]:
+    """Is the RS LINE (stock close ÷ SPY close, date-aligned) at its trailing-``window``
+    high? The IBD/MarketSmith "blue dot" ingredient: the line within ``tol`` (0.2%,
+    float-noise headroom) of its 52-week max. The caller combines this with "price still
+    below its own 52-week high" for the full *RS new high BEFORE price* accumulation tell —
+    outperformance while still basing. None (not False) when fewer than ``min_days``
+    overlapping sessions exist — unknown, don't render as a failed check."""
+    try:
+        ratio = (df["Close"] / spy_close).dropna()
+        if len(ratio) < min_days:
+            return None
+        tail = ratio.iloc[-window:]
+        return bool(ratio.iloc[-1] >= float(tail.max()) * (1.0 - tol))
+    except Exception:
+        return None
+
+
 def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
     """The Step-4 display RMV, reusing the value ``detect_vcp`` already computed. Safe:
     the last-bar RMV depends on at most ~60 trailing bars (a 10-bar ATR inside a 50-bar
@@ -296,6 +316,13 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             earnings_in = _days_to_earnings(fund)
 
             levels = _entry_levels(cp, breakout, stop, phase_info)
+            # RS line at new high BEFORE price (IBD blue dot): the ÷SPY line at its 52-wk
+            # high while price is still under its own — accumulation during the base.
+            # Advisory only; None = not enough overlapping history.
+            _rs_at_high = rs_line_at_high(df, spy["Close"])
+            _w52 = phase_info.get("week_52_high")
+            rs_nh = (None if _rs_at_high is None
+                     else bool(_rs_at_high and _w52 and cp < _w52))
             # RMV (Relative Measured Volatility): advisory base-tightness read for Step 4.
             # Advisory only — does NOT feed the pivot/stop/target math.
             levels["rmv"] = _rmv_display(df, vcp)
@@ -313,6 +340,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "ticker": t,
                 "price": round(cp, 2),
                 "rs": rsr,
+                "rs_nh": rs_nh,
                 "criteria": tmpl.get("criteria_passed"),
                 "fund_score": s2["score"],
                 "rev_yoy": _fmt(fund and fund.get("revenue_yoy")),
@@ -333,7 +361,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             payloads[t] = {
                 "df": df, "phase_info": phase_info, "vcp": vcp,
                 "breakout": breakout, "levels": levels, "fundamentals": fund,
-                "step2": s2, "rs": rsr, "template": tmpl,
+                "step2": s2, "rs": rsr, "rs_nh": rs_nh, "template": tmpl,
                 "earnings_in": earnings_in,
             }
         except Exception as e:                                  # never let one name kill the scan

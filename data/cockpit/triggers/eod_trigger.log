@@ -758,3 +758,475 @@ PEBK        43.74    45.78  auto     -4.5%   0.6x   0.7x  WATCH     in 81d
 summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
 NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
 report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026 15:30:01.61 ---- 
+TRIGGER CHECK  2026-07-30 15:30   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.17    63.91  auto     -1.1%   0.4x   0.5x  WATCH     in 83d    
+BOKF       141.65   143.65  auto     -1.4%   0.4x   0.4x  WATCH     -         
+WSM        232.37   243.84  auto     -4.7%   0.3x   0.3x  WATCH     in 27d    
+PEBK        43.37    45.78  auto     -5.3%   0.6x   0.7x  WATCH     in 81d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026 16:00:01.47 ---- 
+TRIGGER CHECK  2026-07-30 16:00   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.06    63.91  auto     -1.3%   0.6x   0.6x  WATCH     in 83d    
+BOKF       141.15   143.65  auto     -1.7%   0.6x   0.6x  WATCH     -         
+WSM        233.95   243.84  auto     -4.1%   0.4x   0.4x  WATCH     in 27d    
+PEBK        43.03    45.78  auto     -6.0%   0.7x   0.7x  WATCH     in 81d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Thu 07/30/2026 16:30:01.92 ---- 
+TRIGGER CHECK  2026-07-30 16:30   SPY: Consolidating (phase 1)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.03    63.91  auto     -1.4%   0.8x   0.8x  WATCH     in 83d    
+BOKF       141.07   143.65  auto     -1.8%   0.8x   0.8x  WATCH     -         
+WSM        233.32   243.84  auto     -4.3%   0.5x   0.5x  WATCH     in 27d    
+PEBK        43.00    45.78  auto     -6.1%   0.7x   0.7x  WATCH     in 81d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-07-30.json
+---- Sun 08/02/2026 20:28:28.56 ---- 
+TRIGGER CHECK  2026-08-03 05:13   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.19    63.91  auto     -1.1%   1.1x      -  STALE     in 79d    
+BOKF       141.29   143.65  auto     -1.6%   0.7x      -  STALE     -         
+WSM        228.66   243.84  auto     -6.2%   0.7x      -  STALE     in 23d    
+PEBK        43.00    45.78  auto     -6.1%   0.7x      -  STALE     in 77d    
+summary: 0 triggered, 0 extended, 4 stale, 0 without a pivot, of 4
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026  9:30:00.97 ---- 
+TRIGGER CHECK  2026-08-03 09:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.19    63.91  auto     -1.1%   1.1x      -  STALE     in 79d    
+BOKF       141.29   143.65  auto     -1.6%   0.7x      -  STALE     -         
+WSM        228.66   243.84  auto     -6.2%   0.7x      -  STALE     in 23d    
+PEBK        43.00    45.78  auto     -6.1%   0.7x      -  STALE     in 77d    
+summary: 0 triggered, 0 extended, 4 stale, 0 without a pivot, of 4
+NOTE: no new bar on the report date (weekend/holiday?) -- no trigger can fire from a stale bar.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 10:00:01.44 ---- 
+TRIGGER CHECK  2026-08-03 10:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.24    63.91  auto     +0.5%   0.1x   0.6x  WATCH     in 79d    
+BOKF       143.46   143.65  auto     -0.1%   0.0x   0.2x  WATCH     -         
+WSM        236.32   243.84  auto     -3.1%   0.0x   0.4x  WATCH     in 23d    
+PEBK        43.94    45.78  auto     -4.0%   0.5x   5.3x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 10:30:01.55 ---- 
+TRIGGER CHECK  2026-08-03 10:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.95    63.91  auto     +0.1%   0.1x   0.8x  WATCH     in 79d    
+BOKF       143.00   143.65  auto     -0.5%   0.0x   0.3x  WATCH     -         
+WSM        236.20   243.84  auto     -3.1%   0.1x   0.4x  WATCH     in 23d    
+PEBK        43.60    45.78  auto     -4.8%   0.9x   5.8x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 11:00:01.79 ---- 
+TRIGGER CHECK  2026-08-03 11:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.82    63.91  auto     -0.1%   0.2x   0.7x  WATCH     in 79d    
+BOKF       142.56   143.65  auto     -0.8%   0.1x   0.3x  WATCH     -         
+WSM        235.60   243.84  auto     -3.4%   0.1x   0.5x  WATCH     in 23d    
+PEBK        43.55    45.78  auto     -4.9%   1.0x   4.5x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 11:30:01.43 ---- 
+TRIGGER CHECK  2026-08-03 11:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.96    63.91  auto     +0.1%   0.2x   0.6x  WATCH     in 79d    
+BOKF       143.05   143.65  auto     -0.4%   0.1x   0.3x  WATCH     -         
+WSM        233.43   243.84  auto     -4.3%   0.2x   0.5x  WATCH     in 23d    
+PEBK        43.61    45.78  auto     -4.7%   1.1x   3.5x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 12:00:01.44 ---- 
+TRIGGER CHECK  2026-08-03 12:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.75    63.91  auto     -0.2%   0.2x   0.6x  WATCH     in 79d    
+BOKF       142.73   143.65  auto     -0.6%   0.1x   0.3x  WATCH     -         
+WSM        234.14   243.84  auto     -4.0%   0.2x   0.5x  WATCH     in 23d    
+PEBK        43.61    45.78  auto     -4.7%   1.1x   2.8x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 12:30:01.86 ---- 
+TRIGGER CHECK  2026-08-03 12:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.76    63.91  auto     -0.2%   0.3x   0.5x  WATCH     in 79d    
+BOKF       142.59   143.65  auto     -0.7%   0.1x   0.3x  WATCH     -         
+WSM        235.21   243.84  auto     -3.5%   0.2x   0.4x  WATCH     in 23d    
+PEBK        43.56    45.78  auto     -4.8%   1.1x   2.4x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 13:00:01.95 ---- 
+TRIGGER CHECK  2026-08-03 13:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.79    63.91  auto     -0.2%   0.3x   0.5x  WATCH     in 79d    
+BOKF       142.77   143.65  auto     -0.6%   0.2x   0.3x  WATCH     -         
+WSM        236.25   243.84  auto     -3.1%   0.2x   0.4x  WATCH     in 23d    
+PEBK        43.56    45.78  auto     -4.8%   1.1x   2.0x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 13:30:01.42 ---- 
+TRIGGER CHECK  2026-08-03 13:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.85    63.91  auto     -0.1%   0.3x   0.5x  WATCH     in 79d    
+BOKF       142.91   143.65  auto     -0.5%   0.2x   0.3x  WATCH     -         
+WSM        236.12   243.84  auto     -3.2%   0.2x   0.4x  WATCH     in 23d    
+PEBK        43.56    45.78  auto     -4.8%   1.1x   1.8x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 14:00:01.58 ---- 
+TRIGGER CHECK  2026-08-03 14:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.03    63.91  auto     +0.2%   0.3x   0.5x  WATCH     in 79d    
+BOKF       143.20   143.65  auto     -0.3%   0.2x   0.3x  WATCH     -         
+WSM        236.38   243.84  auto     -3.1%   0.3x   0.4x  WATCH     in 23d    
+PEBK        43.56    45.78  auto     -4.8%   1.1x   1.6x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 14:30:01.69 ---- 
+TRIGGER CHECK  2026-08-03 14:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.10    63.91  auto     +0.3%   0.4x   0.5x  WATCH     in 79d    
+BOKF       143.38   143.65  auto     -0.2%   0.2x   0.3x  WATCH     -         
+WSM        237.89   243.84  auto     -2.4%   0.3x   0.4x  WATCH     in 23d    
+PEBK        43.56    45.78  auto     -4.8%   1.1x   1.4x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 15:00:01.55 ---- 
+TRIGGER CHECK  2026-08-03 15:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.10    63.91  auto     +0.3%   0.4x   0.5x  WATCH     in 79d    
+BOKF       143.52   143.65  auto     -0.1%   0.3x   0.3x  WATCH     -         
+WSM        238.74   243.84  auto     -2.1%   0.4x   0.4x  WATCH     in 23d    
+PEBK        43.66    45.78  auto     -4.6%   1.1x   1.3x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 15:30:01.96 ---- 
+TRIGGER CHECK  2026-08-03 15:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.05    63.91  auto     +0.2%   0.4x   0.5x  WATCH     in 79d    
+BOKF       143.76   143.65  auto     +0.1%   0.3x   0.3x  WATCH     -         
+WSM        239.53   243.84  auto     -1.8%   0.4x   0.5x  WATCH     in 23d    
+PEBK        43.41    45.78  auto     -5.2%   1.2x   1.2x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 16:00:01.45 ---- 
+TRIGGER CHECK  2026-08-03 16:00   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.92    63.91  auto     +0.0%   0.6x   0.6x  WATCH     in 79d    
+BOKF       143.71   143.65  auto     +0.0%   0.5x   0.5x  WATCH     -         
+WSM        239.87   243.84  auto     -1.6%   0.6x   0.6x  WATCH     in 23d    
+PEBK        43.44    45.78  auto     -5.1%   1.2x   1.2x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Mon 08/03/2026 16:30:01.99 ---- 
+TRIGGER CHECK  2026-08-03 16:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.90    63.91  auto     -0.0%   0.7x   0.7x  WATCH     in 79d    
+BOKF       143.78   143.65  auto     +0.1%   0.6x   0.7x  WATCH     -         
+WSM        239.80   243.84  auto     -1.7%   0.6x   0.6x  WATCH     in 23d    
+PEBK        43.40    45.78  auto     -5.2%   1.3x   1.3x  WATCH     in 77d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-03.json
+---- Tue 08/04/2026 11:45:10.91 ---- 
+2026-08-04 11:45:23,803 - yfinance - ERROR - 
+1 Failed download:
+2026-08-04 11:45:23,803 - yfinance - ERROR - ['PEBK']: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')
+TRIGGER CHECK  2026-08-04 11:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.68    63.91  auto     +1.2%   0.2x   0.6x  WATCH     in 78d    
+BOKF       144.96   143.65  auto     +0.9%   0.1x   0.3x  WATCH     -         
+WSM        250.25   243.84  auto     +2.6%   0.3x   1.0x  WATCH     in 22d    
+PEBK        43.85    45.78  auto     -4.2%   1.7x   5.0x  WATCH     in 76d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 12:16:32.54 ---- 
+TRIGGER CHECK  2026-08-04 12:16   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.65    63.91  auto     +1.2%   0.2x   0.6x  WATCH     in 78d    
+BOKF       145.26   143.65  auto     +1.1%   0.1x   0.2x  WATCH     -         
+WSM        249.87   243.84  auto     +2.5%   0.4x   0.9x  WATCH     in 22d    
+PEBK        43.85    43.66  judged   +0.5%   1.7x   4.1x  TRIGGERED in 76d    
+summary: 1 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 12:45:10.59 ---- 
+2026-08-04 12:45:14,241 - yfinance - ERROR - 
+1 Failed download:
+2026-08-04 12:45:14,241 - yfinance - ERROR - ['WSM']: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')
+TRIGGER CHECK  2026-08-04 12:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.68    63.91  auto     +1.2%   0.3x   0.6x  WATCH     in 78d    
+BOKF       145.29   143.65  auto     +1.1%   0.1x   0.2x  WATCH     -         
+WSM        249.87   243.84  auto     +2.5%   0.4x   0.8x  WATCH     in 22d    
+PEBK        43.53    43.66  judged   -0.3%   1.8x   3.5x  WATCH     in 76d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 14:30:53.06 ---- 
+TRIGGER CHECK  2026-08-04 14:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.79    63.91  auto     +1.4%   0.4x   0.5x  WATCH     in 78d    
+BOKF       144.96   143.65  auto     +0.9%   0.2x   0.3x  WATCH     -         
+WSM        247.66   243.84  auto     +1.6%   0.6x   0.8x  WATCH     in 22d    
+PEBK        43.63    43.66  judged   -0.1%   1.8x   2.3x  WATCH     in 76d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 14:45:10.86 ---- 
+TRIGGER CHECK  2026-08-04 14:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.72    63.91  auto     +1.3%   0.4x   0.5x  WATCH     in 78d    
+BOKF       144.90   143.65  auto     +0.9%   0.2x   0.3x  WATCH     -         
+WSM        248.68   243.84  auto     +2.0%   0.6x   0.8x  WATCH     in 22d    
+PEBK        43.63    43.66  judged   -0.1%   1.8x   2.2x  WATCH     in 76d    
+summary: 0 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 15:15:32.25 ---- 
+TRIGGER CHECK  2026-08-04 15:15   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.61    63.91  auto     +1.1%   0.4x   0.5x  WATCH     in 78d    
+BOKF       144.47   143.65  auto     +0.6%   0.3x   0.3x  WATCH     -         
+WSM        249.33   243.84  auto     +2.2%   0.7x   0.8x  WATCH     in 22d    
+PEBK        43.70    43.66  judged   +0.1%   1.8x   2.0x  TRIGGERED in 76d    
+summary: 1 triggered, 0 extended, 0 stale, 0 without a pivot, of 4
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 15:45:10.84 ---- 
+TRIGGER CHECK  2026-08-04 15:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.61    63.91  auto     +1.1%   0.5x   0.5x  CROSSED   in 78d    
+BOKF       144.57   143.65  auto     +0.6%   0.4x   0.4x  CROSSED   -         
+WSM        249.04   243.84  auto     +2.1%   0.8x   0.9x  CROSSED   in 22d    
+PEBK        43.70    43.66  judged   +0.1%   1.8x   1.9x  TRIGGERED in 76d    
+summary: 1 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 16:15:10.83 ---- 
+TRIGGER CHECK  2026-08-04 16:15   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.35    63.91  auto     +0.7%   0.8x   0.8x  CROSSED   in 78d    
+BOKF       144.69   143.65  auto     +0.7%   0.7x   0.7x  CROSSED   -         
+WSM        248.88   243.84  auto     +2.1%   1.1x   1.1x  CROSSED   in 22d    
+PEBK        43.50    43.66  judged   -0.4%   2.0x   2.0x  WATCH     in 76d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 16:45:10.46 ---- 
+TRIGGER CHECK  2026-08-04 16:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.35    63.91  auto     +0.7%   0.8x   0.8x  CROSSED   in 78d    
+BOKF       144.69   143.65  auto     +0.7%   0.7x   0.7x  CROSSED   -         
+WSM        248.88   243.84  auto     +2.1%   1.1x   1.1x  CROSSED   in 22d    
+PEBK        43.50    43.66  judged   -0.4%   2.0x   2.0x  WATCH     in 76d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 17:15:10.78 ---- 
+TRIGGER CHECK  2026-08-04 17:15   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.35    63.91  auto     +0.7%   0.8x   0.8x  CROSSED   in 78d    
+BOKF       144.69   143.65  auto     +0.7%   0.7x   0.7x  CROSSED   -         
+WSM        248.88   243.84  auto     +2.1%   1.4x   1.4x  CROSSED   in 22d    
+PEBK        43.50    43.66  judged   -0.4%   2.0x   2.0x  WATCH     in 76d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 17:45:10.40 ---- 
+TRIGGER CHECK  2026-08-04 17:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.35    63.91  auto     +0.7%   0.8x   0.8x  CROSSED   in 78d    
+BOKF       144.69   143.65  auto     +0.7%   0.7x   0.7x  CROSSED   -         
+WSM        248.88   243.84  auto     +2.1%   1.4x   1.4x  CROSSED   in 22d    
+PEBK        43.50    43.66  judged   -0.4%   2.0x   2.0x  WATCH     in 76d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 18:16:10.09 ---- 
+TRIGGER CHECK  2026-08-04 18:16   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.35    63.91  auto     +0.7%   0.8x   0.8x  CROSSED   in 78d    
+BOKF       144.69   143.65  auto     +0.7%   0.7x   0.7x  CROSSED   -         
+WSM        248.88   243.84  auto     +2.1%   1.4x   1.4x  CROSSED   in 22d    
+PEBK        43.50    43.66  judged   -0.4%   2.0x   2.0x  WATCH     in 76d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Tue 08/04/2026 18:45:10.53 ---- 
+TRIGGER CHECK  2026-08-04 18:45   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.35    63.91  auto     +0.7%   0.8x   0.8x  CROSSED   in 78d    
+BOKF       144.69   143.65  auto     +0.7%   0.7x   0.7x  CROSSED   -         
+WSM        248.88   243.84  auto     +2.1%   1.4x   1.4x  CROSSED   in 22d    
+PEBK        43.50    43.66  judged   -0.4%   2.0x   2.0x  WATCH     in 76d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-04.json
+---- Wed 08/05/2026 12:42:29.16 ---- 
+TRIGGER CHECK  2026-08-05 12:42   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.18    63.91  auto     +0.4%   0.2x   0.4x  CROSSED   in 77d    
+BOKF       144.37   143.65  auto     +0.5%   0.2x   0.5x  CROSSED   -         
+WSM        249.43   243.84  auto     +2.3%   0.3x   0.6x  CROSSED   in 21d !  
+PEBK        43.41    43.66  judged   -0.6%   1.2x   2.5x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 13:12:29.66 ---- 
+TRIGGER CHECK  2026-08-05 13:12   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.2x   0.4x  CROSSED   in 77d    
+BOKF       144.71   143.65  auto     +0.7%   0.2x   0.4x  CROSSED   -         
+WSM        250.18   243.84  auto     +2.6%   0.3x   0.6x  CROSSED   in 21d !  
+PEBK        43.41    43.66  judged   -0.6%   1.2x   2.2x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 13:42:29.57 ---- 
+TRIGGER CHECK  2026-08-05 13:42   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.12    63.91  auto     +0.3%   0.2x   0.4x  CROSSED   in 77d    
+BOKF       144.86   143.65  auto     +0.8%   0.3x   0.4x  CROSSED   -         
+WSM        250.38   243.84  auto     +2.7%   0.4x   0.6x  CROSSED   in 21d !  
+PEBK        43.40    43.66  judged   -0.6%   1.3x   2.0x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 14:12:29.59 ---- 
+TRIGGER CHECK  2026-08-05 14:12   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.14    63.91  auto     +0.4%   0.3x   0.4x  CROSSED   in 77d    
+BOKF       144.99   143.65  auto     +0.9%   0.3x   0.4x  CROSSED   -         
+WSM        249.09   243.84  auto     +2.1%   0.4x   0.5x  CROSSED   in 21d !  
+PEBK        43.33    43.66  judged   -0.8%   1.4x   1.9x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 14:42:29.72 ---- 
+TRIGGER CHECK  2026-08-05 14:42   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.08    63.91  auto     +0.3%   0.3x   0.4x  CROSSED   in 77d    
+BOKF       144.82   143.65  auto     +0.8%   0.3x   0.4x  CROSSED   -         
+WSM        248.98   243.84  auto     +2.1%   0.4x   0.6x  CROSSED   in 21d !  
+PEBK        43.33    43.66  judged   -0.8%   1.4x   1.7x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 15:12:29.55 ---- 
+TRIGGER CHECK  2026-08-05 15:12   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.04    63.91  auto     +0.2%   0.3x   0.4x  CROSSED   in 77d    
+BOKF       144.84   143.65  auto     +0.8%   0.4x   0.4x  CROSSED   -         
+WSM        248.55   243.84  auto     +1.9%   0.5x   0.6x  CROSSED   in 21d !  
+PEBK        43.35    43.66  judged   -0.7%   1.4x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 15:42:29.58 ---- 
+TRIGGER CHECK  2026-08-05 15:42   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.08    63.91  auto     +0.3%   0.4x   0.4x  CROSSED   in 77d    
+BOKF       144.59   143.65  auto     +0.7%   0.5x   0.5x  CROSSED   -         
+WSM        249.49   243.84  auto     +2.3%   0.6x   0.6x  CROSSED   in 21d !  
+PEBK        43.40    43.66  judged   -0.6%   1.4x   1.5x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 16:12:29.53 ---- 
+TRIGGER CHECK  2026-08-05 16:12   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 17:30:07.62 ---- 
+TRIGGER CHECK  2026-08-05 17:30   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 17:42:29.67 ---- 
+TRIGGER CHECK  2026-08-05 17:42   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 18:12:29.45 ---- 
+TRIGGER CHECK  2026-08-05 18:12   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 19:27:36.02 ---- 
+TRIGGER CHECK  2026-08-05 19:27   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 19:42:29.51 ---- 
+TRIGGER CHECK  2026-08-05 19:42   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Wed 08/05/2026 20:12:29.54 ---- 
+TRIGGER CHECK  2026-08-05 20:12   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        64.13    63.91  auto     +0.3%   0.6x   0.6x  CROSSED   in 77d    
+BOKF       144.53   143.65  auto     +0.6%   0.8x   0.8x  CROSSED   -         
+WSM        248.32   243.84  auto     +1.8%   0.8x   0.8x  CROSSED   in 21d !  
+PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d    
+summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json

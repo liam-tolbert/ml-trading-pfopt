@@ -129,6 +129,7 @@ READABLE_COLS = {
     "ticker": "Ticker",
     "price": "Price ($)",
     "rs": "RS rating",
+    "rs_nh": "RS line NH",
     "criteria": "Trend criteria (/8)",
     "fund_score": "Fundamental score (0-4)",
     "rev_yoy": "Revenue YoY (%)",
@@ -154,6 +155,11 @@ COL_HELP = {
     "rs": "Relative-strength rating 1–99: IBD-style weighted return blend (2×3-mo + 6-mo "
           "+ 9-mo + 12-mo — recent strength counts double), percentiled vs the scanned "
           "universe. Minervini wants 70+.",
+    "rs_nh": "RS line (price ÷ SPY) at its 52-week high while the PRICE is still below its "
+             "own 52-week high — IBD's 'RS new high before price' blue dot: the stock is "
+             "outperforming the market while still basing, the classic institutional-"
+             "accumulation tell. One of the strongest breakout-confirmation signals for a "
+             "coiled name. n/a = under ~6 months of overlapping history.",
     "fund_score": "Step-2 fundamental checks passed (0–4): revenue ≥20%, EPS ≥20%, EPS "
                   "accelerating, margins expanding.",
     "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
@@ -190,7 +196,8 @@ COL_HELP = {
 # 8 here (the 8/8 gate), so it adds no signal (still in the scan frame for tests).
 COL_GROUPS = [
     ("Identify", ["ticker", "price"]),
-    ("Fuel — catalyst & strength", ["rs", "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
+    ("Fuel — catalyst & strength", ["rs", "rs_nh", "fund_score", "rev_yoy", "eps_yoy",
+                                    "op_margin"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
                                "pct_to_pivot", "pivot", "stop", "target"]),
@@ -669,7 +676,7 @@ with st.sidebar:
                 _plan, _skip = build_buy_plan(
                     _watch_t, _fresh_payloads, mode=_mode, amount=_amount,
                     equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS,
-                    pivots=_pivots)
+                    pivots=_pivots, held=_held)
             # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a fresh
             # Build re-seeds each stop to its computed default instead of retaining a stale edit.
             _bn = st.session_state.get("trade_build_n", 0) + 1
@@ -717,9 +724,9 @@ with st.sidebar:
                 _attach = st.toggle(
                     "Attach protective stop (sell-all, GTC)", value=True,
                     key="trade_attach_stop",
-                    help="Places a stop-loss under each buy via an OTO order (its stop leg rides "
-                         "the market buy as a DAY order, then becomes a persistent GTC stop on "
-                         "the next re-arm). If a name is already held, no buy is sent — a GTC "
+                    help="Places a stop-loss under each buy via a GTC OTO order — the stop leg "
+                         "waits for the fill, then rests as a persistent GTC stop that survives "
+                         "the close (§6.38). If a name is already held, no buy is sent — a GTC "
                          "stop protects the whole position and, per Minervini, only ever "
                          "RATCHETS UP: a re-arm that would lower the stop is ignored and the "
                          "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
@@ -871,8 +878,8 @@ with st.sidebar:
         if _rep.get("all_stale"):
             st.caption("💤 No new bar on the report date (weekend/holiday?) — "
                        "no trigger can fire from a stale bar.")
-        _ticons = {"triggered": "🔔", "extended": "⬆", "watch": "👀", "stale": "💤",
-                   "no_pivot": "⚠", "no_data": "⚠", "untracked": "🚫"}
+        _ticons = {"triggered": "🔔", "crossed": "↗", "extended": "⬆", "watch": "👀",
+                   "stale": "💤", "no_pivot": "⚠", "no_data": "⚠", "untracked": "🚫"}
         for _n in _rep.get("names", []):
             _st = _n.get("status", "?")
             _t = _n.get("ticker", "?")
@@ -903,6 +910,10 @@ with st.sidebar:
                     st.rerun(scope="app")
                 except StreamlitAPIException:
                     st.rerun()
+        if _rep.get("summary", {}).get("crossed"):
+            st.caption("↗ crossed = above its frozen pivot but NOT volume-confirmed — a "
+                       "quiet drift is not a buy; wait for a ≥1.5× volume close, or plan "
+                       "a pullback/secondary entry off the pivot.")
         if _rep.get("summary", {}).get("untracked"):
             st.caption("🚫 untracked = fell out of the 8/8 trend template — kept on the "
                        "watchlist, but the trigger is not evaluated until it "
@@ -1085,6 +1096,17 @@ with colSide:
                       kwargs={"judged_pivot": _app_pivot}, width="stretch",
                       help="Adds the name AND freezes the current pivot as your judged "
                            "trigger level (shown in Step 4).")
+        # §6.19 post-breakout freeze warning: freezing a pivot the price is ALREADY above
+        # arms a trigger whose crossing event may be behind it (PECO) — the ≥1.5× volume
+        # close it waits for may never come. Say so at freeze time, for ⭐ and 📌 alike.
+        _wl_df = payload.get("df")
+        _wl_close = (float(_wl_df["Close"].iloc[-1])
+                     if _wl_df is not None and len(_wl_df) else None)
+        if _app_pivot and _wl_close is not None and _wl_close > _app_pivot:
+            st.caption(f"⚠︎ post-breakout: {pick} already trades above this pivot "
+                       f"({_wl_close:,.2f} > {_app_pivot:,.2f}) — a freeze here arms a "
+                       "trigger that may never re-fire; plan a pullback/secondary entry "
+                       "instead (its report row will show ↗ crossed).")
         st.markdown(step_badge("Step 3", "Judge the VCP"))
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
         weekly = st.checkbox("Weekly view", value=False)
@@ -1128,8 +1150,23 @@ with st.container(border=True):
     vol_ok = bool(lv.get("volume_confirmed"))        # latest volume >= 1.5x the 20-day avg
 
     # Price levels — neutral (WHERE you'd act, not WHETHER to).
+    # The pivot shown here is the DETECTED one (recomputed every scan, drifts with new
+    # bars) — NOT the watchlist's frozen 📌 level, which is what triggers fire on and
+    # trade plans price off. The tooltip keeps the two from being conflated (§6.36).
+    _fz_pivot = (_wl_entry(pick) or {}).get("judged_pivot")
+    _pivot_help = ("The scan's **detected** pivot — recomputed from the price history on "
+                   "every scan, so it drifts as new bars arrive. The buy zone, stop, and "
+                   "target tiles derive from it. "
+                   + (f"Your **frozen 📌 pivot** for {pick} is **${_fz_pivot:,.2f}** (the "
+                      "sidebar's level) — triggers fire and trade-plan orders are priced "
+                      "off that frozen level, not this one. If you re-judge the base, "
+                      "re-📌 on the chart to update it."
+                      if _fz_pivot else
+                      "⭐/📌 freezes the level you're judging as the watchlist trigger "
+                      "pivot; from then on the frozen level (sidebar), not this drifting "
+                      "one, is what triggers and trade plans act on."))
     r1 = st.columns(3)
-    r1[0].metric("Pivot", _usd(lv.get("pivot")), border=True)
+    r1[0].metric("Pivot", _usd(lv.get("pivot")), border=True, help=_pivot_help)
     r1[1].metric("Buy zone", buy_zone, border=True)
     r1[2].metric("Stop", _usd(lv.get("stop")), border=True)
     r2 = st.columns(2)
@@ -1195,6 +1232,18 @@ with st.container(border=True):
                       "than RMV — RMV can read falsely tight after a recent volatility spike "
                       "(its min-max scaling), and there BBWP's skepticism wins.")
     bc[1].markdown(f"**Squeeze:** {sq_flag} — {bbwp_note}")
+
+    # RS line vs price (IBD "blue dot"): outperformance at new highs while price still
+    # bases = accumulation. Advisory only, like every read in this section.
+    _rs_nh = payload.get("rs_nh")
+    if _rs_nh is None:
+        st.markdown("**RS line:** n/a — under ~6 months of overlapping SPY history.")
+    elif _rs_nh:
+        st.markdown("**RS line:** ✅ **at a 52-wk high before price** — outperforming the "
+                    "market while still basing (accumulation tell; IBD blue dot).")
+    else:
+        st.markdown("**RS line:** — not at a new high before price (no divergence signal; "
+                    "fine, just no extra confirmation).")
 
     # Base volume (should be DRYING UP): % of contractions whose volume ran lighter than the
     # advance into them (vcp volume_quality) — a different yardstick (vs. the run-up, not 1.5× avg).
