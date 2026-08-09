@@ -266,6 +266,7 @@ def _stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload) -> dict:
             "extended": bool(buy_hi and price > buy_hi),
             "capped": False, "stop_only": True,
             "stop_price": round(float(stop), 2),
+            "limit_price": None,                # stop re-arm only — no buy, no limit
             "earnings_in": payload.get("earnings_in")}
 
 
@@ -274,8 +275,9 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                    equity: Optional[float] = None, asof=None,
                    max_bar_age_days: Optional[float] = None,
                    pivots: Optional[Dict[str, float]] = None,
-                   held: Optional[Dict[str, int]] = None) -> Tuple[List[dict], List[dict]]:
-    """Size a market-BUY for EACH watchlisted name by the chosen ``mode``:
+                   held: Optional[Dict[str, int]] = None,
+                   order_type: str = "market") -> Tuple[List[dict], List[dict]]:
+    """Size a BUY for EACH watchlisted name by the chosen ``mode``:
 
     * ``"pct"``     — ``amount`` % of the account ``equity`` per name (needs ``equity``);
     * ``"dollars"`` — ``amount`` dollars per name;
@@ -322,9 +324,20 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     path still re-arms its protective stop. Names skipped before levels exist (not in
     scan / no price / stale) or without a computable stop still skip — there's no level
     to arm. Omit ``held`` (the default) and behavior is unchanged.
+
+    ``order_type="limit"`` plans limit BUYs instead of market: each entry gets a
+    ``limit_price`` defaulting to its buy-zone TOP (effective pivot × 1.05 — the no-chase
+    cap, so a name that gaps past the zone simply doesn't fill; a name with no pivot falls
+    back to the last close, a marketable cap). Sizing, the risk-per-share, the $50 floor,
+    and the 10% cap all use the LIMIT as the basis — the worst-case fill for a buy limit
+    is the limit itself (fills lower, never higher) — so ``est_value`` is the honest
+    maximum. The risk mode requires ``stop < limit``. ``"market"`` (the default) leaves
+    every existing behavior byte-identical; ``limit_price`` is then ``None``.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
+    if order_type not in ("market", "limit"):
+        raise ValueError(f"order_type must be 'market' or 'limit', got {order_type!r}")
     _stale_ref = None
     if max_bar_age_days is not None:
         import pandas as pd
@@ -372,13 +385,22 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             stop = lv.get("stop")
         capped = False
 
+        # Sizing basis: the worst-case fill. Market orders fill ~at the current price; a buy
+        # LIMIT fills at or below its limit, so the limit itself is the honest basis for
+        # share counts, the $50 floor, and the 10% cap.
+        limit = None
+        basis = price
+        if order_type == "limit":
+            limit = float(buy_hi) if buy_hi and buy_hi > 0 else price
+            basis = limit
+
         if mode == "pct":
             if not equity or equity <= 0:
                 skipped.append({"ticker": t, "reason": "account equity unavailable"})
                 continue
-            shares = int((equity * amount / 100.0) / price)          # floor
+            shares = int((equity * amount / 100.0) / basis)          # floor
         elif mode == "dollars":
-            shares = int(amount / price)                             # floor
+            shares = int(amount / basis)                             # floor
         elif mode == "risk":
             if not equity or equity <= 0:
                 skipped.append({"ticker": t, "reason": "account equity unavailable"})
@@ -386,14 +408,16 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             if not stop or stop <= 0:
                 skipped.append({"ticker": t, "reason": "no stop to risk-size against"})
                 continue
-            if stop >= price:
-                skipped.append({"ticker": t, "reason": "stop not below price — can't risk-size"})
+            if stop >= basis:
+                skipped.append({"ticker": t, "reason":
+                                f"stop not below {'limit' if limit else 'price'} — "
+                                "can't risk-size"})
                 continue
-            shares = int((equity * amount / 100.0) / (price - stop))  # floor
+            shares = int((equity * amount / 100.0) / (basis - stop))  # floor
             # Risk sizing yields position% ≈ risk% / stop-distance%, which routinely exceeds the
             # 10% single-order cap (1% risk / 8% stop = 12.5%). Clamp to the cap rather than skip;
             # the realized risk then sits below target and the caller flags it via ``capped``.
-            cap_shares = int(MAX_ORDER_PCT * equity / price)
+            cap_shares = int(MAX_ORDER_PCT * equity / basis)
             if shares > cap_shares:
                 shares, capped = cap_shares, True
         else:                                                        # "shares"
@@ -408,7 +432,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             else:
                 skipped.append({"ticker": t, "reason": "sizing rounds to < 1 share"})
             continue
-        est_value = shares * price
+        est_value = shares * basis
         if mode != "shares" and est_value < MIN_TRADE_USD:
             if _held_fallback:
                 plan.append(_stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload))
@@ -425,6 +449,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "extended": bool(buy_hi and price > buy_hi),
             "capped": capped,
             "stop_price": round(float(stop), 2) if stop and stop > 0 else None,
+            "limit_price": round(limit, 2) if limit else None,
             "earnings_in": payload.get("earnings_in"),
         })
     return plan, skipped
@@ -666,7 +691,7 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       RAISE it — a would-be lower-or-equal stop is left untouched (result ``"stop_kept"``). GTC
       so it persists across sessions instead of expiring each close. Exempt from the $50 floor /
       10%-cap since a protective stop is risk-reducing.
-    * **not held** — a market BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
+    * **not held** — a BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
       leg (the stop activates only after the buy fills, so it works even when the buy is queued
       to the next open). The whole OTO is **GTC** — verified live on paper 2026-08-04: the stop
       leg is held until the buy fills, then rests as a GTC stop that SURVIVES the close.
@@ -674,6 +699,14 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       expired at that day's close minutes later — the PEBK incident — leaving the position
       unprotected until a manual re-arm.) The held-name ratchet manages (only ever raises) the
       same stop from the next re-arm on. Without ``attach_stop``, a plain market BUY.
+
+      An entry carrying a positive ``limit_price`` (a ``build_buy_plan(order_type="limit")``
+      plan) is sent as a **limit** BUY instead: with ``attach_stop`` a GTC OTO limit + stop
+      leg — the same §6.38 GTC-end-to-end shape, so a fill on ANY later day is protected the
+      moment it happens, and an unfilled limit rests until filled or canceled (the pending-buy
+      guard blocks re-submits meanwhile); without ``attach_stop`` a DAY limit that expires at
+      the close. Stop validity is checked against the LIMIT (the worst-case fill), not the
+      last close. No ``limit_price`` → the market behavior above, unchanged.
 
     Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap (buys only).
     Returns ``{equity, cash, account_number, using_dedicated, results}`` where each result is
@@ -684,7 +717,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
     client, using_dedicated = _connect_paper()          # paper=True enforced inside
     try:
         from alpaca.trading.requests import (
-            MarketOrderRequest, StopOrderRequest, StopLossRequest, GetOrdersRequest)
+            MarketOrderRequest, LimitOrderRequest, StopOrderRequest, StopLossRequest,
+            GetOrdersRequest)
         from alpaca.trading.enums import (
             OrderSide, TimeInForce, OrderClass, QueryOrderStatus, OrderType)
         from src.portfolio_experimentation.alpaca_trader import (
@@ -732,7 +766,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                 results.append({**o, **res})
                 continue
 
-            # Not held — a market BUY, with an OTO protective stop when attach_stop is on.
+            # Not held — a BUY (market, or limit when the entry carries a limit_price),
+            # with an OTO protective stop when attach_stop is on.
             if t in pending_buys:
                 results.append({**o, "status": "skipped",
                                 "detail": "a cockpit BUY is already queued (pending fill) — "
@@ -742,28 +777,57 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                 results.append({**o, "status": "skipped",
                                 "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
                 continue
+            _lim = o.get("limit_price")
+            # None = a market plan; a PRESENT but non-positive limit is an edit error — skip
+            # rather than silently falling back to an uncapped market buy.
+            if _lim is not None and not (float(_lim) > 0):
+                results.append({**o, "status": "skipped",
+                                "detail": "invalid limit price — set a limit > 0"})
+                continue
+            limit = float(_lim) if _lim else None
             if attach_stop:
-                if not stop_is_valid(stop, o["price"]):
+                # Stop validity is against the worst-case fill: the limit for a limit BUY
+                # (fills at or below it), the last close for a market BUY.
+                if not stop_is_valid(stop, limit if limit else o["price"]):
                     results.append({**o, "status": "skipped",
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
                     continue
-                # GTC OTO (verified live 2026-08-04): the paper API accepts a GTC market
-                # parent and the stop leg inherits GTC ("held" until the fill), so the
-                # protective stop persists past the close. A DAY leg expired AT the close —
-                # a 15:58 buy left its stop dead two minutes later (the PEBK incident).
-                req = MarketOrderRequest(
-                    symbol=t, qty=o["shares"], side=OrderSide.BUY,
-                    time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
-                    stop_loss=StopLossRequest(stop_price=round(float(stop), 2)),
-                    client_order_id=f"SEPAoto-{t}-{int(time.time() * 1000)}")
-                detail_head = f"buy {o['shares']} + stop @ {stop:.2f}"
+                # GTC OTO (verified live 2026-08-04): the paper API accepts a GTC parent
+                # and the stop leg inherits GTC ("held" until the fill), so the protective
+                # stop persists past the close. A DAY leg expired AT the close — a 15:58
+                # buy left its stop dead two minutes later (the PEBK incident). The same
+                # shape covers a limit that fills days later: its stop arms on the fill.
+                if limit:
+                    req = LimitOrderRequest(
+                        symbol=t, qty=o["shares"], side=OrderSide.BUY,
+                        limit_price=round(limit, 2),
+                        time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
+                        stop_loss=StopLossRequest(stop_price=round(float(stop), 2)),
+                        client_order_id=f"SEPAoto-{t}-{int(time.time() * 1000)}")
+                    detail_head = (f"limit buy {o['shares']} @ {limit:.2f} + stop @ "
+                                   f"{stop:.2f} (GTC — rests until filled/canceled)")
+                else:
+                    req = MarketOrderRequest(
+                        symbol=t, qty=o["shares"], side=OrderSide.BUY,
+                        time_in_force=TimeInForce.GTC, order_class=OrderClass.OTO,
+                        stop_loss=StopLossRequest(stop_price=round(float(stop), 2)),
+                        client_order_id=f"SEPAoto-{t}-{int(time.time() * 1000)}")
+                    detail_head = f"buy {o['shares']} + stop @ {stop:.2f}"
             else:
-                req = MarketOrderRequest(
-                    symbol=t, qty=o["shares"], side=OrderSide.BUY,
-                    time_in_force=TimeInForce.DAY,
-                    client_order_id=f"SEPAcockpit-{t}-{int(time.time() * 1000)}")
-                detail_head = f"buy {o['shares']} (no stop)"
+                if limit:
+                    req = LimitOrderRequest(
+                        symbol=t, qty=o["shares"], side=OrderSide.BUY,
+                        limit_price=round(limit, 2),
+                        time_in_force=TimeInForce.DAY,
+                        client_order_id=f"SEPAcockpit-{t}-{int(time.time() * 1000)}")
+                    detail_head = f"limit buy {o['shares']} @ {limit:.2f} (no stop, DAY)"
+                else:
+                    req = MarketOrderRequest(
+                        symbol=t, qty=o["shares"], side=OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY,
+                        client_order_id=f"SEPAcockpit-{t}-{int(time.time() * 1000)}")
+                    detail_head = f"buy {o['shares']} (no stop)"
             resp = client.submit_order(order_data=req)
             results.append({**o, "status": "submitted",
                             "detail": f"{detail_head} (id {getattr(resp, 'id', '?')})"})

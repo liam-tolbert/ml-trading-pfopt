@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import datetime
 import sys
-from collections import deque
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -23,11 +23,12 @@ import streamlit as st  # noqa: E402
 from streamlit.errors import StreamlitAPIException  # noqa: E402
 
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
+from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
     watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
-from src.stock_screener.cockpit.scan import ScanConfig, filter_candidates, run_scan  # noqa: E402
+from src.stock_screener.cockpit.scan import filter_candidates  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
     fetch_held_shares, freshen_prices, stop_is_valid, submit_buy_plan)
@@ -423,26 +424,6 @@ def _wl_add_from_upload() -> None:
         f"Added {len(_wl()) - before} new ticker(s) from {getattr(up, 'name', 'the file')}.")
 
 
-def _cached_scan(universe, min_criteria, nonce, _force=False, _progress=None):
-    # Hand-rolled SESSION-STATE memo, deliberately NOT @st.cache_data: cache_data REPLAYS any
-    # st element emitted inside on every cache hit, so the in-scan progress bar died with
-    # CacheReplayClosureError. A plain memo has no replay machinery, so the callback is legal.
-    # `_force`/`_progress` stay OUT of the key. The body runs only on a genuine miss; Re-scan
-    # pops the memo (run_scan always tops up the latest bars); `_force` is the Advanced
-    # full-re-download escape hatch only.
-    # The min_rs/require_vcp/min_fund sliders are NOT in the key: the scan runs once with the
-    # LOOSEST gates and the sliders apply as instant post-filters (`filter_candidates`) — a
-    # filter tweak used to re-run the whole multi-minute screen (review item 18).
-    key = (universe, int(min_criteria), int(nonce))
-    memo = st.session_state.get("_scan_memo")
-    if memo is not None and memo[0] == key:
-        return memo[1]
-    cfg = ScanConfig(min_criteria=min_criteria)          # dataclass defaults = loosest gates
-    res = run_scan(universe=universe, cfg=cfg, force=_force, progress=_progress)
-    st.session_state["_scan_memo"] = (key, res)
-    return res
-
-
 # --------------------------------------------------------------------------- #
 # Sidebar — scan settings
 # --------------------------------------------------------------------------- #
@@ -460,11 +441,14 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
 # The app scans the full US common-stock universe, period — the old sp500/tickers picker
 # was TESTING scaffolding hardwired to one option. The sp500/tickers fetchers remain in
 # data_feed as offline fallbacks and programmatic run_scan(universe=...) options.
-universe = "full_us"
+# The universe/gate constants live in scan_worker (DEFAULT_UNIVERSE/DEFAULT_MIN_CRITERIA)
+# so the non-scan pages' background warm-up starts the SAME scan this page consumes.
+min_criteria = scan_worker.DEFAULT_MIN_CRITERIA  # full trend template — all 8, no 7/8
 st.sidebar.caption("Universe: **all US common stocks** (~3–4k names from Nasdaq/NYSE "
                    "listings). ⏳ The first cold scan pulls every price history (several "
-                   "minutes); later scans use the cache and fetch only new days.")
-min_criteria = 8  # full Minervini trend template — all 8 criteria required (no 7/8)
+                   "minutes) — it runs in the background, so you can browse the other "
+                   "pages while it finishes; later scans use the cache and fetch only "
+                   "new days.")
 st.sidebar.caption("Gate: full **8/8** trend template")
 min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,
                            help="IBD-style weighted multi-horizon return percentile "
@@ -472,15 +456,16 @@ min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,
 require_vcp = st.sidebar.checkbox("VCP only (hint filter)", value=False)
 min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
 
-if "nonce" not in st.session_state:
-    st.session_state.nonce = 1
-# Re-scan = bump nonce + clear the memo -> a genuine miss -> run_scan re-runs, and its
-# always-on incremental top-up refreshes the latest bars. (It used to pass force=True,
-# which re-downloaded the full 2y history for the whole universe on every click.)
-_force = False                       # per-run local, True only on a full-re-download click
+# The scan runs in a BACKGROUND daemon thread (scan_worker): it kicks off as soon as any
+# cockpit page loads and keeps running when you switch pages — a page switch cancels the
+# script run, never the worker. This page polls the worker and renders live progress until
+# the result lands. The worker memoizes per (universe, gate, generation); Re-scan bumps the
+# generation → a genuine fresh run with the always-on incremental top-up of the latest bars.
+# The min_rs/require_vcp/min_fund sliders stay OUT of that key: the scan runs once with the
+# LOOSEST gates and the sliders apply as instant post-filters (`filter_candidates`).
+_worker = scan_worker.get_worker()
 if st.sidebar.button("🔄 Re-scan (refresh prices)", key="rescan"):
-    st.session_state.nonce += 1
-    st.session_state.pop("_scan_memo", None)
+    _worker.request_rescan()
     _invalidate_trade_plan()                             # plan prices predate the re-scan
 # Escape hatch, tucked away so a misclick can't cost a multi-minute refetch. NOT needed
 # for newly listed tickers — a name with no cache is full-fetched automatically on any scan.
@@ -491,44 +476,34 @@ with st.sidebar.expander("⚙ Advanced"):
                       "risk). Only for re-baselining suspect caches — new tickers are "
                       "fetched in full automatically, and normal scans already top up "
                       "the latest bars."):
-        st.session_state.nonce += 1
-        _force = True
-        st.session_state.pop("_scan_memo", None)
+        _worker.request_rescan(force=True)
         _invalidate_trade_plan()
 
-# Price-fetch progress (the multi-minute part of a cold scan). On a memo hit the scan body
-# never runs, so the bar never appears; the slot is cleared right after.
-_prog_slot = st.empty()
-# Scrolling per-ticker download log under the bar ("Downloading AAPL: 7/20/2026 - 7/22/2026"
-# / "full history (2y)" / "cached (fresh)") — the detail rides in from get_many_prices
-# through the progress label ("Prices · SYM: detail"), so the fetch phase shows exactly
-# what each name is costing instead of just a ticker count.
-_log_slot = st.empty()
-_dl_tail = deque(maxlen=14)                       # the visible window of the log
-_dl_n = {"i": 0}
-
-
-def _scan_progress(done, total, label):
-    # `label` arrives phase-prefixed from run_scan ("Prices · AAPL: …" / "Screening · AAPL");
-    # the bar walks 0→100% once per phase. Throttled: bar ~every 25 names, log ~every 5.
-    try:
-        if label.startswith("Prices · "):
-            _dl_tail.append(f"Downloading {label[len('Prices · '):]}")
-            _dl_n["i"] += 1
-            if _dl_n["i"] % 5 == 0 or done == total:
-                _log_slot.code("\n".join(_dl_tail), language=None)
-        if done % 25 == 0 or done == total:
-            _prog_slot.progress(min(done / max(total, 1), 1.0),
-                                text=f"{label} — {done}/{total}")
-    except Exception:                             # progress must never kill a scan
-        pass
-
-
-with st.spinner("Scanning… (first run pulls prices; later runs use the cache)"):
-    res = _cached_scan(universe, min_criteria, st.session_state.nonce,
-                       _force=_force, _progress=_scan_progress)
-_prog_slot.empty()
-_log_slot.empty()
+_worker.ensure_started()
+# Short grace so a warm run (memo hit / fresh cache / test fake) renders in ONE pass with
+# no progress flash; wait() anchors the grace to the run's START, so reruns during a long
+# cold scan fall straight through to the progress view below.
+res = _worker.wait(grace=3.0)
+if res is None:
+    _snap = _worker.snapshot()
+    if _snap["status"] == "error":
+        st.error("Scan failed — the market-data fetch or screen raised:")
+        st.code(_snap["error"] or "unknown error", language=None)
+        if st.button("🔁 Retry scan", key="scan_retry"):
+            _worker.request_rescan()
+            st.rerun()
+        st.stop()
+    # Progress bar + scrolling per-ticker download log ("Downloading AAPL: …" — the
+    # per-name detail rides in from get_many_prices through the progress label), repainted
+    # by a ~1s rerun poll while the worker fetches/screens in the background.
+    _done, _total, _label = _snap["done"], _snap["total"], _snap["label"]
+    st.progress(min(_done / max(_total, 1), 1.0), text=f"{_label} — {_done}/{_total}")
+    if _snap["log"]:
+        st.code("\n".join(_snap["log"]), language=None)
+    st.caption("⏳ Scanning in the background — switching to another page won't cancel "
+               "it; this page picks up the result when it lands.")
+    time.sleep(1.0)
+    st.rerun()
 # Slider tweaks are instant: a boolean mask over the memoized result, not a re-screen.
 # The watchlist CSV export deliberately keeps the UNfiltered frame (a watchlisted name
 # keeps its decision columns regardless of slider position).
@@ -649,8 +624,23 @@ with st.sidebar:
                                            "12.5% position, which the 10% single-order cap "
                                            "clamps (realized risk then falls below target).")
             _size_note = f"{_amount:.2f}% of equity risked to each stop"
-        st.caption(f"Market BUYs: {_size_note}. Paper account only; whole shares, "
-                   "each order still capped at 10% of equity.")
+        _ot_label = st.radio(
+            "Order type", ["Market", "Limit (no-chase cap)"], horizontal=True,
+            key="trade_order_type", on_change=_invalidate_trade_plan,
+            help="**Market** fills at the next print, whatever it is — a gap can fill you "
+                 "past the 5% buy zone. **Limit** caps each buy at a max price, defaulting "
+                 "to its buy-zone top (pivot × 1.05, frozen 📌 pivot preferred): it fills "
+                 "at the opening/auction price when that's inside the zone and simply "
+                 "doesn't fill on a gap past it — the no-chase rule, enforced by the order "
+                 "itself. Sizing, risk, and the 10% cap use the LIMIT (the worst-case "
+                 "fill). With a stop attached the order is GTC end-to-end (§6.38) — an "
+                 "unfilled limit RESTS until it fills or you cancel it on the Alpaca "
+                 "dashboard, and its stop arms whenever the fill happens; without a stop "
+                 "it's a DAY order that expires at the close.")
+        _order_type = "limit" if _ot_label.startswith("Limit") else "market"
+        st.caption(f"{'Limit' if _order_type == 'limit' else 'Market'} BUYs: {_size_note}. "
+                   "Paper account only; whole shares, each order still capped at 10% of "
+                   "equity.")
         if st.button("Build trade plan", key="trade_build", width="stretch"):
             # Fetch the target account ONCE here (not every rerun) so the user can confirm which
             # paper account will be traded — and, for '% of portfolio', to size on its equity.
@@ -676,14 +666,14 @@ with st.sidebar:
                 _plan, _skip = build_buy_plan(
                     _watch_t, _fresh_payloads, mode=_mode, amount=_amount,
                     equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS,
-                    pivots=_pivots, held=_held)
+                    pivots=_pivots, held=_held, order_type=_order_type)
             # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a fresh
             # Build re-seeds each stop to its computed default instead of retaining a stale edit.
             _bn = st.session_state.get("trade_build_n", 0) + 1
             st.session_state["trade_build_n"] = _bn
             st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
                                               "account": _account, "held": _held,
-                                              "build_ts": _bn}
+                                              "build_ts": _bn, "order_type": _order_type}
             st.session_state.pop("trade_result", None)
 
         _tp = st.session_state.get("trade_plan")
@@ -732,10 +722,17 @@ with st.sidebar:
                          "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
                          "below (defaults to the app-computed stop).")
                 _eq = (_tp.get("account") or {}).get("equity")
+                _is_lim = _tp.get("order_type") == "limit"
+                if _is_lim and any(_held.get(_o["ticker"], 0) <= 0 for _o in _plan):
+                    st.caption("each buy row: ☑ name · **limit** · stop")
                 for _o in _plan:
                     _t = _o["ticker"]
                     _held_sh = _held.get(_t, 0)
-                    _cA, _cB = st.columns([3, 2])
+                    if _is_lim:
+                        _cA, _cL, _cB = st.columns([2.6, 1.2, 1.2])
+                    else:
+                        _cA, _cB = st.columns([3, 2])
+                        _cL = None
                     _on = True                       # held rows have no checkbox (re-arm only)
                     if _held_sh > 0:
                         # No buy is sent for a held name — the stop below is a re-arm target only
@@ -755,22 +752,44 @@ with st.sidebar:
                             value=_buy_default(_o), key=_buy_key(_t),
                             help="Unchecked names are left out of the submit entirely. "
                                  "Earnings-soon names start unchecked (no-fly window).")
+                    # Limit-price input (limit plans only; held rows re-arm a stop, no buy).
+                    _edlim = _o.get("limit_price")
+                    if _cL is not None and _held_sh <= 0:
+                        _cL.number_input(
+                            f"limit {_t}", min_value=0.0,
+                            value=float(_edlim) if _edlim else 0.0,
+                            step=0.01, format="%.2f", key=f"lim_{_t}_{_nonce}",
+                            label_visibility="collapsed", disabled=not _on,
+                            help=f"Max fill price for {_t} — defaults to its buy-zone top "
+                                 "(pivot × 1.05), the no-chase cap. The order fills at or "
+                                 "below this, never above.")
+                        _edlim = st.session_state.get(f"lim_{_t}_{_nonce}", _edlim)
                     _cB.number_input(
                         f"stop {_t}", min_value=0.0,
                         value=float(_o["stop_price"]) if _o["stop_price"] else 0.0,
                         step = 0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
                         label_visibility="collapsed", disabled=not _attach or not _on)
                     _edstop = st.session_state.get(f"stop_{_t}_{_nonce}", _o["stop_price"])
+                    # Worst-case fill: the (possibly edited) limit for a limit BUY, else the
+                    # last close — validation and the live risk read both key off it.
+                    _basis = _edlim if (_is_lim and _edlim) else _o["price"]
                     if _held_sh > 0 or not _on:
                         pass          # held: stop is a re-arm target; unchecked: not submitted
-                    elif _attach and not stop_is_valid(_edstop, _o["price"]):
-                        _cB.caption(":red[stop must be < price]")
-                    elif _attach and _eq and _edstop and _o["price"] > _edstop:
+                    elif _is_lim and (not _edlim or _edlim <= 0):
+                        _cB.caption(":red[limit must be > 0]")
+                    elif _attach and not stop_is_valid(_edstop, _basis):
+                        _cB.caption(":red[stop must be < limit]" if _is_lim
+                                    else ":red[stop must be < price]")
+                    elif _attach and _eq and _edstop and _basis > _edstop:
                         # Live risk-to-stop for the CURRENT shares + (possibly edited) stop, so a
                         # risk-sized position stays honest after the stop is nudged (build doesn't
                         # re-scale shares on an edit).
-                        _rusd = _o["shares"] * (_o["price"] - _edstop)
+                        _rusd = _o["shares"] * (_basis - _edstop)
                         _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
+                    if (_is_lim and _on and _held_sh <= 0 and _edlim
+                            and _edlim < _o["price"]):
+                        _cA.caption(f"  ↳ limit {_edlim:,.2f} < last close {_o['price']:,.2f} "
+                                    "— fills only on a pullback into the zone")
                 if any(_o["extended"] for _o in _buys):      # footnotes describe the BUYs only
                     st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
                                "the real risk to your stop is larger.")
@@ -796,13 +815,18 @@ with st.sidebar:
                 if _c1.button("✅ Submit (paper)", key="trade_submit",
                               type="primary", width="stretch",
                               disabled=not _buys and not _n_held):
-                    # Merge each ticker's edited stop (session_state) into the plan entries.
-                    # Only CHECKED buy rows are sent; held names always pass through (submit
-                    # re-arms their stop, never buys).
-                    _final = [{**_o, "stop_price": st.session_state.get(
-                        f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"])} for _o in _plan
-                        if _held.get(_o["ticker"], 0) > 0
-                        or st.session_state.get(_buy_key(_o["ticker"]), _buy_default(_o))]
+                    # Merge each ticker's edited stop + limit (session_state) into the plan
+                    # entries. Only CHECKED buy rows are sent; held names always pass through
+                    # (submit re-arms their stop, never buys).
+                    _final = [{**_o,
+                               "stop_price": st.session_state.get(
+                                   f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"]),
+                               "limit_price": (st.session_state.get(
+                                   f"lim_{_o['ticker']}_{_nonce}", _o.get("limit_price"))
+                                   if _is_lim and _held.get(_o["ticker"], 0) <= 0 else None)}
+                              for _o in _plan
+                              if _held.get(_o["ticker"], 0) > 0
+                              or st.session_state.get(_buy_key(_o["ticker"]), _buy_default(_o))]
                     with st.spinner("Submitting to Alpaca paper…"):
                         try:
                             st.session_state["trade_result"] = submit_buy_plan(

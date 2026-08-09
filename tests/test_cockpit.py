@@ -1582,6 +1582,170 @@ def test_submit_buy_plan_stop_logic():
     assert outF["status"] == "stop_kept" and not ff.submitted and not ff.cancelled
 
 
+def test_build_buy_plan_limit_orders():
+    """order_type="limit": each entry carries limit_price = its buy-zone TOP (the no-chase
+    cap; frozen 📌 pivot preferred), and sizing / risk-per-share / est_value / the 10% cap
+    all use the LIMIT as the worst-case-fill basis. Market mode stays byte-identical with
+    limit_price None; an unknown order_type is a hard error."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan, MAX_ORDER_PCT
+
+    def _payload(price, pivot, stop=None):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        lv = {"pivot": pivot, "buy_zone": (pivot, pivot * 1.05),
+              "stop": round(pivot * 0.925, 2) if stop is None else stop}
+        return {"df": df, "levels": lv}
+
+    pl = {"AAA": _payload(100.0, 100.0, stop=90.0)}          # zone top = 105
+
+    # dollars: $1,000 at limit 105 -> 9 sh (a market basis would give 10); est = 9 × 105
+    p_dol, _ = build_buy_plan(["AAA"], pl, mode="dollars", amount=1000.0, order_type="limit")
+    o = p_dol[0]
+    assert o["limit_price"] == 105.0
+    assert o["shares"] == int(1000 / 105.0)                  # 9
+    assert o["est_value"] == round(9 * 105.0, 2)
+    assert o["price"] == 100.0                               # last close still reported
+
+    # market mode: unchanged sizing, limit_price None
+    p_mkt, _ = build_buy_plan(["AAA"], pl, mode="dollars", amount=1000.0)
+    assert p_mkt[0]["shares"] == 10 and p_mkt[0]["limit_price"] is None
+
+    # risk: $500 budget / (limit 105 − stop 90) = 33 sh (a market basis: 500/10 = 50)
+    p_risk, _ = build_buy_plan(["AAA"], pl, mode="risk", amount=0.5, equity=100_000.0,
+                               order_type="limit")
+    assert p_risk[0]["shares"] == int(500 / 15.0)            # 33
+
+    # risk requires stop < LIMIT: stop 106 ≥ limit 105 -> skipped, reason names the limit
+    _, s_bad = build_buy_plan(["AAA"], {"AAA": _payload(100.0, 100.0, stop=106.0)},
+                              mode="risk", amount=0.5, equity=100_000.0, order_type="limit")
+    assert "limit" in s_bad[0]["reason"]
+
+    # frozen pivot overrides: limit = frozen × 1.05, not the scan zone
+    p_fz, _ = build_buy_plan(["AAA"], pl, mode="shares", amount=5, order_type="limit",
+                             pivots={"AAA": 200.0})
+    assert p_fz[0]["limit_price"] == round(200.0 * 1.05, 2)
+
+    # extended name (price above the zone): planned + flagged, limit sits BELOW the price
+    ext = {"BBB": _payload(110.0, 100.0, stop=90.0)}
+    p_ext, _ = build_buy_plan(["BBB"], ext, mode="shares", amount=5, order_type="limit")
+    assert p_ext[0]["extended"] is True and p_ext[0]["limit_price"] == 105.0 < 110.0
+
+    # no pivot/zone -> the limit falls back to the last close (a marketable cap)
+    nz = {"CCC": {"df": _payload(100.0, 100.0)["df"], "levels": {"stop": 90.0}}}
+    p_nz, _ = build_buy_plan(["CCC"], nz, mode="shares", amount=5, order_type="limit")
+    assert p_nz[0]["limit_price"] == 100.0
+
+    # the 10% single-order cap clamps on the limit basis too
+    p_cap, _ = build_buy_plan(["AAA"], pl, mode="risk", amount=5.0, equity=100_000.0,
+                              order_type="limit")
+    assert p_cap[0]["capped"] is True
+    assert p_cap[0]["shares"] == int(MAX_ORDER_PCT * 100_000 / 105.0)   # 95
+
+    try:
+        build_buy_plan(["AAA"], pl, mode="shares", amount=5, order_type="bogus")
+        raise AssertionError("expected ValueError for unknown order_type")
+    except ValueError:
+        pass
+
+
+def test_submit_buy_plan_limit_orders():
+    """An entry carrying limit_price becomes a LIMIT buy: a GTC OTO + stop leg when attach
+    is on (the §6.38 end-to-end-GTC shape — the stop arms whenever the fill happens, even
+    days later), a naked DAY limit when off. Stop validity checks against the LIMIT (the
+    worst-case fill), not the last close; a present-but-invalid limit is SKIPPED rather
+    than silently downgraded to a market order; entries without the key keep the market
+    path untouched."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+    from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+
+    class _Acct:
+        equity = "100000"; cash = "100000"; account_number = "PA000123"
+
+    class _Asset:
+        tradable = True
+
+    class _Resp:
+        def __init__(self, oid):
+            self.id = oid
+
+    class FakeClient:
+        def __init__(self):
+            self.submitted, self._n = [], 0
+
+        def get_account(self):
+            return _Acct()
+
+        def get_all_positions(self):
+            return []                       # nothing held -> every name takes the BUY path
+
+        def get_asset(self, t):
+            return _Asset()
+
+        def get_orders(self, filter=None):
+            return []                       # no pending buys, no open stops
+
+        def submit_order(self, order_data=None):
+            self.submitted.append(order_data)
+            self._n += 1
+            return _Resp(f"id-{self._n}")
+
+    def _entry(t, shares, price, stop, limit=None):
+        e = {"ticker": t, "shares": shares, "price": price, "pivot": price,
+             "est_value": round(shares * (limit or price), 2), "extended": False,
+             "stop_price": stop}
+        if limit is not None:
+            e["limit_price"] = limit
+        return e
+
+    def _run(plan, attach, fake):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (fake, True)
+        try:
+            return trade.submit_buy_plan(plan, attach_stop=attach)
+        finally:
+            trade._connect_paper = orig
+
+    # --- A: attach on -> GTC OTO LIMIT buy with the stop leg, SEPAoto- tag ----------------
+    fa = FakeClient()
+    outA = _run([_entry("NEW", 5, 100.0, 95.0, limit=105.0)], True, fa)["results"][0]
+    assert outA["status"] == "submitted"
+    lr = [r for r in fa.submitted if isinstance(r, LimitOrderRequest)][0]
+    assert float(lr.limit_price) == 105.0 and lr.side == OrderSide.BUY and int(lr.qty) == 5
+    assert lr.order_class == OrderClass.OTO and lr.time_in_force == TimeInForce.GTC
+    assert float(lr.stop_loss.stop_price) == 95.0
+    assert lr.client_order_id.startswith("SEPAoto-")
+
+    # --- B: stop validity is vs the LIMIT — 102 > last close 100 but < limit 105 submits;
+    #        a stop AT the limit is skipped with nothing sent -----------------------------
+    fb = FakeClient()
+    assert _run([_entry("NEW", 5, 100.0, 102.0, limit=105.0)],
+                True, fb)["results"][0]["status"] == "submitted"
+    fb2 = FakeClient()
+    outB2 = _run([_entry("NEW", 5, 100.0, 105.0, limit=105.0)], True, fb2)["results"][0]
+    assert outB2["status"] == "skipped" and not fb2.submitted
+
+    # --- C: attach off -> naked DAY limit, SEPAcockpit- tag -------------------------------
+    fc = FakeClient()
+    outC = _run([_entry("NEW", 5, 100.0, 95.0, limit=105.0)], False, fc)["results"][0]
+    assert outC["status"] == "submitted"
+    lc = [r for r in fc.submitted if isinstance(r, LimitOrderRequest)][0]
+    assert lc.order_class is None and lc.time_in_force == TimeInForce.DAY
+    assert lc.client_order_id.startswith("SEPAcockpit-")
+
+    # --- D: a present-but-invalid limit (0) is skipped, never a market fallback -----------
+    fd = FakeClient()
+    outD = _run([_entry("NEW", 5, 100.0, 95.0, limit=0.0)], True, fd)["results"][0]
+    assert outD["status"] == "skipped" and not fd.submitted and "limit" in outD["detail"]
+
+    # --- E: no limit key at all -> the market path, untouched -----------------------------
+    fe = FakeClient()
+    assert _run([_entry("NEW", 5, 100.0, 95.0)], True, fe)["results"][0]["status"] == "submitted"
+    assert isinstance(fe.submitted[0], MarketOrderRequest)
+
+
 def test_submit_buy_plan_skips_pending_cockpit_buy():
     """A cockpit BUY submitted after the close sits QUEUED (no position yet) until the next
     open. A re-submit must not place a second BUY: submit_buy_plan queries open BUY orders and
@@ -2891,8 +3055,14 @@ def test_get_many_prices_progress_labels():
             exp = f"GAPPY: {_us(last + pd.Timedelta(days=1))} - {_us(today)}"
             assert labels == [exp], (labels, exp)
 
-            # (c) cache already ends TODAY (provisional bar) -> single-date refresh label
-            _ohlcv(fresh_idx, [100.0] * 15).to_parquet(pdir / "TODY.parquet")
+            # (c) cache already ends TODAY (provisional bar) -> single-date refresh label.
+            # bdate_range ends on the last BUSINESS day, so on a weekend it can't produce a
+            # today-dated bar — append one explicitly (the production scenario, a provisional
+            # bar dated today, only exists on trading days; without this the test failed
+            # every Saturday/Sunday on a range label instead).
+            tody_idx = (fresh_idx if fresh_idx[-1] == today
+                        else fresh_idx.append(pd.DatetimeIndex([today])))
+            _ohlcv(tody_idx, [100.0] * len(tody_idx)).to_parquet(pdir / "TODY.parquet")
             labels.clear()
             dfeed.get_many_prices(["TODY"], max_age_days=-1, pause=0, retries=0,
                                   progress=prog)

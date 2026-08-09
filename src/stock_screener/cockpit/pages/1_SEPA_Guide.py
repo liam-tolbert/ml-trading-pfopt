@@ -4,9 +4,22 @@ Streamlit auto-discovers files in this ``pages/`` dir and adds them to the sideb
 nav. Content is read live from ``minervini_sepa_system.md`` so there is a single
 source of truth (edit the markdown, not this page).
 """
+import sys
 from pathlib import Path
 
 import streamlit as st
+
+# This page imports a cockpit module, so the repo ROOT must be on sys.path. From pages/:
+# pages=0, cockpit=1, stock_screener=2, src=3, root=4.
+ROOT = Path(__file__).resolve().parents[4]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.stock_screener.cockpit import scan_worker  # noqa: E402
+
+# Warm the universe scan in the background so it's already fetching/screening by the time
+# the user opens the scan page (inert under AppTest — see scan_worker.autostart).
+scan_worker.autostart()
 
 st.set_page_config(page_title="SEPA Guide", page_icon="📖", layout="wide")
 st.title("📖 Minervini SEPA — Method Guide")

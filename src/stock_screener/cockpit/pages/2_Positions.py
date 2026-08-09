@@ -23,7 +23,12 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
+
+# Warm the universe scan in the background so it's already fetching/screening by the time
+# the user opens the scan page (inert under AppTest — see scan_worker.autostart).
+scan_worker.autostart()
 
 st.set_page_config(page_title="Positions", page_icon="📊", layout="wide")
 # Mirror app.py's padding trim so the first row isn't buried under Streamlit's header.

@@ -1230,3 +1230,23 @@ PEBK        43.45    43.66  judged   -0.5%   1.6x   1.6x  WATCH     in 75d
 summary: 0 triggered, 3 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
 CROSSED (CATY, BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
 report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-05.json
+---- Fri 08/07/2026 16:37:41.86 ---- 
+TRIGGER CHECK  2026-08-07 16:37   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.41    63.91  auto     -0.8%   0.6x   0.6x  WATCH     in 75d    
+BOKF       143.80   143.65  auto     +0.1%   0.8x   0.8x  CROSSED   in 73d    
+WSM        251.78   243.84  auto     +3.3%   0.7x   0.7x  CROSSED   in 19d !  
+PEBK        43.05    43.66  judged   -1.4%   0.6x   0.6x  WATCH     in 73d    
+summary: 0 triggered, 2 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-07.json
+---- Fri 08/07/2026 17:07:41.88 ---- 
+TRIGGER CHECK  2026-08-07 17:07   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.41    63.91  auto     -0.8%   0.6x   0.6x  WATCH     in 75d    
+BOKF       143.80   143.65  auto     +0.1%   0.8x   0.8x  CROSSED   in 73d    
+WSM        251.78   243.84  auto     +3.3%   0.7x   0.7x  CROSSED   in 19d !  
+PEBK        43.05    43.66  judged   -1.4%   0.6x   0.6x  WATCH     in 73d    
+summary: 0 triggered, 2 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
+CROSSED (BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-07.json
