@@ -708,6 +708,11 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       the close. Stop validity is checked against the LIMIT (the worst-case fill), not the
       last close. No ``limit_price`` → the market behavior above, unchanged.
 
+      **Build-time intent is binding:** an entry stamped ``rearm_only`` (held when the plan
+      was built — the preview showed it with no checkbox and "no buy") or ``stop_only``
+      (zero-share stop carrier), whose position has since closed, is SKIPPED — never
+      converted into a buy the user did not consent to. Rebuild the plan to buy such a name.
+
     Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap (buys only).
     Returns ``{equity, cash, account_number, using_dedicated, results}`` where each result is
     the plan entry plus a ``status`` ("submitted" / "stop_only" / "stop_kept" / "skipped" /
@@ -768,6 +773,19 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
 
             # Not held — a BUY (market, or limit when the entry carries a limit_price),
             # with an OTO protective stop when attach_stop is on.
+            #
+            # Build-time-intent guard (review 2026-08-09, HIGH): a row the plan preview
+            # showed as "already held — stop re-arm only, no buy" (``rearm_only``, stamped
+            # by the app from the BUILD-time holdings) or a zero-share ``stop_only`` row
+            # must NEVER convert into a buy just because the position closed between
+            # Build and Submit (its GTC stop firing is enough) — the user was shown no
+            # checkbox and consented to no buy. Same guard kills qty<1 rows before they
+            # reach the API as noise.
+            if o.get("rearm_only") or o.get("stop_only") or int(o.get("shares", 0)) < 1:
+                results.append({**o, "status": "skipped",
+                                "detail": "position closed since the plan was built — "
+                                          "no buy sent (rebuild the plan to buy it)"})
+                continue
             if t in pending_buys:
                 results.append({**o, "status": "skipped",
                                 "detail": "a cockpit BUY is already queued (pending fill) — "

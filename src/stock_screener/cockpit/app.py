@@ -480,10 +480,17 @@ with st.sidebar.expander("⚙ Advanced"):
         _invalidate_trade_plan()
 
 _worker.ensure_started()
-# Short grace so a warm run (memo hit / fresh cache / test fake) renders in ONE pass with
-# no progress flash; wait() anchors the grace to the run's START, so reruns during a long
-# cold scan fall straight through to the progress view below.
-res = _worker.wait(grace=3.0)
+# Serve-stale-while-refreshing: latest() returns the newest result available RIGHT NOW —
+# the current run's, or the process-wide store's (another session / an earlier scan) even
+# while a background refresh is mid-flight. The full-page progress takeover below is only
+# ever the TRUE-COLD path now (no result anywhere in the process). Under the AppTest tell
+# latest() stays None mid-run, so tests keep their deterministic block-in-wait flow.
+res = _worker.latest()
+if res is None:
+    # Short grace so a just-started warm run (fresh cache / test fake) renders in ONE
+    # pass with no progress flash; wait() anchors the grace to the run's START, so
+    # reruns during a long cold scan fall straight through to the progress view below.
+    res = _worker.wait(grace=3.0)
 if res is None:
     _snap = _worker.snapshot()
     if _snap["status"] == "error":
@@ -493,17 +500,67 @@ if res is None:
             _worker.request_rescan()
             st.rerun()
         st.stop()
-    # Progress bar + scrolling per-ticker download log ("Downloading AAPL: …" — the
-    # per-name detail rides in from get_many_prices through the progress label), repainted
-    # by a ~1s rerun poll while the worker fetches/screens in the background.
-    _done, _total, _label = _snap["done"], _snap["total"], _snap["label"]
-    st.progress(min(_done / max(_total, 1), 1.0), text=f"{_label} — {_done}/{_total}")
+    # Progress bar + scrolling download log, repainted by a ~1s rerun poll while the
+    # worker runs in the background. The bar leads with the PHASE ("Reading cache" /
+    # "Downloading" / "Screening") so a zero-network cache pass doesn't read as a
+    # re-download; the per-name detail rides beneath in the log (fetches only).
+    _done, _total = _snap["done"], _snap["total"]
+    st.progress(min(_done / max(_total, 1), 1.0),
+                text=f"{_snap['phase_label']} — {_done}/{_total}")
     if _snap["log"]:
         st.code("\n".join(_snap["log"]), language=None)
     st.caption("⏳ Scanning in the background — switching to another page won't cancel "
                "it; this page picks up the result when it lands.")
     time.sleep(1.0)
     st.rerun()
+
+# The page renders from THIS res snapshot for the whole script run — a background
+# refresh landing mid-render can't tear it; adoption happens on the next run. A changed
+# as_of means the data under any built trade plan changed too (a background refresh is a
+# re-scan for §6.31-item-19 purposes) — drop the plan.
+_snap0 = _worker.snapshot()
+_res_as_of = _snap0.get("as_of")
+if st.session_state.get("_res_as_of") not in (None, _res_as_of):
+    _invalidate_trade_plan()
+st.session_state["_res_as_of"] = _res_as_of
+
+# Background-refresh status line — a self-repainting fragment (2s while a run is in
+# flight, 30s idle) so the stale table stays fully usable while fresh data loads.
+_frag_iv = "2s" if _snap0["status"] == "running" else "30s"
+
+
+@st.fragment(run_every=_frag_iv)
+def _scan_status_line() -> None:
+    s = _worker.snapshot()
+    _ts = (datetime.datetime.fromtimestamp(s["as_of"]).strftime("%H:%M")
+           if s.get("as_of") else None)
+    if s["status"] == "running":
+        st.caption((f"data as of {_ts} · " if _ts else "")
+                   + f"⏳ {s['phase_label']} {s['done']}/{s['total']} — refreshing in "
+                     "the background")
+    elif s["status"] == "error" and _ts:
+        st.caption(f":orange[⚠ background refresh failed — showing data as of {_ts}]")
+        if st.button("🔁 Retry refresh", key="bg_retry"):
+            _worker.request_rescan()
+            try:                                  # fragment → escalate to app scope
+                st.rerun(scope="app")
+            except StreamlitAPIException:
+                st.rerun()
+    elif _ts and s.get("as_of") != _res_as_of:
+        # A refresh finished since this page rendered. No auto-swap — the data under the
+        # user's feet never changes mid-read; they load it when ready (any interaction
+        # adopts it too, via ensure_started).
+        if st.button(f"⬆ Updated scan ready ({_ts}) — load", key="adopt_new"):
+            try:
+                st.rerun(scope="app")
+            except StreamlitAPIException:
+                st.rerun()
+    elif _ts:
+        st.caption(f"data as of {_ts}")
+
+
+_scan_status_line()
+
 # Slider tweaks are instant: a boolean mask over the memoized result, not a re-screen.
 # The watchlist CSV export deliberately keeps the UNfiltered frame (a watchlisted name
 # keeps its decision columns regardless of slider position).
@@ -817,8 +874,13 @@ with st.sidebar:
                               disabled=not _buys and not _n_held):
                     # Merge each ticker's edited stop + limit (session_state) into the plan
                     # entries. Only CHECKED buy rows are sent; held names always pass through
-                    # (submit re-arms their stop, never buys).
+                    # (submit re-arms their stop, never buys). Each held-at-build row is
+                    # stamped rearm_only: the preview showed it with NO checkbox and an
+                    # explicit "no buy" caption, so if its position closes between Build and
+                    # Submit (a GTC stop firing), submit must SKIP it — never convert it
+                    # into an unconsented full-size buy (review 2026-08-09, HIGH).
                     _final = [{**_o,
+                               "rearm_only": _held.get(_o["ticker"], 0) > 0,
                                "stop_price": st.session_state.get(
                                    f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"]),
                                "limit_price": (st.session_state.get(

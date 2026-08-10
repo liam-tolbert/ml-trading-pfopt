@@ -82,12 +82,22 @@ _TIER_RANK = {'A': 0, 'B': 1, 'C': 2}
 
 
 def _zigzag_pivots(high: np.ndarray, low: np.ndarray, thr: float) -> List[tuple]:
+    """Percentage ZigZag over the hot path: identical logic to ``_zigzag_pivots_ref``
+    (which it delegates to), fed plain-Python floats — per-element ndarray indexing boxes
+    a fresh np.float64 every access, and this loop runs ~325 iterations × up to 4
+    thresholds × every VCP candidate. Parity with the ref is pinned by
+    ``test_zigzag_fast_parity`` on the 200-chart benchmark fixtures."""
+    return _zigzag_pivots_ref(np.asarray(high).tolist(), np.asarray(low).tolist(), thr)
+
+
+def _zigzag_pivots_ref(high, low, thr: float) -> List[tuple]:
     """Percentage ZigZag -> strictly-alternating (index, price, kind) pivots ('H'/'L').
 
     A swing high is confirmed once price falls ``thr`` below the running high; a swing low
     once it rises ``thr`` above the running low. Alternation is structural, so every 'H' is
     followed by an 'L' — every down-leg is a genuine peak->trough with the trough below the
     peak. The final running extreme is appended as a tentative pivot (the live edge).
+    Accepts any indexable sequence (ndarray or list) — the reference implementation.
     """
     n = len(high)
     piv: List[tuple] = []

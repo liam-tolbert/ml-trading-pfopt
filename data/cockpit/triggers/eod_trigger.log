@@ -1250,3 +1250,161 @@ PEBK        43.05    43.66  judged   -1.4%   0.6x   0.6x  WATCH     in 73d
 summary: 0 triggered, 2 crossed, 0 extended, 0 stale, 0 without a pivot, of 4
 CROSSED (BOKF, WSM): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
 report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-07.json
+---- Mon 08/10/2026 11:24:07.76 ---- 
+2026-08-10 11:24:13,858 - yfinance - ERROR - 
+1 Failed download:
+2026-08-10 11:24:13,862 - yfinance - ERROR - ['MPB']: YFRateLimitError('Too Many Requests. Rate limited. Try after a while.')
+TRIGGER CHECK  2026-08-10 11:24   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.35    63.91  auto     -0.9%   0.1x   0.5x  WATCH     -         
+TXRH       211.36   200.11  judged   +5.6%   0.2x   0.8x  EXTENDED  -         
+DGX        237.01   240.13  auto     -1.3%   0.2x   0.6x  WATCH     in 71d    
+LARK        31.98    32.39  auto     -1.3%   0.6x      -  STALE     in 79d    
+UVE         43.86    45.11  auto     -2.8%   0.2x   0.7x  WATCH     in 73d    
+BRC         97.29    99.25  auto     -2.0%   0.1x   0.2x  WATCH     -         
+PLBC        61.10    63.40  auto     -3.6%   0.1x   0.3x  WATCH     in 72d    
+KRNY         9.46     9.82  auto     -3.7%   0.1x   0.4x  WATCH     in 73d    
+SMBC        76.59    79.86  auto     -4.1%   0.3x   0.9x  WATCH     -         
+MPB         37.21    38.92  auto     -4.4%   0.1x   0.3x  WATCH     in 72d    
+OBT         38.30    40.10  auto     -4.5%   0.4x   1.5x  WATCH     in 79d    
+DAL         90.01    95.44  auto     -5.7%   0.1x   0.4x  WATCH     -         
+BAP        385.04   413.25  auto     -6.8%   0.1x   0.2x  WATCH     -         
+summary: 0 triggered, 0 crossed, 1 extended, 1 stale, 0 without a pivot, of 13
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 11:54:07.75 ---- 
+TRIGGER CHECK  2026-08-10 11:54   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.17    63.91  auto     -1.2%   0.2x   0.5x  WATCH     -         
+TXRH       210.15   200.11  judged   +5.0%   0.3x   0.9x  EXTENDED  -         
+DGX        236.57   240.13  auto     -1.5%   0.2x   0.5x  WATCH     in 71d    
+LARK        31.98    32.39  auto     -1.3%   0.6x      -  STALE     in 79d    
+UVE         43.77    45.11  auto     -3.0%   0.2x   0.6x  WATCH     in 73d    
+BRC         97.25    99.25  auto     -2.0%   0.1x   0.2x  WATCH     -         
+PLBC        61.26    63.40  auto     -3.4%   0.1x   0.3x  WATCH     in 72d    
+KRNY         9.43     9.82  auto     -4.0%   0.1x   0.4x  WATCH     in 73d    
+SMBC        76.40    79.86  auto     -4.3%   0.3x   0.8x  WATCH     -         
+MPB         37.03    38.92  auto     -4.8%   0.1x   0.4x  WATCH     in 72d    
+OBT         38.35    40.10  auto     -4.4%   0.5x   1.2x  WATCH     in 79d    
+DAL         89.89    95.44  auto     -5.8%   0.1x   0.3x  WATCH     -         
+BAP        384.27   413.25  auto     -7.0%   0.1x   0.2x  WATCH     -         
+summary: 0 triggered, 0 crossed, 1 extended, 1 stale, 0 without a pivot, of 13
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 12:24:07.74 ---- 
+TRIGGER CHECK  2026-08-10 12:24   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.05    63.91  auto     -1.4%   0.2x   0.5x  WATCH     -         
+TXRH       209.24   200.11  judged   +4.6%   0.4x   0.8x  CROSSED   -         
+DGX        237.24   240.13  auto     -1.2%   0.2x   0.5x  WATCH     in 71d    
+LARK        31.68    32.39  auto     -2.2%   0.0x   0.1x  WATCH     in 79d    
+UVE         43.74    45.11  auto     -3.0%   0.3x   0.6x  WATCH     in 73d    
+BRC         96.79    99.25  auto     -2.5%   0.1x   0.2x  WATCH     -         
+PLBC        61.23    63.40  auto     -3.4%   0.1x   0.3x  WATCH     in 72d    
+KRNY         9.40     9.82  auto     -4.2%   0.1x   0.3x  WATCH     in 73d    
+SMBC        76.18    79.86  auto     -4.6%   0.3x   0.7x  WATCH     -         
+MPB         36.93    38.92  auto     -5.1%   0.2x   0.4x  WATCH     in 72d    
+OBT         38.29    40.10  auto     -4.5%   0.5x   1.2x  WATCH     in 79d    
+DAL         89.99    95.44  auto     -5.7%   0.1x   0.3x  WATCH     -         
+BAP        384.81   413.25  auto     -6.9%   0.1x   0.2x  WATCH     -         
+summary: 0 triggered, 1 crossed, 0 extended, 0 stale, 0 without a pivot, of 13
+CROSSED (TXRH): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 12:54:07.71 ---- 
+TRIGGER CHECK  2026-08-10 12:54   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        62.96    63.91  auto     -1.5%   0.2x   0.5x  WATCH     -         
+TXRH       208.88   200.11  judged   +4.4%   0.4x   0.8x  CROSSED   -         
+DGX        237.59   240.13  auto     -1.1%   0.3x   0.5x  WATCH     in 71d    
+LARK        31.68    32.39  auto     -2.2%   0.1x   0.2x  WATCH     in 79d    
+UVE         43.78    45.11  auto     -3.0%   0.3x   0.5x  WATCH     in 73d    
+BRC         97.02    99.25  auto     -2.2%   0.1x   0.2x  WATCH     -         
+PLBC        61.22    63.40  auto     -3.4%   0.2x   0.3x  WATCH     in 72d    
+KRNY         9.39     9.82  auto     -4.4%   0.2x   0.3x  WATCH     in 73d    
+SMBC        76.10    79.86  auto     -4.7%   0.3x   0.6x  WATCH     -         
+MPB         36.81    38.92  auto     -5.4%   0.2x   0.4x  WATCH     in 72d    
+OBT         37.97    40.10  auto     -5.3%   0.7x   1.4x  WATCH     in 79d    
+DAL         90.03    95.44  auto     -5.7%   0.2x   0.3x  WATCH     -         
+BAP        384.29   413.25  auto     -7.0%   0.1x   0.2x  WATCH     -         
+summary: 0 triggered, 1 crossed, 0 extended, 0 stale, 0 without a pivot, of 13
+CROSSED (TXRH): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 13:24:07.91 ---- 
+TRIGGER CHECK  2026-08-10 13:24   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        62.93    63.91  auto     -1.5%   0.3x   0.5x  WATCH     -         
+TXRH       208.54   200.11  judged   +4.2%   0.4x   0.7x  CROSSED   -         
+DGX        237.58   240.13  auto     -1.1%   0.3x   0.5x  WATCH     in 71d    
+LARK        31.68    32.39  auto     -2.2%   0.1x   0.2x  WATCH     in 79d    
+UVE         43.55    45.11  auto     -3.5%   0.3x   0.5x  WATCH     in 73d    
+BRC         96.86    99.25  auto     -2.4%   0.1x   0.2x  WATCH     -         
+PLBC        61.32    63.40  auto     -3.3%   0.2x   0.3x  WATCH     in 72d    
+KRNY         9.44     9.82  auto     -3.9%   0.2x   0.4x  WATCH     in 73d    
+SMBC        76.20    79.86  auto     -4.6%   0.3x   0.6x  WATCH     -         
+MPB         36.94    38.92  auto     -5.1%   0.2x   0.3x  WATCH     in 72d    
+OBT         38.04    40.10  auto     -5.1%   0.7x   1.2x  WATCH     in 79d    
+DAL         89.75    95.44  auto     -6.0%   0.2x   0.3x  WATCH     -         
+BAP        383.50   413.25  auto     -7.2%   0.1x   0.2x  WATCH     -         
+summary: 0 triggered, 1 crossed, 0 extended, 0 stale, 0 without a pivot, of 13
+CROSSED (TXRH): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+NOTE: intraday bar -- close/volume are provisional until ~16:00 ET; PACE = volume so far vs expected by this time of day.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 16:36:57.13 ---- 
+TRIGGER CHECK  2026-08-10 16:37   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.37    63.91  auto     -0.8%   0.7x   0.7x  WATCH     -         
+TXRH       207.46   200.11  judged   +3.7%   1.2x   1.2x  CROSSED   -         
+DGX        237.63   240.13  auto     -1.0%   0.7x   0.7x  WATCH     in 71d    
+LARK        32.11    32.39  auto     -0.9%   0.2x   0.2x  WATCH     in 79d    
+UVE         43.41    45.11  auto     -3.8%   0.8x   0.8x  WATCH     in 73d    
+BRC         96.34    99.25  auto     -2.9%   0.2x   0.2x  WATCH     -         
+PLBC        61.35    63.40  auto     -3.2%   0.4x   0.4x  WATCH     in 72d    
+KRNY         9.46     9.82  auto     -3.7%   0.7x   0.7x  WATCH     in 73d    
+SMBC        76.46    79.86  auto     -4.3%   0.6x   0.6x  WATCH     -         
+MPB         37.33    38.92  auto     -4.1%   0.7x   0.7x  WATCH     in 72d    
+OBT         38.29    40.10  auto     -4.5%   1.2x   1.2x  WATCH     in 79d    
+DAL         89.21    95.44  auto     -6.5%   0.4x   0.4x  WATCH     -         
+BAP        382.21   413.25  auto     -7.5%   0.3x   0.3x  WATCH     -         
+summary: 0 triggered, 1 crossed, 0 extended, 0 stale, 0 without a pivot, of 13
+CROSSED (TXRH): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 16:54:07.80 ---- 
+TRIGGER CHECK  2026-08-10 16:54   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.37    63.91  auto     -0.8%   0.7x   0.7x  WATCH     -         
+TXRH       207.46   200.11  judged   +3.7%   1.2x   1.2x  CROSSED   -         
+DGX        237.63   240.13  auto     -1.0%   0.7x   0.7x  WATCH     in 71d    
+LARK        32.11    32.39  auto     -0.9%   0.2x   0.2x  WATCH     in 79d    
+UVE         43.41    45.11  auto     -3.8%   0.8x   0.8x  WATCH     in 73d    
+BRC         96.34    99.25  auto     -2.9%   0.2x   0.2x  WATCH     -         
+PLBC        61.35    63.40  auto     -3.2%   0.4x   0.4x  WATCH     in 72d    
+KRNY         9.46     9.82  auto     -3.7%   0.7x   0.7x  WATCH     in 73d    
+SMBC        76.46    79.86  auto     -4.3%   0.6x   0.6x  WATCH     -         
+MPB         37.33    38.92  auto     -4.1%   0.7x   0.7x  WATCH     in 72d    
+OBT         38.29    40.10  auto     -4.5%   1.2x   1.2x  WATCH     in 79d    
+DAL         89.21    95.44  auto     -6.5%   0.4x   0.4x  WATCH     -         
+BAP        382.21   413.25  auto     -7.5%   0.3x   0.3x  WATCH     -         
+summary: 0 triggered, 1 crossed, 0 extended, 0 stale, 0 without a pivot, of 13
+CROSSED (TXRH): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json
+---- Mon 08/10/2026 17:24:07.58 ---- 
+TRIGGER CHECK  2026-08-10 17:24   SPY: Bullish (phase 2)
+TICKER      CLOSE    PIVOT  SRC      %FROM  VOL50   PACE  STATUS    EARNINGS  
+CATY        63.37    63.91  auto     -0.8%   0.7x   0.7x  WATCH     -         
+TXRH       207.46   200.11  judged   +3.7%   1.2x   1.2x  CROSSED   -         
+DGX        237.63   240.13  auto     -1.0%   0.7x   0.7x  WATCH     in 71d    
+LARK        32.11    32.39  auto     -0.9%   0.2x   0.2x  WATCH     in 79d    
+UVE         43.41    45.11  auto     -3.8%   0.8x   0.8x  WATCH     in 73d    
+BRC         96.34    99.25  auto     -2.9%   0.2x   0.2x  WATCH     -         
+PLBC        61.35    63.40  auto     -3.2%   0.4x   0.4x  WATCH     in 72d    
+KRNY         9.46     9.82  auto     -3.7%   0.7x   0.7x  WATCH     in 73d    
+SMBC        76.46    79.86  auto     -4.3%   0.6x   0.6x  WATCH     -         
+MPB         37.33    38.92  auto     -4.1%   0.7x   0.7x  WATCH     in 72d    
+OBT         38.29    40.10  auto     -4.5%   1.2x   1.2x  WATCH     in 79d    
+DAL         89.21    95.44  auto     -6.5%   0.4x   0.4x  WATCH     -         
+BAP        382.21   413.25  auto     -7.5%   0.3x   0.3x  WATCH     -         
+summary: 0 triggered, 1 crossed, 0 extended, 0 stale, 0 without a pivot, of 13
+CROSSED (TXRH): above the frozen pivot WITHOUT volume confirmation -- a quiet drift is not a buy; wait for a >=1.5x volume close, or plan a pullback/secondary entry off the pivot.
+report: C:\Users\Unity\Documents\Liam\School\UVA\ME SE\1st Year\Independent Study\ml-trading-pfopt\data\cockpit\triggers\triggers_2026-08-10.json

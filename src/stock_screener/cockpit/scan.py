@@ -40,14 +40,6 @@ from .vcp import detect_vcp
 # stop this far below the pivot so a price-anchored engine stop can't breach max-loss.
 MAX_STOP_FROM_PIVOT = 0.10
 
-# Price caches fetched within this window are served AS-IS by a scan — reopening the app or
-# clicking Re-scan minutes after the last fetch costs zero network calls. Anything older goes
-# through the incremental top-up — UNLESS no market session has elapsed since the cache was
-# written (post-close evenings, weekends, pre-open: `data_feed._cache_settled`), in which case
-# it's current at any wall-clock age. The Advanced full re-download (force=True) bypasses both.
-PRICE_FRESH_MINUTES = 30
-
-
 @dataclass
 class ScanConfig:
     min_criteria: int = 8          # Step-1 gate: require all 8 trend-template criteria
@@ -293,6 +285,12 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             phase_info = classify_phase(df, cp)
             phase_results.append({"ticker": t, "phase": phase_info.get("phase", 0)})
 
+            # NOTE (2026-08-09): a tail-only SMA-200 stub (Close.iloc[-220:]) was tried
+            # here and REVERTED — pandas' rolling mean uses a sliding-sum kernel, so the
+            # tail slice differs from the full series by ~1 ulp at the consumed points
+            # (parity test caught it), which could flip a knife-edge template gate.
+            # Determinism beats the modest saving; don't re-attempt without an exact
+            # window-mean equivalent.
             sma200 = calculate_sma(df["Close"], 200)
             tmpl = validate_minervini_trend_template(cp, phase_info, sma200)
             if tmpl.get("criteria_passed", 0) < cfg.min_criteria:
@@ -406,17 +404,19 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     """Live wrapper: fetch via data_feed, then screen. Fundamentals are fetched lazily
     inside the funnel (only for Step-1 passers).
 
-    Price caches fetched within the last ``PRICE_FRESH_MINUTES`` are served as-is (no
-    network); anything older goes through the cheap incremental top-up: a cache that
-    already has today's bar re-fetches just the latest bars; a cache last written on an
-    earlier day fetches only the missing days; only cold names (or a genuine
-    split/dividend re-baseline) pay the full 2y download. ``force=True`` is the explicit
-    full-re-download escape hatch (the app's Advanced ⟳ button) and bypasses the
-    freshness window too."""
+    Every scan ALWAYS tops up the latest bars (``max_age_days=0.0`` — the same semantics
+    as the EOD trigger and freshen_prices): a cache with today's bar re-fetches just the
+    latest bars, an older cache fetches only its missing days, and only cold names (or a
+    genuine split/dividend re-baseline) pay the full 2y download. The old 30-minute
+    freshness window is GONE — scan_worker's process-wide refresh throttle
+    (REFRESH_TTL_SECONDS) is now the only fetch-rate limiter, so a scan that runs IS
+    fresh by construction. Zero network still happens when no market session has elapsed
+    since the cache was written (``data_feed._cache_settled`` — evenings/weekends/
+    pre-open: no new bar can exist). ``force=True`` is the explicit full-re-download
+    escape hatch (the app's Advanced ⟳ button) and bypasses even that."""
     from . import data_feed
-    fresh_age = PRICE_FRESH_MINUTES / (24.0 * 60.0)
     tickers = data_feed.get_universe(universe, force=force)
-    spy = data_feed.get_spy(force=force, max_age_days=fresh_age)
+    spy = data_feed.get_spy(force=force, max_age_days=0.0)
     if spy is None or len(spy) < 200:
         raise RuntimeError("Could not fetch SPY benchmark data (needed for RS/regime).")
     # Two sequential progress phases share one (done, total, label) callback; the label
@@ -425,7 +425,7 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
                 else lambda d, t, s: progress(d, t, f"Prices · {s}"))
     _p_screen = (None if progress is None
                  else lambda d, t, s: progress(d, t, f"Screening · {s}"))
-    prices = data_feed.get_many_prices(tickers, force=force, max_age_days=fresh_age,
+    prices = data_feed.get_many_prices(tickers, force=force, max_age_days=0.0,
                                        progress=_p_fetch)
     return screen_universe(list(prices.keys()), prices, spy,
                            get_fundamentals=data_feed.get_fundamentals, cfg=cfg,

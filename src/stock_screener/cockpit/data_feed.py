@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 import pandas as pd
@@ -41,6 +45,9 @@ _ETF_NAME_RE = r"ETF|FUND|TRUST|INDEX|PORTFOLIO|SHARES|NOTES|BOND|TREASURY"
 # history (split/dividend); appending would splice two adjustment bases, so we refetch fully.
 SPLIT_TOL = 0.005
 _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
+# Pool size for the cache-read pre-pass (local parquet reads only — pyarrow releases the
+# GIL; measured ~1.7x over serial on a 4,200-name warm scan). yf.download stays serial.
+_CACHE_READ_WORKERS = 16
 
 
 # --------------------------------------------------------------------------- #
@@ -338,17 +345,45 @@ def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
     return raw
 
 
+_TRIGGERS = None                    # lazily-cached triggers MODULE (see _cache_settled)
+
+
 def _cache_settled(path) -> bool:
     """True when ``path`` was written with NO market session since (post-close evenings,
     weekends, pre-open) — the cache holds the settled close and is current regardless of
     the wall-clock ``max_age_days`` window. Calendar logic lives in
     ``triggers.no_session_since`` (session clock + early-close single source). Never
-    raises; missing file / any error reads as not-settled (the normal gates decide)."""
+    raises; missing file / any error reads as not-settled (the normal gates decide).
+
+    The triggers MODULE is cached after the first call (this runs once per name in the
+    cache pre-pass), but ``no_session_since`` is looked up per call — tests patch it as
+    a module attribute, and call-time lookup is what honors the patch."""
+    global _TRIGGERS
     try:
-        from .triggers import no_session_since
-        return no_session_since(path.stat().st_mtime)
+        if _TRIGGERS is None:
+            from . import triggers as _t
+            _TRIGGERS = _t
+        return _TRIGGERS.no_session_since(path.stat().st_mtime)
     except Exception:
         return False
+
+
+def _atomic_to_parquet(df: pd.DataFrame, path: Path) -> None:
+    """Write-then-``os.replace`` so a concurrent reader never sees a torn file. The app
+    and the half-hourly eod_trigger job run in SEPARATE processes but share these cache
+    files, and a torn parquet reads as corruption — which the pre-pass silently converts
+    into a full network refetch. On Windows, replacing a file another process holds open
+    can raise PermissionError; callers swallow it, leaving the OLD intact cache."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+    try:
+        df.to_parquet(tmp)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = False,
@@ -386,23 +421,26 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     total = len(syms)
     done = 0
 
+    _emit_lock = threading.Lock()
+
     def _emit(sym: str, detail: str = "") -> None:
         # ``detail`` says WHAT was fetched for this name (missing-days range / full history /
-        # cache-served) so the UI can log one transparent line per ticker.
+        # cache-served) so the UI can log one transparent line per ticker. Locked: the cache
+        # pre-pass emits from pool workers, so the counter increment + callback serialize.
         nonlocal done
-        done += 1
-        if progress:
-            progress(done, total, f"{sym}: {detail}" if detail else sym)
+        with _emit_lock:
+            done += 1
+            if progress:
+                progress(done, total, f"{sym}: {detail}" if detail else sym)
 
-    # Emit progress for cache-served names too — on a warm cache reading thousands of
-    # parquets is real wall-clock time.
-    for sym in syms:
+    def _classify_cached(sym: str):
+        """Read-only per-name decision (thread-safe — stats + parquet reads, no writes):
+        ``('served', df, label_detail)`` | ``('incr', cached_df, last_date)`` |
+        ``('full', None, None)``."""
         path = PRICES_DIR / f"{sym}.parquet"
         if not force and age_days(path) <= max_age_days:
             try:
-                out[sym] = pd.read_parquet(path)
-                _emit(sym, "cached (fresh)")
-                continue
+                return "served", pd.read_parquet(path), "cached (fresh)"
             except Exception:
                 pass
         elif not force and max_age_days >= 0 and _cache_settled(path):
@@ -411,9 +449,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             # NEGATIVE max_age_days (the tests' skip-every-fresh-serve sentinel) bypasses
             # this gate too, keeping the top-up paths deterministically reachable.
             try:
-                out[sym] = pd.read_parquet(path)
-                _emit(sym, "cached (settled close)")
-                continue
+                return "served", pd.read_parquet(path), "cached (settled close)"
             except Exception:
                 pass
         cached = None
@@ -426,11 +462,32 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             last = pd.Timestamp(cached.index[-1]).normalize()
             gap = (today - last).days
             if 0 <= gap <= max_gap_days:
-                incr[sym] = (cached, last)
+                return "incr", cached, last
+        return "full", None, None              # cold, or too-stale -> full re-baseline
+
+    def _classify_and_emit(sym: str):
+        kind, frame, extra = _classify_cached(sym)
+        if kind == "served":
+            _emit(sym, extra)                  # live bar while reads stream in
+        return kind, frame, extra
+
+    # Emit progress for cache-served names too — on a warm cache reading thousands of
+    # parquets is real wall-clock time; pyarrow releases the GIL, so a small thread pool
+    # roughly halves it. Served names emit from the workers (bar count monotonic under
+    # _emit's lock; ORDER is interleaved — consumers treat the log as an unordered tail),
+    # while out/incr/full_fetch are assembled strictly in syms order AFTER the join, so
+    # dict order, batch composition, and chunking stay byte-deterministic. yf.download
+    # below stays strictly serial (concurrent calls race yfinance's shared state).
+    if syms:
+        with ThreadPoolExecutor(max_workers=min(_CACHE_READ_WORKERS, len(syms))) as _pool:
+            verdicts = list(_pool.map(_classify_and_emit, syms))
+        for sym, (kind, frame, extra) in zip(syms, verdicts):
+            if kind == "served":
+                out[sym] = frame
+            elif kind == "incr":
+                incr[sym] = (frame, extra)
             else:
-                full_fetch.append(sym)         # too-stale -> full refetch (re-baseline)
-        else:
-            full_fetch.append(sym)
+                full_fetch.append(sym)
 
     if full_fetch or incr:
         import yfinance as yf
@@ -458,7 +515,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     out[sym] = merged
                     if new is not None and len(new):  # only persist when we got new data
                         try:
-                            merged.to_parquet(PRICES_DIR / f"{sym}.parquet")
+                            _atomic_to_parquet(merged, PRICES_DIR / f"{sym}.parquet")
                         except Exception:
                             pass
                     _emit(sym, _incr_detail(_last, today))
@@ -499,7 +556,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     if df is not None:
                         out[sym] = df
                         try:
-                            df.to_parquet(PRICES_DIR / f"{sym}.parquet")
+                            _atomic_to_parquet(df, PRICES_DIR / f"{sym}.parquet")
                         except Exception:
                             pass
                         _emit(sym, f"full history ({lookback})")

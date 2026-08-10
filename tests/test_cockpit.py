@@ -1448,15 +1448,13 @@ def test_minervini_key_envs_single_spelling():
     with patch.dict("os.environ", {}, clear=True):          # unset -> None -> shared-pair fallback
         assert _first_env(MINERVINI_KEY_ENVS) is None
 
-def test_submit_buy_plan_stop_logic():
-    """submit_buy_plan against a fake Alpaca client: an already-held name becomes a GTC
-    stop-only order that REPLACES its open stop; a fresh name becomes an OTO buy+stop;
-    attach_stop=False yields a naked buy (and skips held names); an invalid stop (>= price)
-    is skipped, no order. Cases D/E cover Minervini's never-lower-a-stop ratchet: an existing
-    HIGHER stop is kept (no order), a LOWER one is replaced upward."""
-    from src.stock_screener.cockpit import trade
-    from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
-    from alpaca.trading.enums import OrderSide, OrderClass, OrderType, TimeInForce
+def _submit_fakes():
+    """Build (FakeClient, _Order) for the submit_buy_plan tests — ONE fake Alpaca stack
+    shared by the market/limit/rearm-only/pending-buy variants (consolidated 2026-08-10
+    from four near-identical per-test copies; every assertion kept). ``get_orders``
+    honors BOTH ``filter.symbols`` (the per-symbol open-stop query) and ``filter.side``
+    (the pending-cockpit-BUY sweep); ``open_orders`` is a flat list of ``_Order``."""
+    from alpaca.trading.enums import OrderSide
 
     class _Acct:
         equity = "100000"; cash = "100000"; account_number = "PA000123"
@@ -1469,10 +1467,11 @@ def test_submit_buy_plan_stop_logic():
         tradable = True
 
     class _Order:
-        def __init__(self, oid, symbol, otype, stop_price=None):
+        def __init__(self, oid, symbol, otype=None, stop_price=None,
+                     side=OrderSide.SELL, coid=""):
             self.id, self.symbol, self.type = oid, symbol, otype
-            self.side = OrderSide.SELL
-            self.stop_price = stop_price
+            self.side, self.stop_price = side, stop_price
+            self.client_order_id = coid
 
     class _Resp:
         def __init__(self, oid):
@@ -1481,7 +1480,7 @@ def test_submit_buy_plan_stop_logic():
     class FakeClient:
         def __init__(self, positions=None, open_orders=None):
             self._positions = positions or {}       # {sym: qty_str}
-            self._open = open_orders or {}          # {sym: [_Order, ...]}
+            self._open = open_orders or []          # flat [_Order, ...]
             self.submitted, self.cancelled, self._n = [], [], 0
 
         def get_account(self):
@@ -1494,10 +1493,11 @@ def test_submit_buy_plan_stop_logic():
             return _Asset()
 
         def get_orders(self, filter=None):
-            out = []
-            for s in (getattr(filter, "symbols", None) or []):
-                out.extend(self._open.get(s, []))
-            return out
+            side = getattr(filter, "side", None)
+            syms = getattr(filter, "symbols", None)
+            return [od for od in self._open
+                    if (side is None or od.side == side)
+                    and (not syms or od.symbol in syms)]
 
         def cancel_order_by_id(self, oid):
             self.cancelled.append(str(oid))
@@ -1507,22 +1507,46 @@ def test_submit_buy_plan_stop_logic():
             self._n += 1
             return _Resp(f"id-{self._n}")
 
-    def _entry(t, shares, price, stop):
-        return {"ticker": t, "shares": shares, "price": price, "pivot": price,
-                "est_value": round(shares * price, 2), "extended": False, "stop_price": stop}
+    return FakeClient, _Order
 
-    def _run(plan, attach, fake):
-        orig = trade._connect_paper
-        trade._connect_paper = lambda: (fake, True)
-        try:
-            return trade.submit_buy_plan(plan, attach_stop=attach)
-        finally:
-            trade._connect_paper = orig
+
+def _submit_entry(t, shares, price, stop, limit=None, **extra):
+    """A plan row for _run_submit; est_value uses the limit (worst-case fill) when given,
+    mirroring build_buy_plan's basis."""
+    e = {"ticker": t, "shares": shares, "price": price, "pivot": price,
+         "est_value": round(shares * (limit or price), 2), "extended": False,
+         "stop_price": stop, **extra}
+    if limit is not None:
+        e["limit_price"] = limit
+    return e
+
+
+def _run_submit(plan, fake, attach=True):
+    from src.stock_screener.cockpit import trade
+    orig = trade._connect_paper
+    trade._connect_paper = lambda: (fake, True)
+    try:
+        return trade.submit_buy_plan(plan, attach_stop=attach)
+    finally:
+        trade._connect_paper = orig
+
+
+def test_submit_buy_plan_stop_logic():
+    """submit_buy_plan against a fake Alpaca client: an already-held name becomes a GTC
+    stop-only order that REPLACES its open stop; a fresh name becomes an OTO buy+stop;
+    attach_stop=False yields a naked buy (and skips held names); an invalid stop (>= price)
+    is skipped, no order. Cases D/E cover Minervini's never-lower-a-stop ratchet: an existing
+    HIGHER stop is kept (no order), a LOWER one is replaced upward."""
+    from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
+    from alpaca.trading.enums import OrderSide, OrderClass, OrderType, TimeInForce
+
+    FakeClient, _Order = _submit_fakes()
+    _entry, _run = _submit_entry, (lambda plan, attach, fake: _run_submit(plan, fake, attach))
 
     # --- A: held name (40 sh, open stop of UNKNOWN price) + a fresh name, attach on -------
     # No readable stop_price -> can't ratchet -> replace with the new GTC stop.
     fa = FakeClient(positions={"HELD": "40"},
-                    open_orders={"HELD": [_Order("old-1", "HELD", OrderType.STOP)]})
+                    open_orders=[_Order("old-1", "HELD", OrderType.STOP)])
     outA = {r["ticker"]: r for r in
             _run([_entry("HELD", 10, 100.0, 95.0), _entry("NEW", 5, 50.0, 46.0)], True, fa)["results"]}
     assert outA["HELD"]["status"] == "stop_only"
@@ -1557,8 +1581,7 @@ def test_submit_buy_plan_stop_logic():
 
     # --- D: held name with an existing HIGHER stop -> ratchet HOLDS (kept, no order) -------
     fd = FakeClient(positions={"HELD": "40"},
-                    open_orders={"HELD": [_Order("hi-1", "HELD", OrderType.STOP,
-                                                 stop_price=98.0)]})
+                    open_orders=[_Order("hi-1", "HELD", OrderType.STOP, stop_price=98.0)])
     outD = _run([_entry("HELD", 10, 100.0, 95.0)], True, fd)["results"][0]
     assert outD["status"] == "stop_kept"
     assert outD["stop_price"] == 98.0                    # kept the higher existing stop
@@ -1566,8 +1589,7 @@ def test_submit_buy_plan_stop_logic():
 
     # --- E: held name with an existing LOWER stop -> RAISE (cancel old, place GTC at new) --
     fe = FakeClient(positions={"HELD": "40"},
-                    open_orders={"HELD": [_Order("lo-1", "HELD", OrderType.STOP,
-                                                 stop_price=90.0)]})
+                    open_orders=[_Order("lo-1", "HELD", OrderType.STOP, stop_price=90.0)])
     outE = _run([_entry("HELD", 10, 100.0, 95.0)], True, fe)["results"][0]
     assert outE["status"] == "stop_only" and outE["stop_price"] == 95.0
     assert "lo-1" in fe.cancelled                        # replaced the lower stop
@@ -1576,8 +1598,7 @@ def test_submit_buy_plan_stop_logic():
 
     # --- F: held name, existing stop EQUAL to the new stop -> kept (no churn) --------------
     ff = FakeClient(positions={"HELD": "40"},
-                    open_orders={"HELD": [_Order("eq-1", "HELD", OrderType.STOP,
-                                                 stop_price=95.0)]})
+                    open_orders=[_Order("eq-1", "HELD", OrderType.STOP, stop_price=95.0)])
     outF = _run([_entry("HELD", 10, 100.0, 95.0)], True, ff)["results"][0]
     assert outF["status"] == "stop_kept" and not ff.submitted and not ff.cancelled
 
@@ -1650,6 +1671,46 @@ def test_build_buy_plan_limit_orders():
         pass
 
 
+def test_submit_buy_plan_rearm_only_never_buys():
+    """Review 2026-08-09 HIGH: a plan row shown as 'already held — stop re-arm only, no
+    buy' (rearm_only, stamped from BUILD-time holdings) must never become a buy when the
+    position closes between Build and Submit (its GTC stop firing). Live-held rearm rows
+    keep working; zero-share stop_only rows are skipped instead of reaching the API as
+    qty-0 orders; ordinary buy rows alongside are unaffected."""
+    from alpaca.trading.requests import MarketOrderRequest, StopOrderRequest
+    from alpaca.trading.enums import OrderType
+
+    FakeClient, _Order = _submit_fakes()
+    _entry, _run = _submit_entry, _run_submit
+
+    # --- A: held at build, position CLOSED before submit -> skipped, NEVER bought -----
+    fa = FakeClient()                                    # nothing held anymore
+    outA = _run([_entry("GONE", 50, 100.0, 95.0, rearm_only=True)], fa)["results"][0]
+    assert outA["status"] == "skipped" and not fa.submitted
+    assert "position closed" in outA["detail"]
+
+    # --- B: rearm_only but STILL held -> normal stop re-arm path, no buy --------------
+    fb = FakeClient(positions={"HELD": "40"},
+                    open_orders=[_Order("lo-1", "HELD", OrderType.STOP, stop_price=90.0)])
+    outB = _run([_entry("HELD", 10, 100.0, 95.0, rearm_only=True)], fb)["results"][0]
+    assert outB["status"] == "stop_only"                 # raised the stop, sent no buy
+    assert all(isinstance(r, StopOrderRequest) for r in fb.submitted)
+
+    # --- C: zero-share stop_only row, position closed -> skipped, no qty-0 order ------
+    fc = FakeClient()
+    outC = _run([_entry("ZERO", 0, 100.0, 95.0, stop_only=True)], fc)["results"][0]
+    assert outC["status"] == "skipped" and not fc.submitted
+
+    # --- D: an ordinary buy row alongside is unaffected by the guard ------------------
+    fd = FakeClient()
+    outD = {r["ticker"]: r for r in _run(
+        [_entry("GONE", 50, 100.0, 95.0, rearm_only=True),
+         _entry("NEW", 5, 50.0, 46.0)], fd)["results"]}
+    assert outD["GONE"]["status"] == "skipped"
+    assert outD["NEW"]["status"] == "submitted"
+    assert len([r for r in fd.submitted if isinstance(r, MarketOrderRequest)]) == 1
+
+
 def test_submit_buy_plan_limit_orders():
     """An entry carrying limit_price becomes a LIMIT buy: a GTC OTO + stop leg when attach
     is on (the §6.38 end-to-end-GTC shape — the stop arms whenever the fill happens, even
@@ -1657,56 +1718,11 @@ def test_submit_buy_plan_limit_orders():
     worst-case fill), not the last close; a present-but-invalid limit is SKIPPED rather
     than silently downgraded to a market order; entries without the key keep the market
     path untouched."""
-    from src.stock_screener.cockpit import trade
     from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
     from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
 
-    class _Acct:
-        equity = "100000"; cash = "100000"; account_number = "PA000123"
-
-    class _Asset:
-        tradable = True
-
-    class _Resp:
-        def __init__(self, oid):
-            self.id = oid
-
-    class FakeClient:
-        def __init__(self):
-            self.submitted, self._n = [], 0
-
-        def get_account(self):
-            return _Acct()
-
-        def get_all_positions(self):
-            return []                       # nothing held -> every name takes the BUY path
-
-        def get_asset(self, t):
-            return _Asset()
-
-        def get_orders(self, filter=None):
-            return []                       # no pending buys, no open stops
-
-        def submit_order(self, order_data=None):
-            self.submitted.append(order_data)
-            self._n += 1
-            return _Resp(f"id-{self._n}")
-
-    def _entry(t, shares, price, stop, limit=None):
-        e = {"ticker": t, "shares": shares, "price": price, "pivot": price,
-             "est_value": round(shares * (limit or price), 2), "extended": False,
-             "stop_price": stop}
-        if limit is not None:
-            e["limit_price"] = limit
-        return e
-
-    def _run(plan, attach, fake):
-        orig = trade._connect_paper
-        trade._connect_paper = lambda: (fake, True)
-        try:
-            return trade.submit_buy_plan(plan, attach_stop=attach)
-        finally:
-            trade._connect_paper = orig
+    FakeClient, _ = _submit_fakes()
+    _entry, _run = _submit_entry, (lambda plan, attach, fake: _run_submit(plan, fake, attach))
 
     # --- A: attach on -> GTC OTO LIMIT buy with the stop leg, SEPAoto- tag ----------------
     fa = FakeClient()
@@ -1752,73 +1768,17 @@ def test_submit_buy_plan_skips_pending_cockpit_buy():
     skips a not-held ticker that already has a pending cockpit buy (client_order_id 'SEPA…').
     A pending BUY from some OTHER tool (no SEPA prefix) does NOT block, and a ticker with no
     pending order is bought normally."""
-    from src.stock_screener.cockpit import trade
     from alpaca.trading.requests import MarketOrderRequest
     from alpaca.trading.enums import OrderSide
 
-    class _Acct:
-        equity = "100000"; cash = "100000"; account_number = "PA000123"
-
-    class _Asset:
-        tradable = True
-
-    class _Order:
-        def __init__(self, symbol, side, coid):
-            self.symbol, self.side, self.client_order_id = symbol, side, coid
-            self.type = None; self.stop_price = None
-
-    class _Resp:
-        def __init__(self, oid):
-            self.id = oid
-
-    class FakeClient:
-        def __init__(self, open_orders):
-            self._open = open_orders            # flat list of _Order
-            self.submitted, self._n = [], 0
-
-        def get_account(self):
-            return _Acct()
-
-        def get_all_positions(self):
-            return []                           # nothing held -> all names take the BUY path
-
-        def get_asset(self, t):
-            return _Asset()
-
-        def get_orders(self, filter=None):
-            side = getattr(filter, "side", None)
-            syms = getattr(filter, "symbols", None)
-            out = []
-            for od in self._open:
-                if side is not None and od.side != side:
-                    continue
-                if syms and od.symbol not in syms:
-                    continue
-                out.append(od)
-            return out
-
-        def submit_order(self, order_data=None):
-            self.submitted.append(order_data)
-            self._n += 1
-            return _Resp(f"id-{self._n}")
-
-    def _entry(t, shares, price, stop):
-        return {"ticker": t, "shares": shares, "price": price, "pivot": price,
-                "est_value": round(shares * price, 2), "extended": False, "stop_price": stop}
-
-    def _run(plan, fake):
-        orig = trade._connect_paper
-        trade._connect_paper = lambda: (fake, True)
-        try:
-            return trade.submit_buy_plan(plan, attach_stop=True)
-        finally:
-            trade._connect_paper = orig
+    FakeClient, _Order = _submit_fakes()
+    _entry, _run = _submit_entry, _run_submit
 
     # QUEUED covers a cockpit SEPAoto buy; FREE has an unrelated (non-SEPA) buy that must NOT
     # block; NEW has nothing pending and should submit.
-    fake = FakeClient([
-        _Order("QUEUED", OrderSide.BUY, "SEPAoto-QUEUED-123"),
-        _Order("FREE", OrderSide.BUY, "someBroker-FREE-1"),
+    fake = FakeClient(open_orders=[
+        _Order("q1", "QUEUED", side=OrderSide.BUY, coid="SEPAoto-QUEUED-123"),
+        _Order("q2", "FREE", side=OrderSide.BUY, coid="someBroker-FREE-1"),
     ])
     out = {r["ticker"]: r for r in _run(
         [_entry("QUEUED", 10, 50.0, 46.0),
@@ -3149,15 +3109,17 @@ def test_get_many_prices_retries_failed_subset():
 
 
 def test_run_scan_uses_topup_fetch():
-    """run_scan routes ALL price fetches (universe + SPY) through the incremental top-up,
-    gated by a 30-minute freshness window (a cache fetched within PRICE_FRESH_MINUTES is
-    served as-is — reopening the app minutes later costs zero network). Older caches fetch
-    only their missing days; only cold names pay the full 2y download. force is not passed
-    by the app's Re-scan anymore (top-up instead)."""
+    """run_scan routes ALL price fetches (universe + SPY) through the ALWAYS-top-up path
+    (max_age_days=0.0 — same semantics as the EOD trigger): the old 30-minute freshness
+    window is gone (user decision 2026-08-09; scan_worker's process-wide refresh throttle
+    is the only fetch-rate limiter now, so a scan that runs must BE fresh). Older caches
+    fetch only their missing days; only cold names pay the full 2y download; the
+    settled-close serve still short-circuits network after hours. force is not passed by
+    the app's Re-scan (top-up instead)."""
     from unittest.mock import patch
 
     from src.stock_screener.cockpit import data_feed as dfeed
-    from src.stock_screener.cockpit.scan import PRICE_FRESH_MINUTES, run_scan
+    from src.stock_screener.cockpit.scan import run_scan
 
     TODAY = "2026-07-10"
     frame = _trigger_frame(TODAY, [100.0 + i * 0.3 for i in range(260)])
@@ -3177,11 +3139,9 @@ def test_run_scan_uses_topup_fetch():
             patch.object(dfeed, "get_many_prices", fake_many), \
             patch.object(dfeed, "get_fundamentals", lambda t, **kw: None):
         run_scan(universe="full_us")
-    assert PRICE_FRESH_MINUTES == 30                     # the user-chosen freshness window
-    _exp = PRICE_FRESH_MINUTES / (24.0 * 60.0)
-    assert seen["many"].get("max_age_days") == _exp, \
-        "universe fetch must use the top-up path with the 30-min freshness window"
-    assert seen["spy"].get("max_age_days") == _exp, "SPY fetch must match"
+    assert seen["many"].get("max_age_days") == 0.0, \
+        "universe fetch must always top up (no freshness window)"
+    assert seen["spy"].get("max_age_days") == 0.0, "SPY fetch must match"
     assert not seen["many"].get("force") and not seen["spy"].get("force")
 
 
@@ -4174,6 +4134,364 @@ def test_vcp_benchmark_200_charts():
     assert not misses, f"never-miss violated — YES charts in tier C: {misses}"
     assert all(tiers[t] in ("A", "B") for t in yes), "a YES chart left tier A/B"
     assert yes_a >= 45, f"tier-A recall regressed: only {yes_a}/{len(yes)} YES in A"
+
+
+def test_atomic_parquet_replace_and_tmp_cleanup():
+    """_atomic_to_parquet writes a sibling .tmp then os.replace's it over the target: a
+    failed write leaves the OLD file byte-intact (the torn-file -> silent-network-refetch
+    hole this closes) and no .tmp behind; a successful write also leaves no .tmp."""
+    import tempfile
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    df = pd.DataFrame({"Close": [1.0, 2.0]},
+                      index=pd.bdate_range("2026-01-05", periods=2))
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "AAA.parquet"
+
+        # success: file lands, no .tmp siblings
+        dfeed._atomic_to_parquet(df, target)
+        assert target.exists()
+        assert not list(Path(tmp).glob("*.tmp"))
+        before = target.read_bytes()
+
+        # failure mid-write: to_parquet writes garbage then raises -> target UNCHANGED,
+        # no .tmp left behind
+        def _boom(self, path, *a, **kw):
+            Path(path).write_bytes(b"torn")
+            raise OSError("disk full")
+
+        with patch.object(pd.DataFrame, "to_parquet", _boom):
+            try:
+                dfeed._atomic_to_parquet(df, target)
+            except OSError:
+                pass                                     # callers swallow; either is fine
+        assert target.read_bytes() == before, "failed write must leave the old file intact"
+        assert not list(Path(tmp).glob("*.tmp")), "no .tmp litter after a failed write"
+
+
+def test_get_many_prices_threaded_cache_reads():
+    """The cache-read pre-pass runs in a thread pool: every fresh-cached name is served
+    with NO network touch, the returned dict preserves the input symbol order (assembly
+    happens after the join), and the progress counter is strictly monotonic 1..N under
+    the emit lock (label ORDER may interleave — consumers are order-insensitive)."""
+    import tempfile
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    def _ohlcv(close):
+        idx = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=10)
+        return pd.DataFrame({"Open": close, "High": close, "Low": close,
+                             "Close": close, "Volume": 1000.0}, index=idx)
+
+    syms = [f"T{i:02d}" for i in range(40)]
+    dones, labels = [], []
+
+    def prog(done, total, label):
+        dones.append(done)
+        labels.append(label)
+
+    def _no_net(*a, **kw):
+        raise AssertionError("network touched on a fully warm cache")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        for i, s in enumerate(syms):
+            _ohlcv([100.0 + i] * 10).to_parquet(pdir / f"{s}.parquet")
+        with patch.object(dfeed, "PRICES_DIR", pdir), patch("yfinance.download", _no_net):
+            out = dfeed.get_many_prices(syms, max_age_days=7.0, pause=0, retries=0,
+                                        progress=prog)
+
+    assert list(out.keys()) == syms, "assembly must preserve input symbol order"
+    assert all(float(out[s]["Close"].iloc[-1]) == 100.0 + i
+               for i, s in enumerate(syms)), "each name must get ITS OWN frame"
+    assert sorted(dones) == list(range(1, 41)) and dones == sorted(dones), \
+        f"progress counter must be strictly monotonic 1..40, got {dones[:5]}…"
+    assert all("cached (fresh)" in lb for lb in labels)
+    assert {lb.split(":")[0] for lb in labels} == set(syms)
+
+
+def test_zigzag_fast_parity():
+    """_zigzag_pivots (plain-float hot path) returns EXACTLY the reference
+    implementation's pivots — same indices, prices, kinds — across all 200 benchmark
+    fixtures at a threshold grid spanning what detect_vcp actually tries, plus seeded
+    random walks. This is the ship-gate for the vcp.py fast path."""
+    import numpy as np
+    import pandas as pd
+    from vcp_labels import LABELS, fixture_filename
+
+    from src.stock_screener.cockpit.vcp import _zigzag_pivots, _zigzag_pivots_ref
+
+    thresholds = (0.02, 0.03, 0.05, 0.08, 0.12)
+    fdir = ROOT / "tests" / "fixtures" / "vcp_bench"
+    checked = 0
+    for t in LABELS:
+        df = pd.read_parquet(fdir / fixture_filename(t))
+        high = df["High"].to_numpy()[-325:]
+        low = df["Low"].to_numpy()[-325:]
+        for thr in thresholds:
+            assert _zigzag_pivots(high, low, thr) == _zigzag_pivots_ref(high, low, thr), \
+                (t, thr)
+            checked += 1
+    rng = np.random.default_rng(0)
+    for _ in range(25):
+        mid = 100.0 + np.cumsum(rng.normal(0, 1.5, 325))
+        high = mid + rng.uniform(0.0, 2.0, 325)
+        low = mid - rng.uniform(0.0, 2.0, 325)
+        for thr in thresholds:
+            assert _zigzag_pivots(high, low, thr) == _zigzag_pivots_ref(high, low, thr)
+            checked += 1
+    assert checked >= 1000, checked
+
+
+def test_app_status_line_renders_data_as_of():
+    """The stale-while-refresh status fragment renders a 'data as of HH:MM' caption once
+    a result exists, and the latest()-first flow still runs the scan exactly once per
+    session (the store is inert under AppTest — per-session isolation intact)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_app_status_line_renders_data_as_of (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    calls = {"n": 0}
+
+    def _fake_scan(*a, **kw):
+        calls["n"] += 1
+        return result
+
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        with patch.object(scanmod, "run_scan", side_effect=_fake_scan), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+            at = AppTest.from_file(app_path, default_timeout=60)
+            at.run()
+            assert not at.exception, f"app raised: {at.exception}"
+            caps = "".join(str(getattr(c, "value", "")) for c in at.caption)
+            assert "data as of" in caps, f"status line must show the timestamp: {caps[:200]}"
+            at.run()                                     # rerun -> same result, no rescan
+            assert not at.exception, f"app raised on rerun: {at.exception}"
+    assert calls["n"] == 1, f"scan must run once per session, ran {calls['n']}x"
+
+
+def test_scan_store_publish_and_adopt():
+    """A completed scan publishes into the injected ResultStore; a SECOND worker (a new
+    session) adopts the stored result in ensure_started without calling run_scan, and
+    latest()/result_if_ready serve it immediately."""
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    store = ResultStore()
+    calls = {"n": 0}
+
+    def fake(*a, **kw):
+        calls["n"] += 1
+        return {"scan": calls["n"]}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w1 = ScanWorker(store=store)
+        w1.ensure_started()
+        assert w1.wait(grace=10.0) == {"scan": 1} and calls["n"] == 1
+        assert store.get(w1._key2()).result == {"scan": 1}
+
+        w2 = ScanWorker(store=store)                 # a fresh "session"
+        w2.ensure_started()                          # adopts — no thread, no scan
+        assert calls["n"] == 1, "adoption must not re-run the scan"
+        assert w2.latest() == {"scan": 1} and w2.result_if_ready() == {"scan": 1}
+        assert w2.snapshot()["as_of"] == store.get(w2._key2()).completed_wall
+
+
+def test_scan_store_serial_adopt_dedups_cold_start():
+    """Two sessions starting cold simultaneously: the second queues on the process-wide
+    scan serializer and, once inside, finds the first's result already in the store
+    (completed after its own run started) — it ADOPTS instead of re-scanning. Exactly
+    one real scan for two cold sessions."""
+    import threading as th
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    store = ResultStore()
+    started, release = th.Event(), th.Event()
+    calls = {"n": 0}
+
+    def fake(*a, **kw):
+        calls["n"] += 1
+        started.set()
+        assert release.wait(10), "test deadlock"
+        return {"scan": calls["n"]}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w1, w2 = ScanWorker(store=store), ScanWorker(store=store)
+        w1.ensure_started()
+        assert started.wait(10)                      # w1 holds _SCAN_SERIAL inside fake
+        w2.ensure_started()                          # queues behind the serial lock
+        release.set()
+        assert w1.wait(grace=10.0) == {"scan": 1}
+        assert w2.wait(grace=10.0) == {"scan": 1}, "w2 must adopt w1's result"
+    assert calls["n"] == 1, f"two cold sessions must cost ONE scan, ran {calls['n']}"
+
+
+def test_worker_serves_stale_while_refreshing():
+    """While a refresh is mid-flight, latest() keeps serving the previous result (the
+    stale-while-refresh contract the UI is built on); result_if_ready stays None for the
+    new key until the refresh lands; a FAILED refresh keeps the stale result serving."""
+    import threading as th
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    store = ResultStore()
+    started, release = th.Event(), th.Event()
+    behavior = {"raise": False}
+    calls = {"n": 0}
+
+    def fake(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            started.set()
+            assert release.wait(10), "test deadlock"
+            if behavior["raise"]:
+                raise RuntimeError("refresh boom")
+        return {"scan": calls["n"]}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w = ScanWorker(store=store)
+        w.ensure_started()
+        assert w.wait(grace=10.0) == {"scan": 1}
+
+        w.request_rescan()                           # manual refresh, blocks in fake
+        assert started.wait(10)
+        assert w.result_if_ready() is None           # new key not ready…
+        assert w.latest() == {"scan": 1}             # …but the stale result still serves
+        release.set()
+        assert w.wait(grace=10.0) == {"scan": 2}
+        assert store.get(w._key2()).result == {"scan": 2}
+
+        started.clear(); release.clear()
+        behavior["raise"] = True                     # now a FAILING refresh
+        w.request_rescan()
+        assert started.wait(10)
+        release.set()
+        w._thread.join(10)
+        assert w.snapshot()["status"] == "error"
+        assert w.latest() == {"scan": 2}, "failed refresh must keep serving stale"
+        assert store.get(w._key2()).result == {"scan": 2}
+
+
+def test_scan_store_refresh_throttle():
+    """try_claim_refresh grants at most one claim per TTL, only once an entry is at
+    least TTL old; claims are recorded on START so a failed/slow refresh can't
+    retry-loop. Fake clock — no real time passes. (Clock values stay far below
+    time.monotonic() so the worker's adopt check can never mistake them for fresh.)"""
+    from src.stock_screener.cockpit.scan_worker import ResultStore
+
+    now = {"t": 1000.0}
+    store = ResultStore(ttl=1800.0, clock=lambda: now["t"])
+    key = ("full_us", 8)
+
+    assert store.try_claim_refresh(key) is False     # no entry yet
+    store.put(key, {"scan": 1})
+    assert store.try_claim_refresh(key) is False     # entry fresh
+    now["t"] += 1799.0
+    assert store.try_claim_refresh(key) is False     # one second short
+    now["t"] += 2.0
+    assert store.try_claim_refresh(key) is True      # stale -> claim granted
+    assert store.try_claim_refresh(key) is False     # claimed -> locked for a TTL
+    now["t"] += 1801.0
+    assert store.try_claim_refresh(key) is True      # window reopens
+
+
+def test_rescan_bypasses_throttle_and_updates_store():
+    """A manual rescan always runs (never satisfied by the store) and stamps the claim,
+    so a FAILED manual rescan doesn't get shadow-retried by the background throttle a
+    moment later; ensure_started right after sees the stamped claim + the error key and
+    starts nothing."""
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    now = {"t": 1000.0}
+    store = ResultStore(ttl=1800.0, clock=lambda: now["t"])
+    calls = {"n": 0}
+    fail = {"on": False}
+
+    def fake(*a, **kw):
+        calls["n"] += 1
+        if fail["on"]:
+            raise RuntimeError("boom")
+        return {"scan": calls["n"]}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w = ScanWorker(store=store)
+        w.ensure_started()
+        assert w.wait(grace=10.0) == {"scan": 1} and calls["n"] == 1
+
+        now["t"] += 3600.0                           # entry now VERY stale
+        fail["on"] = True
+        w.request_rescan()                           # manual -> runs (and fails)
+        w._thread.join(10)
+        assert calls["n"] == 2 and w.snapshot()["status"] == "error"
+
+        w.ensure_started()                           # claim stamped by the rescan ->
+        w._thread.join(10)                           # (dead rescan thread; nothing new starts)
+        assert calls["n"] == 2, "no shadow auto-refresh right after a manual rescan"
+
+        now["t"] += 1801.0                           # a full TTL later the throttle
+        fail["on"] = False                           # window reopens legitimately
+        w.ensure_started()
+        w._thread.join(10)
+        assert calls["n"] == 3 and w.wait(grace=10.0) == {"scan": 3}
+
+
+def test_scan_worker_progress_classification():
+    """ScanWorker._on_progress classifies labels into phases and keeps cache serves OFF
+    the download log: 'Prices · SYM: cached (…)' -> phase 'cache', no log line (a
+    zero-network pass must not render as 'Downloading'); other price labels -> 'fetch'
+    with a 'Downloading …' log line; screening labels -> 'screen'. snapshot() exposes
+    phase + phase_label for the bar text. data_feed label strings are untouched."""
+    from src.stock_screener.cockpit.scan_worker import ScanWorker
+
+    w = ScanWorker()
+    w._on_progress(1, 10, "Prices · AAPL: cached (fresh)")
+    s = w.snapshot()
+    assert s["phase"] == "cache" and s["phase_label"] == "Reading cache"
+    assert s["log"] == [], "cache serves must not appear in the download log"
+
+    w._on_progress(2, 10, "Prices · MSFT: cached (settled close)")
+    assert w.snapshot()["log"] == []
+
+    w._on_progress(3, 10, "Prices · NVDA: 8/7/2026 - 8/9/2026")
+    s = w.snapshot()
+    assert s["phase"] == "fetch" and s["phase_label"] == "Downloading"
+    assert s["log"] == ["Downloading NVDA: 8/7/2026 - 8/9/2026"]
+
+    w._on_progress(4, 10, "Prices · COLD: full history (2y)")
+    assert w.snapshot()["log"][-1] == "Downloading COLD: full history (2y)"
+
+    w._on_progress(5, 10, "Screening · AAPL")
+    s = w.snapshot()
+    assert s["phase"] == "screen" and s["phase_label"] == "Screening"
+    assert s["done"] == 5 and s["total"] == 10
+    assert len(s["log"]) == 2                     # screening adds nothing to the log
 
 
 def _run_all():
