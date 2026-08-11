@@ -1638,15 +1638,28 @@ def test_build_buy_plan_limit_orders():
                                order_type="limit")
     assert p_risk[0]["shares"] == int(500 / 15.0)            # 33
 
-    # risk requires stop < LIMIT: stop 106 ≥ limit 105 -> skipped, reason names the limit
+    # stop 106 ≥ price 100 -> the R2-3 broken-base gate fires first (it outranks the
+    # risk gate: a stop above the market is wrong in EVERY sizing mode)
     _, s_bad = build_buy_plan(["AAA"], {"AAA": _payload(100.0, 100.0, stop=106.0)},
                               mode="risk", amount=0.5, equity=100_000.0, order_type="limit")
-    assert "limit" in s_bad[0]["reason"]
+    assert "current price" in s_bad[0]["reason"]
+    # the risk gate's own limit check is still reachable for an EXTENDED name: price 110
+    # above the zone, limit 105 < price, stop 106 between them -> "stop not below limit"
+    _, s_ext = build_buy_plan(["EEE"], {"EEE": _payload(110.0, 100.0, stop=106.0)},
+                              mode="risk", amount=0.5, equity=100_000.0, order_type="limit")
+    assert "limit" in s_ext[0]["reason"]
 
-    # frozen pivot overrides: limit = frozen × 1.05, not the scan zone
+    # frozen pivot overrides: limit = frozen × 1.05, not the scan zone. (Pivot must sit
+    # NEAR the price — a far-above frozen pivot now trips the R2-3 broken-base skip,
+    # since its derived stop would sit above the market.)
     p_fz, _ = build_buy_plan(["AAA"], pl, mode="shares", amount=5, order_type="limit",
-                             pivots={"AAA": 200.0})
-    assert p_fz[0]["limit_price"] == round(200.0 * 1.05, 2)
+                             pivots={"AAA": 102.0})
+    assert p_fz[0]["limit_price"] == round(102.0 * 1.05, 2)
+    # ...and the far-above frozen pivot IS skipped by the R2-3 gate (stop 91.8 < price
+    # would pass, but pivot 200 -> stop 180 >= price 100 -> broken base)
+    _, s_far = build_buy_plan(["AAA"], pl, mode="shares", amount=5, order_type="limit",
+                              pivots={"AAA": 200.0})
+    assert s_far and "current price" in s_far[0]["reason"]
 
     # extended name (price above the zone): planned + flagged, limit sits BELOW the price
     ext = {"BBB": _payload(110.0, 100.0, stop=90.0)}
@@ -1657,6 +1670,18 @@ def test_build_buy_plan_limit_orders():
     nz = {"CCC": {"df": _payload(100.0, 100.0)["df"], "levels": {"stop": 90.0}}}
     p_nz, _ = build_buy_plan(["CCC"], nz, mode="shares", amount=5, order_type="limit")
     assert p_nz[0]["limit_price"] == 100.0
+
+    # R2-3: broken-down name — stop (92.5) at/above the CURRENT price (88) means the
+    # zone-top limit is marketable and the stop would arm above the market. Build skips
+    # it in limit mode, in EVERY sizing mode (no stop-gate existed outside risk mode).
+    broke = {"DDD": _payload(88.0, 100.0, stop=92.5)}
+    for _mode, _amt in (("shares", 5), ("dollars", 1000.0)):
+        _, s_brk = build_buy_plan(["DDD"], broke, mode=_mode, amount=_amt,
+                                  order_type="limit")
+        assert s_brk and "current price" in s_brk[0]["reason"], (_mode, s_brk)
+    # ...and market mode is untouched at build (submit's stop_is_valid catches it there)
+    p_mkt_brk, _ = build_buy_plan(["DDD"], broke, mode="shares", amount=5)
+    assert p_mkt_brk and p_mkt_brk[0]["ticker"] == "DDD"
 
     # the 10% single-order cap clamps on the limit basis too
     p_cap, _ = build_buy_plan(["AAA"], pl, mode="risk", amount=5.0, equity=100_000.0,
@@ -1734,14 +1759,30 @@ def test_submit_buy_plan_limit_orders():
     assert float(lr.stop_loss.stop_price) == 95.0
     assert lr.client_order_id.startswith("SEPAoto-")
 
-    # --- B: stop validity is vs the LIMIT — 102 > last close 100 but < limit 105 submits;
-    #        a stop AT the limit is skipped with nothing sent -----------------------------
+    # --- B (R2-3): stop validity is vs min(limit, price) — the worst fill of a limit BUY
+    #        is ~the current price when the limit is marketable. A stop BETWEEN price and
+    #        limit (102 with price 100 / limit 105) would arm above the market -> skipped;
+    #        a stop AT the limit is likewise skipped; nothing is sent either way. --------
     fb = FakeClient()
-    assert _run([_entry("NEW", 5, 100.0, 102.0, limit=105.0)],
-                True, fb)["results"][0]["status"] == "submitted"
+    outB = _run([_entry("NEW", 5, 100.0, 102.0, limit=105.0)], True, fb)["results"][0]
+    assert outB["status"] == "skipped" and not fb.submitted
     fb2 = FakeClient()
     outB2 = _run([_entry("NEW", 5, 100.0, 105.0, limit=105.0)], True, fb2)["results"][0]
     assert outB2["status"] == "skipped" and not fb2.submitted
+
+    # --- B3 (R2-3): the review's exact scenario — broken-down name, stop 92.5 ABOVE the
+    #        88 price but below the 105 limit -> skipped, no instant stop-out order -----
+    fb3 = FakeClient()
+    outB3 = _run([_entry("BRK", 5, 88.0, 92.5, limit=105.0)], True, fb3)["results"][0]
+    assert outB3["status"] == "skipped" and not fb3.submitted
+
+    # --- B4 (R2-9): an upward-EDITED limit re-enters the 10% cap — est_value is stale
+    #        build-time (under the cap) but shares x limit exceeds it -> skipped --------
+    fb4 = FakeClient()
+    e4 = _entry("CAP", 95, 100.0, 95.0, limit=150.0)     # 95 x 150 = $14,250 worst case
+    e4["est_value"] = 9500.0                             # stale, under the $10k cap
+    outB4 = _run([e4], True, fb4)["results"][0]
+    assert outB4["status"] == "skipped" and "10%" in outB4["detail"] and not fb4.submitted
 
     # --- C: attach off -> naked DAY limit, SEPAcockpit- tag -------------------------------
     fc = FakeClient()
@@ -1760,6 +1801,52 @@ def test_submit_buy_plan_limit_orders():
     fe = FakeClient()
     assert _run([_entry("NEW", 5, 100.0, 95.0)], True, fe)["results"][0]["status"] == "submitted"
     assert isinstance(fe.submitted[0], MarketOrderRequest)
+
+
+def test_cancel_pending_buys_cockpit_only():
+    """cancel_pending_buys cancels ONLY open SEPA-tagged BUY orders — never sells/stops,
+    never other tools' buys — and one failed cancel doesn't abort the rest (R2-4c)."""
+    from src.stock_screener.cockpit import trade
+    from alpaca.trading.enums import OrderSide
+
+    FakeClient, _Order = _submit_fakes()
+
+    def _run_cancel(fake):
+        orig = trade._connect_paper
+        trade._connect_paper = lambda: (fake, True)
+        try:
+            return trade.cancel_pending_buys()
+        finally:
+            trade._connect_paper = orig
+
+    fa = FakeClient(open_orders=[
+        _Order("b1", "LIMA", side=OrderSide.BUY, coid="SEPAoto-LIMA-1"),
+        _Order("b2", "MKT", side=OrderSide.BUY, coid="SEPAcockpit-MKT-2"),
+        _Order("b3", "OTHER", side=OrderSide.BUY, coid="someBroker-OTHER-3"),
+        _Order("s1", "HELD", stop_price=95.0),               # SELL stop — untouchable
+    ])
+    out = _run_cancel(fa)
+    assert {c["ticker"] for c in out["cancelled"]} == {"LIMA", "MKT"}
+    assert not out["errors"]
+    assert set(fa.cancelled) == {"b1", "b2"}                 # never s1 (stop) / b3 (foreign)
+
+    # one stuck cancel -> recorded as an error, the rest still cancel
+    fb = FakeClient(open_orders=[
+        _Order("b1", "STUCK", side=OrderSide.BUY, coid="SEPAoto-STUCK-1"),
+        _Order("b2", "OK", side=OrderSide.BUY, coid="SEPAoto-OK-2"),
+    ])
+    _orig = fb.cancel_order_by_id
+
+    def _flaky(oid):
+        if str(oid) == "b1":
+            raise RuntimeError("stuck order")
+        _orig(oid)
+
+    fb.cancel_order_by_id = _flaky
+    out2 = _run_cancel(fb)
+    assert [c["ticker"] for c in out2["cancelled"]] == ["OK"]
+    assert out2["errors"] and out2["errors"][0]["ticker"] == "STUCK"
+    assert "stuck" in out2["errors"][0]["error"]
 
 
 def test_submit_buy_plan_skips_pending_cockpit_buy():
@@ -3108,6 +3195,260 @@ def test_get_many_prices_retries_failed_subset():
         assert (Path(tmp) / "BADD.parquet").exists()     # retried data is persisted
 
 
+def test_yf_download_lock_held_and_exclusive():
+    """R2-2: every yf.download call happens WITH _YF_LOCK held (recording fake — never
+    assert-raise inside it: _download_batch swallows exceptions and the test would pass
+    vacuously), across all three paths: cold full fetch, incremental top-up, and the
+    subset retry. Then an Event-sequenced two-thread run pins mutual exclusion."""
+    import tempfile
+    import threading as th
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    today = pd.Timestamp.today().normalize()
+    idx = pd.bdate_range(end=today, periods=30)
+
+    def _flat(close):
+        return pd.DataFrame({"Open": close, "High": close, "Low": close,
+                             "Close": close, "Volume": [1000] * len(idx)}, index=idx)
+
+    good_multi = pd.concat({"GOOD": _flat([50.0] * 30)}, axis=1)
+    badd_flat = _flat([70.0] * 30)
+    lock_states = []
+
+    def recording_dl(tickers, **kw):
+        lock_states.append(dfeed._YF_LOCK.locked())
+        tl = list(tickers) if isinstance(tickers, (list, tuple)) else [tickers]
+        if "INCR" in tl:
+            return pd.DataFrame()        # incremental attempt fails -> cache served
+        # Full batch: GOOD present, BADD missing -> forces the subset-retry path,
+        # which then gets the flat frame.
+        return good_multi if "BADD" in tl and "GOOD" in tl else badd_flat
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        # An INCREMENTAL name: cache ending 3 business days back (gap <= max_gap_days).
+        gap_idx = pd.bdate_range(end=today, periods=33)[:30]
+        _flat([90.0] * 30).set_axis(gap_idx).to_parquet(pdir / "INCR.parquet")
+        with patch.object(dfeed, "PRICES_DIR", pdir), \
+                patch("yfinance.download", recording_dl):
+            dfeed.get_many_prices(["GOOD", "BADD", "INCR"], max_age_days=-1, pause=0,
+                                  retries=1)
+    assert len(lock_states) >= 3, f"expected incr + full + subset-retry calls, got {len(lock_states)}"
+    assert all(lock_states), "every yf.download must run under _YF_LOCK"
+
+    # --- mutual exclusion: thread B's download can't start while A's is in flight ------
+    started, release = th.Event(), th.Event()
+    overlap = {"seen": False, "in_flight": False}
+    guard = th.Lock()
+
+    def blocking_dl(tickers, **kw):
+        with guard:
+            if overlap["in_flight"]:
+                overlap["seen"] = True
+            overlap["in_flight"] = True
+        started.set()
+        assert release.wait(10), "test deadlock"
+        with guard:
+            overlap["in_flight"] = False
+        return pd.DataFrame()
+
+    def _fetch(sym, tmp):
+        with patch.object(dfeed, "PRICES_DIR", Path(tmp)):
+            dfeed.get_many_prices([sym], max_age_days=-1, pause=0, retries=0)
+
+    with tempfile.TemporaryDirectory() as tmp, patch("yfinance.download", blocking_dl):
+        t1 = th.Thread(target=_fetch, args=("AAA", tmp), daemon=True)
+        t1.start()
+        assert started.wait(10)
+        assert dfeed._YF_LOCK.locked(), "lock must be held during a download"
+        t2 = th.Thread(target=_fetch, args=("BBB", tmp), daemon=True)
+        t2.start()
+        release.set()
+        t1.join(10); t2.join(10)
+    assert not overlap["seen"], "two yf.download calls overlapped despite _YF_LOCK"
+
+
+def test_incremental_persist_requires_reaching_last_bar():
+    """R2-5: the incremental persist fires only when the fetch reached the cache's
+    newest bar. An overlap-only response (provider lag) must NOT rewrite the parquet —
+    the rewrite re-stamps mtime, and a post-cutoff mtime would arm the settled-close
+    gate on content lacking the settled bar. Same-day revisions (max == last, the ~16:30
+    finalize) and newer-only responses still persist."""
+    import tempfile
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    today = pd.Timestamp.today().normalize()
+    idx = pd.bdate_range(end=today, periods=10)
+    last = idx[-1]
+
+    def _flat(ix, close):
+        return pd.DataFrame({"Open": close, "High": close, "Low": close,
+                             "Close": close, "Volume": [1000] * len(ix)}, index=ix)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        path = pdir / "AAA.parquet"
+
+        def _reset():
+            _flat(idx, [100.0] * 10).to_parquet(path)
+            return path.stat().st_mtime_ns
+
+        with patch.object(dfeed, "PRICES_DIR", pdir):
+            # (a) overlap-only response (every bar BEFORE last) -> NO persist
+            m0 = _reset()
+            with patch("yfinance.download",
+                       lambda tk, **kw: _flat(idx[-6:-1], [100.0] * 5)):
+                out = dfeed.get_many_prices(["AAA"], max_age_days=-1, pause=0, retries=0)
+            assert path.stat().st_mtime_ns == m0, "overlap-only must not re-stamp mtime"
+            assert len(out["AAA"]) == 10                     # frame still served intact
+
+            # (b) same-day finalize (response reaches last, close revised) -> persists
+            m0 = _reset()
+            with patch("yfinance.download",
+                       lambda tk, **kw: _flat(idx[-3:], [100.0, 100.0, 107.0])):
+                dfeed.get_many_prices(["AAA"], max_age_days=-1, pause=0, retries=0)
+            assert path.stat().st_mtime_ns != m0, "reaching the last bar must persist"
+            assert float(pd.read_parquet(path)["Close"].iloc[-1]) == 107.0
+
+            # (c) newer-only response (bars strictly after last) -> persists with them
+            m0 = _reset()
+            nxt = pd.bdate_range(start=last + pd.Timedelta(days=1), periods=2)
+            with patch("yfinance.download", lambda tk, **kw: _flat(nxt, [111.0, 112.0])):
+                dfeed.get_many_prices(["AAA"], max_age_days=-1, pause=0, retries=0)
+            assert path.stat().st_mtime_ns != m0
+            assert float(pd.read_parquet(path)["Close"].iloc[-1]) == 112.0
+
+
+def test_settled_serve_requires_current_frame():
+    """R2-5b: the settled-close gate is mtime-keyed, but the FRAME must be current too —
+    a file written post-cutoff whose last bar predates the latest settled session (a
+    lagging full-fetch response) falls through to the top-up instead of being served as
+    settled; a frame ending at the last completed session settle-serves with zero
+    network. no_session_since is patched with an epoch threshold so the test is
+    deterministic at any wall-clock time."""
+    import tempfile
+    import time as _time
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed, triggers as trg
+
+    def _flat(ix, close):
+        return pd.DataFrame({"Open": close, "High": close, "Low": close,
+                             "Close": close, "Volume": [1000] * len(ix)}, index=ix)
+
+    today = pd.Timestamp.today().normalize()
+    cur_idx = pd.bdate_range(end=today, periods=10)          # ends the last bday
+    stale_idx = pd.bdate_range(end=today, periods=15)[:10]   # ends 5 bdays back
+    # Epochs within the last ~4 days count as "no session since" (mtime = now, and the
+    # current frame's session end); anything older (the stale frame's end) fails.
+    threshold = _time.time() - 4 * 86400
+    calls, labels = [], []
+
+    def fake_dl(tickers, **kw):
+        calls.append(1)
+        return pd.DataFrame()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        _flat(cur_idx, [100.0] * 10).to_parquet(pdir / "CUR.parquet")
+        _flat(stale_idx, [100.0] * 10).to_parquet(pdir / "STALE.parquet")
+        with patch.object(dfeed, "PRICES_DIR", pdir), \
+                patch.object(trg, "no_session_since",
+                             lambda ep, now=None: ep >= threshold), \
+                patch("yfinance.download", fake_dl):
+            dfeed.get_many_prices(["CUR"], max_age_days=0.0, pause=0, retries=0,
+                                  progress=lambda d, t, s: labels.append(s))
+            assert labels[-1] == "CUR: cached (settled close)"
+            assert not calls, "a current settled frame must serve with zero network"
+            dfeed.get_many_prices(["STALE"], max_age_days=0.0, pause=0, retries=0,
+                                  progress=lambda d, t, s: labels.append(s))
+    assert "settled" not in labels[-1], "short frame must fall through to the top-up"
+    assert calls, "the fallthrough must actually attempt a fetch"
+
+
+def test_get_many_prices_cache_only_when_network_busy():
+    """allow_network=False serves every cached name AS-IS with zero yfinance calls —
+    incremental candidates from their pre-pass frames, too-stale names straight from
+    parquet — and a name with no cache at all comes back absent instead of triggering a
+    download. The mode interactive pages use while the bulk pipeline holds _YF_LOCK."""
+    import tempfile
+    from unittest.mock import patch
+
+    import pandas as pd
+
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    today = pd.Timestamp.today().normalize()
+
+    def _flat(ix, close):
+        return pd.DataFrame({"Open": close, "High": close, "Low": close,
+                             "Close": close, "Volume": [1000] * len(ix)}, index=ix)
+
+    def _no_net(*a, **kw):
+        raise AssertionError("network touched in cache-only mode")
+
+    gap_idx = pd.bdate_range(end=today, periods=13)[:10]     # ends 3 bdays back -> incr
+    old_idx = pd.bdate_range(end=today - pd.Timedelta(days=40), periods=10)  # -> full
+    with tempfile.TemporaryDirectory() as tmp:
+        pdir = Path(tmp)
+        _flat(gap_idx, [50.0] * 10).to_parquet(pdir / "GAPPY.parquet")
+        _flat(old_idx, [70.0] * 10).to_parquet(pdir / "OLDIE.parquet")
+        with patch.object(dfeed, "PRICES_DIR", pdir), patch("yfinance.download", _no_net):
+            out = dfeed.get_many_prices(["GAPPY", "OLDIE", "NOCACHE"], max_age_days=-1,
+                                        pause=0, retries=0, allow_network=False)
+    assert float(out["GAPPY"]["Close"].iloc[-1]) == 50.0     # incr frame, as-is
+    assert float(out["OLDIE"]["Close"].iloc[-1]) == 70.0     # stale parquet, as-is
+    assert "NOCACHE" not in out                              # absent, not downloaded
+
+
+def test_fetch_positions_skips_network_when_pipeline_busy():
+    """fetch_positions passes allow_network=False to the price pull whenever
+    network_busy() reports the bulk pipeline holding _YF_LOCK — the Positions page
+    (and its SELL controls) must never queue behind a multi-minute sweep. When the
+    pipeline is free, the normal (network-allowed) pull is unchanged."""
+    from src.stock_screener.cockpit import trade, data_feed
+
+    Client, _Pos, _Order = _pos_fakes()
+    positions = [_Pos("NMM", 716, avg_entry_price=79.5, current_price=79.0,
+                      market_value=56564.0, cost_basis=56922.0, unrealized_pl=-358.0,
+                      unrealized_plpc=-0.0063, lastday_price=78.3)]
+    client = Client(positions, {})
+    seen = {}
+
+    def _gmp(syms, **kw):
+        seen["allow_network"] = kw.get("allow_network", True)
+        return {}
+
+    orig = (trade._connect_paper, data_feed.get_many_prices,
+            data_feed.get_fundamentals, data_feed.network_busy)
+    trade._connect_paper = lambda: (client, True)
+    data_feed.get_many_prices = _gmp
+    data_feed.get_fundamentals = lambda t, **kw: None
+    try:
+        data_feed.network_busy = lambda: True
+        out = trade.fetch_positions()
+        assert seen["allow_network"] is False, "busy pipeline -> cache-only pull"
+        assert out["positions"][0]["symbol"] == "NMM"        # page still renders
+        assert out["positions"][0]["current_price"] == 79.0  # Alpaca price intact
+
+        data_feed.network_busy = lambda: False
+        trade.fetch_positions()
+        assert seen["allow_network"] is True, "free pipeline -> normal pull"
+    finally:
+        (trade._connect_paper, data_feed.get_many_prices,
+         data_feed.get_fundamentals, data_feed.network_busy) = orig
+
+
 def test_run_scan_uses_topup_fetch():
     """run_scan routes ALL price fetches (universe + SPY) through the ALWAYS-top-up path
     (max_age_days=0.0 — same semantics as the EOD trigger): the old 30-minute freshness
@@ -3204,11 +3545,19 @@ def test_check_triggers_pure():
     assert r3["status"] == "extended" and r3["extended"] is True
 
     # (d) stale bar (run date is the next business day) -> never fires, and pace is
-    # meaningless off a stale bar -> None
+    # meaningless off a stale bar -> None. The raw `crossed` boolean is also False
+    # (R2-10: symmetry with `triggered` — a stale bar above the pivot is no live cross).
     r4 = check_one(E("STL", 98.0), _trigger_frame(TODAY, flat, spike_vol), None,
                    today="2026-07-13", now="2026-07-13 12:00")
     assert r4["status"] == "stale" and r4["stale"] is True and r4["triggered"] is False
+    assert r4["crossed"] is False
     assert r4["volume_pace"] is None
+    # (d2) the R2-10 tooth: stale + FLAT volume (the quiet cross shape) — the raw
+    # crossed boolean must read False, not just be hidden by status precedence
+    r4b = check_one(E("STL2", 98.0), _trigger_frame(TODAY, flat), None,
+                    today="2026-07-13", now="2026-07-13 12:00")
+    assert r4b["status"] == "stale" and r4b["close_above_pivot"] is True
+    assert r4b["crossed"] is False, "a stale bar above the pivot is not a live cross"
 
     # (e) below the pivot -> watch, negative distance, and NOT crossed
     r5 = check_one(E("BLW", 105.0), _trigger_frame(TODAY, flat), None, today=TODAY)
@@ -4399,8 +4748,9 @@ def test_worker_serves_stale_while_refreshing():
 def test_scan_store_refresh_throttle():
     """try_claim_refresh grants at most one claim per TTL, only once an entry is at
     least TTL old; claims are recorded on START so a failed/slow refresh can't
-    retry-loop. Fake clock — no real time passes. (Clock values stay far below
-    time.monotonic() so the worker's adopt check can never mistake them for fresh.)"""
+    retry-loop. Fake clock — no real time passes. (The worker's adopt check reads the
+    SAME store clock via ResultStore.now(), so fake values never meet real monotonic —
+    R2-8.)"""
     from src.stock_screener.cockpit.scan_worker import ResultStore
 
     now = {"t": 1000.0}
@@ -4462,36 +4812,240 @@ def test_rescan_bypasses_throttle_and_updates_store():
         assert calls["n"] == 3 and w.wait(grace=10.0) == {"scan": 3}
 
 
+def test_save_trigger_report_atomic():
+    """R2-7: save_trigger_report writes tmp + os.replace — a failed write leaves the
+    previous day-file byte-intact and no .tmp behind (the app button and the scheduled
+    job hit the same file from two processes; an in-place truncate could interleave
+    into invalid JSON that the loader silently skips all weekend)."""
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import triggers as trg
+
+    rep = {"date": "2026-08-10", "names": [], "summary": {"n": 0}}
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        path = trg.save_trigger_report(rep, dir_path=d)
+        assert path.exists() and not list(d.glob("*.tmp"))
+        before = path.read_bytes()
+
+        def _boom(obj, f, **kw):
+            f.write("torn")
+            raise OSError("disk full")
+
+        with patch.object(trg.json, "dump", _boom):
+            try:
+                trg.save_trigger_report({**rep, "summary": {"n": 9}}, dir_path=d)
+            except OSError:
+                pass
+        assert path.read_bytes() == before, "failed write must leave the old file intact"
+        assert not list(d.glob("*.tmp")), "no .tmp litter after a failed write"
+
+
+def test_scan_store_persists_and_reloads():
+    """A completed scan is pickled (atomically) and a NEW store — a server restart —
+    serves it on the first get: same result, ORIGINAL completed_wall (the 'data as of'
+    display), and maximally-stale completed_mono so the TTL throttle grants an immediate
+    background refresh, while an in-flight run's adopt check can never be satisfied by
+    it. Corrupt / wrong-version / wrong-key pickles fail open to a cold start."""
+    import pickle as _pickle
+    import tempfile
+
+    from src.stock_screener.cockpit.scan_worker import (
+        _PERSIST_VERSION, ResultStore, ScanWorker)
+
+    key = ("full_us", 8)
+    with tempfile.TemporaryDirectory() as tmp:
+        pkl = Path(tmp) / "last_scan.pkl"
+
+        # put -> pickle on disk, no tmp litter
+        s1 = ResultStore(persist_path=pkl)
+        ent1 = s1.put(key, {"scan": "persisted"})
+        assert pkl.exists() and not list(Path(tmp).glob("*.tmp"))
+
+        # "restart": a fresh store loads it lazily on the first miss
+        s2 = ResultStore(persist_path=pkl)
+        ent2 = s2.get(key)
+        assert ent2 is not None and ent2.result == {"scan": "persisted"}
+        assert ent2.completed_wall == ent1.completed_wall     # original scan time kept
+        assert ent2.completed_mono == float("-inf")           # never adoptable mid-run
+        assert s2.try_claim_refresh(key) is True, \
+            "a loaded (stale-by-definition) entry must grant an immediate refresh"
+
+        # the worker end-to-end: a fresh session adopts the loaded entry instantly
+        s3 = ResultStore(persist_path=pkl)
+        w = ScanWorker(store=s3)
+        assert w.latest() is None                             # nothing adopted yet
+        # ensure_started adopts AND (claim granted) kicks a refresh; we only assert the
+        # instant serve here — run_scan isn't patched, so block the refresh from running
+        # by pre-claiming the TTL slot.
+        s3.stamp_claim(key)
+        w.ensure_started()
+        assert w.latest() == {"scan": "persisted"}
+        assert w.result_if_ready() == {"scan": "persisted"}
+
+        # wrong key -> ignored (cold start)
+        s4 = ResultStore(persist_path=pkl)
+        assert s4.get(("sp500", 8)) is None
+
+        # wrong version -> ignored
+        pkl.write_bytes(_pickle.dumps({"version": _PERSIST_VERSION + 1, "key": key,
+                                       "result": {"scan": "old-shape"},
+                                       "completed_wall": 1.0}))
+        s5 = ResultStore(persist_path=pkl)
+        assert s5.get(key) is None
+
+        # corrupt bytes -> ignored, no raise, and only ONE load attempt per process
+        pkl.write_bytes(b"not a pickle")
+        s6 = ResultStore(persist_path=pkl)
+        assert s6.get(key) is None
+        assert s6.get(key) is None                            # no retry loop
+
+        # no file at all -> plain cold start
+        pkl.unlink()
+        s7 = ResultStore(persist_path=pkl)
+        assert s7.get(key) is None
+
+    # persist_path=None (every other unit test): zero disk I/O, still fully functional
+    s8 = ResultStore()
+    s8.put(key, {"scan": 1})
+    assert s8.get(key).result == {"scan": 1}
+
+
+def test_pending_force_survives_adoption():
+    """R2-6: a Full-re-download armed while another run is in flight must RUN once the
+    thread dies — adoption of another session's newer store result must not swallow it
+    (and it must not detonate later inside a TTL refresh). The forced run's result wins;
+    the flag is consumed."""
+    import threading as th
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    store = ResultStore()
+    started, release = th.Event(), th.Event()
+    forces = []
+
+    def fake(*a, force=False, **kw):
+        forces.append(force)
+        if len(forces) == 1:
+            started.set()
+            assert release.wait(10), "test deadlock"
+        return {"scan": len(forces), "force": force}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w = ScanWorker(store=store)
+        w.ensure_started()
+        assert started.wait(10)                      # run 1 in flight
+        w.request_rescan(force=True)                 # thread alive -> force ARMS only
+        assert w._pending_force is True
+        release.set()
+        w._thread.join(10)                           # run 1 lands (stale generation)
+
+        # Another session's scan lands NEWER than ours — the adoption bait. Bump its
+        # wall clock explicitly: a time.time() resolution tie would otherwise let the
+        # old (buggy) code pass by accident.
+        ent = store.put(w._key2(), {"scan": "other-session"})
+        ent.completed_wall = (w.snapshot()["as_of"] or 0) + 60
+
+        w.ensure_started()                           # must START the forced run…
+        w._thread.join(10)
+    assert forces == [False, True], f"forced run must execute, got {forces}"
+    assert w.result_if_ready() == {"scan": 2, "force": True}, \
+        "a forced run is never satisfied by someone else's result"
+    assert w._pending_force is False
+
+
+def test_worker_clock_coherence_refresh_rescans():
+    """R2-8 direction 1: with a fake store clock far ABOVE real monotonic (1e9), the OLD
+    mixed-clock adopt check wrongly adopted the stale entry on EVERY machine — the TTL
+    refresh must actually re-scan."""
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    now = {"t": 1e9}
+    store = ResultStore(ttl=1800.0, clock=lambda: now["t"])
+    calls = {"n": 0}
+
+    def fake(*a, **kw):
+        calls["n"] += 1
+        return {"scan": calls["n"]}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w = ScanWorker(store=store)
+        w.ensure_started()
+        assert w.wait(grace=10.0) == {"scan": 1}
+        now["t"] += 3600.0                           # entry stale -> TTL refresh fires
+        w.ensure_started()
+        w._thread.join(10)
+    assert calls["n"] == 2 and w.wait(grace=10.0) == {"scan": 2}, \
+        "the refresh must re-scan, not adopt its own stale entry"
+
+
+def test_worker_clock_coherence_queued_adopts():
+    """R2-8 direction 2: with the store clock PINNED at 5.0 (far below real monotonic —
+    the OLD mixed-clock check wrongly re-scanned on every machine), a worker queued
+    behind the serial lock still adopts the result that landed while it waited (also
+    exercises the >= equality case, since the clock never advances)."""
+    import threading as th
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod
+    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
+
+    store = ResultStore(clock=lambda: 5.0)
+    started, release = th.Event(), th.Event()
+    calls = {"n": 0}
+
+    def fake(*a, **kw):
+        calls["n"] += 1
+        started.set()
+        assert release.wait(10), "test deadlock"
+        return {"scan": calls["n"]}
+
+    with patch.object(scanmod, "run_scan", side_effect=fake):
+        w1, w2 = ScanWorker(store=store), ScanWorker(store=store)
+        w1.ensure_started()
+        assert started.wait(10)                      # w1 holds _SCAN_SERIAL inside fake
+        w2.ensure_started()                          # queues behind the serial lock
+        release.set()
+        assert w1.wait(grace=10.0) == {"scan": 1}
+        assert w2.wait(grace=10.0) == {"scan": 1}, "w2 must adopt w1's result"
+    assert calls["n"] == 1, f"one scan for two queued cold sessions, ran {calls['n']}"
+
+
 def test_scan_worker_progress_classification():
-    """ScanWorker._on_progress classifies labels into phases and keeps cache serves OFF
-    the download log: 'Prices · SYM: cached (…)' -> phase 'cache', no log line (a
-    zero-network pass must not render as 'Downloading'); other price labels -> 'fetch'
-    with a 'Downloading …' log line; screening labels -> 'screen'. snapshot() exposes
-    phase + phase_label for the bar text. data_feed label strings are untouched."""
+    """ScanWorker._on_progress classifies labels into the phases the status line
+    renders: 'Prices · SYM: cached (…)' -> 'cache' (a zero-network pass must not read
+    as 'Downloading'), other price labels -> 'fetch', screening labels -> 'screen'.
+    snapshot() exposes phase + phase_label + counts. (The per-name download log was
+    removed 2026-08-11 with the full-page progress view.) data_feed label strings are
+    untouched."""
     from src.stock_screener.cockpit.scan_worker import ScanWorker
 
     w = ScanWorker()
     w._on_progress(1, 10, "Prices · AAPL: cached (fresh)")
     s = w.snapshot()
     assert s["phase"] == "cache" and s["phase_label"] == "Reading cache"
-    assert s["log"] == [], "cache serves must not appear in the download log"
 
     w._on_progress(2, 10, "Prices · MSFT: cached (settled close)")
-    assert w.snapshot()["log"] == []
+    assert w.snapshot()["phase"] == "cache"
 
     w._on_progress(3, 10, "Prices · NVDA: 8/7/2026 - 8/9/2026")
     s = w.snapshot()
     assert s["phase"] == "fetch" and s["phase_label"] == "Downloading"
-    assert s["log"] == ["Downloading NVDA: 8/7/2026 - 8/9/2026"]
 
     w._on_progress(4, 10, "Prices · COLD: full history (2y)")
-    assert w.snapshot()["log"][-1] == "Downloading COLD: full history (2y)"
+    assert w.snapshot()["phase"] == "fetch"
 
     w._on_progress(5, 10, "Screening · AAPL")
     s = w.snapshot()
     assert s["phase"] == "screen" and s["phase_label"] == "Screening"
     assert s["done"] == 5 and s["total"] == 10
-    assert len(s["log"]) == 2                     # screening adds nothing to the log
+    assert "log" not in s, "the download log was removed — snapshot must not carry one"
 
 
 def _run_all():

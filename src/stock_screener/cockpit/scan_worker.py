@@ -18,13 +18,16 @@ phone) can't race yfinance or the CSV price caches with duplicate concurrent dow
 """
 from __future__ import annotations
 
+import os
+import pickle
 import sys
 import threading
 import time
 import traceback
-from collections import deque
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
+
+from .cache import CACHE_DIR
 
 # The app scans the full US common-stock universe with the full 8/8 trend template —
 # app.py and the non-scan pages' warm-up must agree on these or they'd start two scans.
@@ -36,6 +39,13 @@ _SCAN_SERIAL = threading.Lock()    # process-wide: one real scan at a time, ever
 # The one-per-this-many-seconds cap on BACKGROUND refreshes (user spec: at most one
 # every half hour, process-wide). Explicit Re-scan / full-re-download always bypass.
 REFRESH_TTL_SECONDS = 30 * 60
+
+# The last completed ScanResult, pickled so a SERVER RESTART serves it instantly (the
+# store itself is process memory). Loaded lazily on the first miss; any load failure
+# (missing / corrupt / old shape / different key) fails open to a cold scan. Version
+# bumps whenever the persisted dict shape changes.
+_LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"
+_PERSIST_VERSION = 1
 
 
 def _testing() -> bool:
@@ -59,22 +69,81 @@ class ResultStore:
     process identity). Streamlit-free and clock-injectable so unit tests run without a
     browser session or real sleeps."""
 
-    def __init__(self, ttl: float = REFRESH_TTL_SECONDS, clock=time.monotonic) -> None:
+    def __init__(self, ttl: float = REFRESH_TTL_SECONDS, clock=time.monotonic,
+                 persist_path=None) -> None:
         self._lock = threading.Lock()
         self._entries: Dict[tuple, StoreEntry] = {}
         self._last_claim: Dict[tuple, float] = {}
         self.ttl = ttl
         self._clock = clock
+        self._persist_path = persist_path       # None (unit tests) = no disk I/O at all
+        self._load_attempted = False            # one lazy load per process, success or not
 
     def get(self, key) -> Optional[StoreEntry]:
         with self._lock:
-            return self._entries.get(key)
+            ent = self._entries.get(key)
+            if ent is None and self._persist_path is not None and not self._load_attempted:
+                self._load_attempted = True
+                ent = self._load_locked(key)
+            return ent
+
+    def _load_locked(self, key) -> Optional[StoreEntry]:
+        """Adopt the pickled last scan for ``key`` (caller holds ``_lock``). The entry's
+        completed_wall is the ORIGINAL scan time ("data as of yesterday 18:30");
+        completed_mono is -inf — monotonic clocks don't survive a restart, and -inf makes
+        the entry (a) maximally stale, so the TTL throttle grants an immediate background
+        refresh, and (b) never adoptable by an in-flight run's adopt-while-queued check
+        (a run that already started should really scan). Any failure → None (cold scan)."""
+        try:
+            with open(self._persist_path, "rb") as f:
+                d = pickle.load(f)
+            if (isinstance(d, dict) and d.get("version") == _PERSIST_VERSION
+                    and tuple(d.get("key") or ()) == tuple(key)
+                    and d.get("result") is not None):
+                ent = StoreEntry(d["result"], float(d.get("completed_wall") or 0.0),
+                                 float("-inf"))
+                self._entries[key] = ent
+                return ent
+        except Exception:
+            pass
+        return None
 
     def put(self, key, result) -> StoreEntry:
         ent = StoreEntry(result, time.time(), self._clock())
         with self._lock:
             self._entries[key] = ent
+        if self._persist_path is not None:
+            self._persist(key, ent)             # outside the lock — pickling isn't cheap
         return ent
+
+    def _persist(self, key, ent: StoreEntry) -> None:
+        """Best-effort atomic pickle (tmp + os.replace, the house pattern) from the
+        worker thread — a failed persist costs one cold scan after the next restart,
+        never a crash. completed_mono is deliberately NOT persisted (process-relative)."""
+        tmp = None
+        try:
+            path = self._persist_path
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            with open(tmp, "wb") as f:
+                pickle.dump({"version": _PERSIST_VERSION, "key": tuple(key),
+                             "result": ent.result,
+                             "completed_wall": ent.completed_wall}, f)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+        finally:
+            if tmp is not None and tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
+    def now(self) -> float:
+        """The store's clock — run birth times for the adopt check MUST come from here,
+        never from raw time.monotonic(), or an injected test clock and real time get
+        compared against each other (R2-8: that inverted on low-uptime machines)."""
+        return self._clock()
 
     def try_claim_refresh(self, key) -> bool:
         """Atomically claim the one-per-TTL background-refresh slot: True iff an entry
@@ -101,9 +170,10 @@ class ResultStore:
             self._last_claim[key] = self._clock()
 
 
-_STORE = ResultStore()             # the production singleton (inert under AppTest)
+# The production singleton (inert under AppTest): survives page/session churn in
+# memory, and a SERVER RESTART via the last-scan pickle.
+_STORE = ResultStore(persist_path=_LAST_SCAN_PKL)
 
-_LOG_TAIL = 14                     # visible download-log window (same as the old UI deque)
 _PRICE_PREFIX = "Prices · "        # run_scan's fetch-phase progress label prefix
 
 # What the progress bar calls each phase. "cache" is a price label whose detail says
@@ -137,7 +207,6 @@ class ScanWorker:
         self._error: Optional[str] = None
         self._progress: Tuple[int, int, str] = (0, 0, "starting")
         self._phase = "fetch"              # cache | fetch | screen (see _PHASE_LABELS)
-        self._log: deque = deque(maxlen=_LOG_TAIL)
         self._started_at = float("-inf")   # monotonic clock at thread start (anchors wait())
 
     def _key(self):
@@ -162,6 +231,13 @@ class ScanWorker:
         ``latest()`` keeps serving the stale result meanwhile."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
+                return
+            if self._pending_force:
+                # A user-forced run armed while another run was in flight OUTRANKS
+                # adoption (R2-6): request_rescan's contract says a forced run is never
+                # satisfied by someone else's result, and leaving the flag armed would
+                # detonate inside a later TTL refresh as a surprise full re-download.
+                self._start_locked(adopt_ok=False)
                 return
             store = self._store_or_none()
             if store is not None:
@@ -248,7 +324,7 @@ class ScanWorker:
                     "phase": self._phase,
                     "phase_label": _PHASE_LABELS.get(self._phase, "Working"),
                     "as_of": self._completed_at,          # wall clock of current _result
-                    "log": list(self._log), "error": self._error}
+                    "error": self._error}
 
     # ---- internals --------------------------------------------------------- #
     def _start_locked(self, adopt_ok: bool = True) -> None:
@@ -258,35 +334,35 @@ class ScanWorker:
         self._error = None
         self._progress = (0, 0, "starting")
         self._phase = "fetch"
-        self._log.clear()
-        self._started_at = time.monotonic()
-        # _started_at doubles as the run's birth time for _run's adopt check — captured
-        # BEFORE the serial-lock wait, or a result landing while we queue wouldn't count.
+        self._started_at = time.monotonic()          # wait()'s grace anchor: REAL clock
+        # The adopt-check birth time comes from the STORE's clock (identical to
+        # monotonic in production; coherent under an injected test clock — R2-8), and is
+        # captured BEFORE the serial-lock wait, or a result landing while we queue
+        # wouldn't count. The resolved store rides along as a thread arg so _run can
+        # never re-resolve a different one than the clock came from.
+        store = self._store_or_none()
+        run_started = store.now() if store is not None else self._started_at
         self._thread = threading.Thread(target=self._run,
-                                        args=(key, force, adopt_ok, self._started_at),
+                                        args=(key, force, adopt_ok, run_started, store),
                                         name="sepa-scan", daemon=True)
         self._thread.start()
 
     def _on_progress(self, done: int, total: int, label: str) -> None:
+        # Phase classification feeds the status line's "Reading cache / Downloading /
+        # Screening n/total" text. (A scrolling per-name download log existed here until
+        # 2026-08-11 — removed with the full-page progress view, per user request.)
         label = str(label)
         if label.startswith(_PRICE_PREFIX):
-            detail = label[len(_PRICE_PREFIX):]
-            # A cache serve is not a download — keep it off the download log entirely and
-            # let the bar's phase text ("Reading cache") carry it.
-            phase = "cache" if "cached" in detail else "fetch"
-            log_line = None if phase == "cache" else f"Downloading {detail}"
+            phase = "cache" if "cached" in label[len(_PRICE_PREFIX):] else "fetch"
         else:
-            phase, log_line = "screen", None
+            phase = "screen"
         with self._lock:
             self._progress = (int(done), int(total), label)
             self._phase = phase
-            if log_line:
-                self._log.append(log_line)
 
-    def _run(self, key, force: bool, adopt_ok: bool, run_started: float) -> None:
+    def _run(self, key, force: bool, adopt_ok: bool, run_started: float, store) -> None:
         try:
             with _SCAN_SERIAL:
-                store = self._store_or_none()
                 ent = store.get(key[:2]) if store is not None else None
                 if adopt_ok and ent is not None and ent.completed_mono >= run_started:
                     # Another session's scan landed while we queued on the serial lock —

@@ -391,6 +391,15 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
         limit = None
         basis = price
         if order_type == "limit":
+            # A stop AT/ABOVE the current price means the base broke down below its
+            # pivot: the zone-top limit would be MARKETABLE, fill ~at the price, and the
+            # OTO stop leg would arm above the market — an instant stop-out (R2-3). The
+            # market path rejects the same numbers at submit; reject here at the source.
+            if stop and stop > 0 and price and stop >= price:
+                skipped.append({"ticker": t, "reason":
+                                "stop not below the current price — the base has broken "
+                                "down below its pivot; re-judge or remove the name"})
+                continue
             limit = float(buy_hi) if buy_hi and buy_hi > 0 else price
             basis = limit
 
@@ -573,26 +582,60 @@ def _open_sell_stops_by_symbol(client, *, GetOrdersRequest, QueryOrderStatus,
     return out
 
 
-def _open_cockpit_buys(client, *, GetOrdersRequest, QueryOrderStatus, OrderSide) -> set:
-    """Symbols with an OPEN cockpit BUY order (``client_order_id`` starts ``SEPA``) in ONE query.
-
-    The documented cadence submits after the close, so a DAY OTO/market BUY sits queued until the
-    next open with no position yet — :func:`submit_buy_plan`'s only 'already invested' guard is
-    ``get_all_positions()``, which wouldn't see it. Skipping these on a re-submit prevents a second
-    BUY (double position, double risk). Side=BUY already excludes ``SEPAstop-`` sells. Empty set on
-    any error (fail-open: the 10%-cap / tradability checks still bound a duplicate)."""
+def _open_cockpit_buy_orders(client, *, GetOrdersRequest, QueryOrderStatus,
+                             OrderSide) -> list:
+    """OPEN cockpit BUY orders (``client_order_id`` starts ``SEPA``) in ONE query — the
+    order OBJECTS, for callers that need ids (cancel) as well as symbols (skip). Side=BUY
+    already excludes ``SEPAstop-`` sells. Empty list on any error (fail-open)."""
     try:
         opens = client.get_orders(filter=GetOrdersRequest(
             status=QueryOrderStatus.OPEN, side=OrderSide.BUY))
     except Exception:
-        return set()
-    out: set = set()
-    for od in opens or []:
-        sym = getattr(od, "symbol", None)
-        coid = str(getattr(od, "client_order_id", None) or "")
-        if sym and coid.startswith("SEPA"):
-            out.add(sym)
-    return out
+        return []
+    return [od for od in (opens or [])
+            if getattr(od, "symbol", None)
+            and str(getattr(od, "client_order_id", None) or "").startswith("SEPA")]
+
+
+def _open_cockpit_buys(client, *, GetOrdersRequest, QueryOrderStatus, OrderSide) -> set:
+    """Symbols with an OPEN cockpit BUY order.
+
+    The documented cadence submits after the close, so a queued BUY (or a resting GTC
+    limit, §6.41) has no position yet — :func:`submit_buy_plan`'s only 'already invested'
+    guard is ``get_all_positions()``, which wouldn't see it. Skipping these on a
+    re-submit prevents a second BUY (double position, double risk)."""
+    return {od.symbol for od in _open_cockpit_buy_orders(
+        client, GetOrdersRequest=GetOrdersRequest, QueryOrderStatus=QueryOrderStatus,
+        OrderSide=OrderSide)}
+
+
+def cancel_pending_buys() -> dict:
+    """Cancel every OPEN cockpit BUY order (``SEPA…`` tags only — never sells, stops, or
+    other tools' orders). THE control for a resting GTC limit whose setup broke (§6.41's
+    limits rest until filled or canceled; the pending-buy guard blocks re-submits but
+    could not cancel). Canceling an unfilled OTO parent cancels its held stop leg too —
+    nothing was bought, so there is nothing left to protect.
+
+    Returns ``{"cancelled": [{ticker, id}], "errors": [{ticker, id, error}]}``; one
+    failed cancel never aborts the rest. Raises :class:`TradeUnavailable` only for
+    missing package/credentials (the panel catches it)."""
+    client, _using = _connect_paper()
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import OrderSide, QueryOrderStatus
+    except ImportError as e:
+        raise TradeUnavailable(str(e)) from e
+    cancelled, errors = [], []
+    for od in _open_cockpit_buy_orders(client, GetOrdersRequest=GetOrdersRequest,
+                                       QueryOrderStatus=QueryOrderStatus,
+                                       OrderSide=OrderSide):
+        ref = {"ticker": od.symbol, "id": str(getattr(od, "id", "?"))}
+        try:
+            client.cancel_order_by_id(od.id)
+            cancelled.append(ref)
+        except Exception as e:                  # one stuck order shouldn't abort the rest
+            errors.append({**ref, "error": str(e)})
+    return {"cancelled": cancelled, "errors": errors}
 
 
 def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, existing, *,
@@ -791,10 +834,6 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                 "detail": "a cockpit BUY is already queued (pending fill) — "
                                           "not re-submitting"})
                 continue
-            if o["est_value"] > max_allowed:
-                results.append({**o, "status": "skipped",
-                                "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
-                continue
             _lim = o.get("limit_price")
             # None = a market plan; a PRESENT but non-positive limit is an edit error — skip
             # rather than silently falling back to an uncapped market buy.
@@ -803,10 +842,21 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                 "detail": "invalid limit price — set a limit > 0"})
                 continue
             limit = float(_lim) if _lim else None
+            # The 10% cap binds on the worst-case fill: for a limit row RECOMPUTE from the
+            # (possibly user-EDITED) limit — the entry's est_value is build-time and an
+            # upward edit would otherwise slip past the cap (R2-9). Market rows keep the
+            # build value (the price isn't editable).
+            _est = o["shares"] * limit if limit else o["est_value"]
+            if _est > max_allowed:
+                results.append({**o, "status": "skipped",
+                                "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
+                continue
             if attach_stop:
-                # Stop validity is against the worst-case fill: the limit for a limit BUY
-                # (fills at or below it), the last close for a market BUY.
-                if not stop_is_valid(stop, limit if limit else o["price"]):
+                # Stop validity is against the WORST fill either way: a limit BUY can fill
+                # anywhere at or below the limit — including ~the current price when the
+                # limit is marketable — so the stop must clear BOTH (R2-3).
+                _worst = min(limit, o["price"]) if limit else o["price"]
+                if not stop_is_valid(stop, _worst):
                     results.append({**o, "status": "skipped",
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
@@ -901,7 +951,14 @@ def fetch_positions() -> dict:
         try:
             from . import data_feed as _df_mod
             data_feed = _df_mod
-            frames = data_feed.get_many_prices(symbols)
+            # NEVER queue the Positions page behind the bulk pipeline: _YF_LOCK
+            # (R2-2) serializes every in-process download, so while a scan/refresh is
+            # mid-sweep this small fetch would wait on it — and the page (with its SELL
+            # controls) waits on this fetch. Selling needs only Alpaca data;
+            # current_price comes from the Position objects either way, and the
+            # SMA-50/volume advisories tolerate a cache bar. (2026-08-11, the NMM sell.)
+            frames = data_feed.get_many_prices(
+                symbols, allow_network=not data_feed.network_busy())
         except Exception:
             frames = {}
     try:

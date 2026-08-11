@@ -48,6 +48,25 @@ _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 # Pool size for the cache-read pre-pass (local parquet reads only — pyarrow releases the
 # GIL; measured ~1.7x over serial on a 4,200-name warm scan). yf.download stays serial.
 _CACHE_READ_WORKERS = 16
+# Process-wide serialization of yf.download itself (R2-2). yfinance (0.2.65) resets a
+# module-global result dict at the top of EVERY download() and spin-waits on its length
+# with no timeout — two concurrent calls wipe each other's frames, and the loser can
+# hang forever. scan_worker's _SCAN_SERIAL only serializes scan-vs-scan; script-thread
+# fetches (freshen_prices, the Check-triggers button, the Positions page) run in the
+# SAME process as the background scan thread and must share this lock. Held per ATTEMPT
+# (inside _download_batch, released during retry backoff) so a waiting fetch is blocked
+# for ~one attempt, not a whole retry cycle. Cross-PROCESS overlap (the scheduled
+# eod_trigger task) is inherently out of an in-process lock's reach — yfinance globals
+# are per-process, and cache-file contention is handled by _atomic_to_parquet.
+_YF_LOCK = threading.Lock()
+
+
+def network_busy() -> bool:
+    """True while some thread is inside ``yf.download`` (holding ``_YF_LOCK``).
+    Interactive pages check this to serve cache-only (``allow_network=False``) instead
+    of queueing a small fetch behind a multi-minute bulk sweep — selling a position
+    must never wait on a 4,000-name delta download."""
+    return _YF_LOCK.locked()
 
 
 # --------------------------------------------------------------------------- #
@@ -239,7 +258,8 @@ def _download_batch(yf, part, retries: int, pause: float, **dl):
     raw = None
     for attempt in range(retries + 1):
         try:
-            raw = yf.download(part, **dl)
+            with _YF_LOCK:              # per-attempt: released during backoff sleeps
+                raw = yf.download(part, **dl)
         except Exception:
             raw = None
         if raw is not None and len(raw):
@@ -368,6 +388,20 @@ def _cache_settled(path) -> bool:
         return False
 
 
+def _frame_settled_current(last_bar_date) -> bool:
+    """``triggers.frame_settled_current`` via the same cached-module pattern as
+    ``_cache_settled`` (attribute lookup stays call-time → test patches on the triggers
+    module keep working). Errors read as not-current."""
+    global _TRIGGERS
+    try:
+        if _TRIGGERS is None:
+            from . import triggers as _t
+            _TRIGGERS = _t
+        return _TRIGGERS.frame_settled_current(last_bar_date)
+    except Exception:
+        return False
+
+
 def _atomic_to_parquet(df: pd.DataFrame, path: Path) -> None:
     """Write-then-``os.replace`` so a concurrent reader never sees a torn file. The app
     and the half-hourly eod_trigger job run in SEPARATE processes but share these cache
@@ -391,7 +425,8 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     chunk: int = 100,
                     pause: float = 0.5, retries: int = 2, incremental: bool = True,
                     overlap_days: int = 5, max_gap_days: int = 10,
-                    progress: Optional[Callable[[int, int, str], None]] = None
+                    progress: Optional[Callable[[int, int, str], None]] = None,
+                    allow_network: bool = True
                     ) -> Dict[str, pd.DataFrame]:
     """Fetch many tickers SAFELY. Concurrent single-ticker ``yf.download`` calls race on
     yfinance's shared global state (returning the wrong ticker's data), so we use yfinance's
@@ -411,6 +446,11 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     honors this (a post-close fetch IS the finalized close). A NEGATIVE ``max_age_days`` (the
     tests' sentinel for "never serve from cache freshness") bypasses the settled gate too;
     ``force=True`` bypasses everything.
+
+    ``allow_network=False`` = CACHE-ONLY: every name is served from its parquet as-is
+    (no top-up, no full fetch, no ``_YF_LOCK`` contention); names with no cache at all
+    come back absent. For interactive pages that must not queue behind a bulk sweep —
+    pair with :func:`network_busy`.
     """
     ensure_dirs()
     syms = [normalize(t) for t in tickers]
@@ -449,7 +489,14 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             # NEGATIVE max_age_days (the tests' skip-every-fresh-serve sentinel) bypasses
             # this gate too, keeping the top-up paths deterministically reachable.
             try:
-                return "served", pd.read_parquet(path), "cached (settled close)"
+                df = pd.read_parquet(path)
+                # Content-side companion check (R2-5b): the mtime says the FILE was
+                # written post-settle, but a lagging provider response (the full-fetch
+                # path has no R2-5 gate) can persist a frame whose last bar predates the
+                # latest settled session. Serve as settled only when the FRAME is
+                # current too; else fall through to the cheap incremental top-up.
+                if len(df) and _frame_settled_current(df.index[-1]):
+                    return "served", df, "cached (settled close)"
             except Exception:
                 pass
         cached = None
@@ -489,6 +536,25 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             else:
                 full_fetch.append(sym)
 
+    if not allow_network and (full_fetch or incr):
+        # CACHE-ONLY mode: serve whatever the disk has AS-IS instead of fetching.
+        # Incremental names already hold their cached frames from the pre-pass;
+        # too-stale/cold names get their parquet when one exists (absent otherwise —
+        # callers degrade per name, e.g. fetch_positions' advisories read as None).
+        for sym in syms:
+            if sym in out:
+                continue
+            if sym in incr:
+                out[sym] = incr[sym][0]
+                _emit(sym, "cached (network busy)")
+                continue
+            try:
+                out[sym] = pd.read_parquet(PRICES_DIR / f"{sym}.parquet")
+                _emit(sym, "cached (network busy)")
+            except Exception:
+                _emit(sym, "no cache (network busy)")
+        return out
+
     if full_fetch or incr:
         import yfinance as yf
 
@@ -513,7 +579,15 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                         full_fetch.append(sym)        # re-baseline in the full pass below
                         continue
                     out[sym] = merged
-                    if new is not None and len(new):  # only persist when we got new data
+                    # Persist ONLY when the fetch reached the cache's newest bar (R2-5):
+                    # an overlap-only response (provider lag) must not re-stamp the
+                    # mtime, or a post-cutoff rewrite would arm the settled-close gate
+                    # on a frame LACKING the settled bar — served as "settled" all
+                    # weekend with no healing fetch. ``>=`` is load-bearing (the ~16:30
+                    # settle of today's bar lands with max == last and MUST persist);
+                    # ``index.max()`` not ``[-1]`` (_clean_prices never sorts).
+                    if (new is not None and len(new)
+                            and pd.Timestamp(new.index.max()).normalize() >= _last):
                         try:
                             _atomic_to_parquet(merged, PRICES_DIR / f"{sym}.parquet")
                         except Exception:

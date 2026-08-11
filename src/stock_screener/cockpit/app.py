@@ -30,8 +30,9 @@ from src.stock_screener.cockpit.export import (  # noqa: E402
     watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
 from src.stock_screener.cockpit.scan import filter_candidates  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
-    STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, fetch_account_summary,
-    fetch_held_shares, freshen_prices, stop_is_valid, submit_buy_plan)
+    STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, cancel_pending_buys,
+    fetch_account_summary, fetch_held_shares, freshen_prices, stop_is_valid,
+    submit_buy_plan)
 from src.stock_screener.cockpit.triggers import (load_latest_trigger_report,  # noqa: E402
                                                  save_trigger_report)
 
@@ -500,17 +501,14 @@ if res is None:
             _worker.request_rescan()
             st.rerun()
         st.stop()
-    # Progress bar + scrolling download log, repainted by a ~1s rerun poll while the
-    # worker runs in the background. The bar leads with the PHASE ("Reading cache" /
-    # "Downloading" / "Screening") so a zero-network cache pass doesn't read as a
-    # re-download; the per-name detail rides beneath in the log (fetches only).
-    _done, _total = _snap["done"], _snap["total"]
-    st.progress(min(_done / max(_total, 1), 1.0),
-                text=f"{_snap['phase_label']} — {_done}/{_total}")
-    if _snap["log"]:
-        st.code("\n".join(_snap["log"]), language=None)
-    st.caption("⏳ Scanning in the background — switching to another page won't cancel "
-               "it; this page picks up the result when it lands.")
+    # TRUE cold start only: the very first scan on this machine (every later restart
+    # loads the persisted last scan and renders the table instantly, with the status
+    # line showing refresh progress). The old full-page progress bar + download log
+    # were removed here 2026-08-11 on user request — recover from git history if ever
+    # wanted again.
+    st.info("First scan in progress — the table appears when it completes (a few "
+            "minutes cold). Switching pages won't cancel it. After this one-time "
+            "scan, restarts load the last result instantly.")
     time.sleep(1.0)
     st.rerun()
 
@@ -686,14 +684,15 @@ with st.sidebar:
             key="trade_order_type", on_change=_invalidate_trade_plan,
             help="**Market** fills at the next print, whatever it is — a gap can fill you "
                  "past the 5% buy zone. **Limit** caps each buy at a max price, defaulting "
-                 "to its buy-zone top (pivot × 1.05, frozen 📌 pivot preferred): it fills "
-                 "at the opening/auction price when that's inside the zone and simply "
-                 "doesn't fill on a gap past it — the no-chase rule, enforced by the order "
-                 "itself. Sizing, risk, and the 10% cap use the LIMIT (the worst-case "
-                 "fill). With a stop attached the order is GTC end-to-end (§6.38) — an "
-                 "unfilled limit RESTS until it fills or you cancel it on the Alpaca "
-                 "dashboard, and its stop arms whenever the fill happens; without a stop "
-                 "it's a DAY order that expires at the close.")
+                 "to its buy-zone top (pivot × 1.05, frozen 📌 pivot preferred): it never "
+                 "fills ABOVE the limit, so a gap past the zone can't fill you high. It "
+                 "CAN still fill below the zone — a below-pivot name fills immediately at "
+                 "~the market (watch the per-row ⚠ warnings) — and a RESTING GTC limit "
+                 "fills on any later pullback to it, even a failed breakout weeks on: "
+                 "cancel it (🗑 button below) if the setup breaks. Sizing, risk, and the "
+                 "10% cap use the worst-case fill. With a stop attached the order is GTC "
+                 "end-to-end (§6.38) and its stop arms whenever the fill happens; without "
+                 "a stop it's a DAY order that expires at the close.")
         _order_type = "limit" if _ot_label.startswith("Limit") else "market"
         st.caption(f"{'Limit' if _order_type == 'limit' else 'Market'} BUYs: {_size_note}. "
                    "Paper account only; whole shares, each order still capped at 10% of "
@@ -827,16 +826,18 @@ with st.sidebar:
                         step = 0.01, format="%.2f", key=f"stop_{_t}_{_nonce}",
                         label_visibility="collapsed", disabled=not _attach or not _on)
                     _edstop = st.session_state.get(f"stop_{_t}_{_nonce}", _o["stop_price"])
-                    # Worst-case fill: the (possibly edited) limit for a limit BUY, else the
-                    # last close — validation and the live risk read both key off it.
-                    _basis = _edlim if (_is_lim and _edlim) else _o["price"]
+                    # Worst-case fill: a limit BUY can fill anywhere at or below the limit —
+                    # including ~the current price when the limit is marketable — so validation
+                    # and the live risk read key off min(edited limit, price) (R2-3).
+                    _basis = (min(_edlim, _o["price"]) if (_is_lim and _edlim)
+                              else _o["price"])
                     if _held_sh > 0 or not _on:
                         pass          # held: stop is a re-arm target; unchecked: not submitted
                     elif _is_lim and (not _edlim or _edlim <= 0):
                         _cB.caption(":red[limit must be > 0]")
                     elif _attach and not stop_is_valid(_edstop, _basis):
-                        _cB.caption(":red[stop must be < limit]" if _is_lim
-                                    else ":red[stop must be < price]")
+                        _cB.caption(":red[stop must be below both limit and price]"
+                                    if _is_lim else ":red[stop must be < price]")
                     elif _attach and _eq and _edstop and _basis > _edstop:
                         # Live risk-to-stop for the CURRENT shares + (possibly edited) stop, so a
                         # risk-sized position stays honest after the stop is nudged (build doesn't
@@ -847,6 +848,14 @@ with st.sidebar:
                             and _edlim < _o["price"]):
                         _cA.caption(f"  ↳ limit {_edlim:,.2f} < last close {_o['price']:,.2f} "
                                     "— fills only on a pullback into the zone")
+                    elif (_is_lim and _on and _held_sh <= 0 and _o.get("pivot")
+                            and _o["price"] < _o["pivot"]):
+                        # Below-pivot name: the zone-top limit is MARKETABLE — it fills at
+                        # once at ~the current price, BELOW the buy zone (R2-4a honesty).
+                        _cA.caption(f"  ↳ ⚠ price {_o['price']:,.2f} is below the pivot "
+                                    f"{_o['pivot']:,.2f} — this limit is marketable and "
+                                    f"fills immediately at ~{_o['price']:,.2f}, below "
+                                    "the buy zone")
                 if any(_o["extended"] for _o in _buys):      # footnotes describe the BUYs only
                     st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
                                "the real risk to your stop is larger.")
@@ -922,6 +931,26 @@ with st.sidebar:
                     st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
+
+    # --- Cancel resting cockpit buys — THE control for a GTC limit whose setup broke
+    # (a resting limit otherwise fills on any later pullback, §6.41/R2-4). Outside the
+    # watchlist block: a pending buy can outlive its watchlist entry. ------------------ #
+    if st.button("🗑 Cancel pending cockpit buys", key="cancel_pending",
+                 help="Cancels every OPEN cockpit BUY order (SEPA-tagged only — queued "
+                      "market buys and resting GTC limits; an unfilled OTO stop leg dies "
+                      "with its parent, nothing was bought). Never touches sells, "
+                      "protective stops on held positions, or other tools' orders."):
+        try:
+            _cx = cancel_pending_buys()
+            if _cx["cancelled"]:
+                st.caption("cancelled: "
+                           + ", ".join(c["ticker"] for c in _cx["cancelled"]))
+            else:
+                st.caption("no pending cockpit buys to cancel")
+            for _e in _cx["errors"]:
+                st.caption(f":orange[⚠ {_e['ticker']}: {_e['error']}]")
+        except TradeUnavailable as _e:
+            st.warning(str(_e))
 
     # --- Latest watchlist trigger check (written by scripts/eod_trigger.bat) ---------- #
     # A SELF-REFRESHING fragment: re-reads the report file once a minute and repaints only
