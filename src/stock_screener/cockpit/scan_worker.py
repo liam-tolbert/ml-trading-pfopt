@@ -141,8 +141,8 @@ class ResultStore:
 
     def now(self) -> float:
         """The store's clock — run birth times for the adopt check MUST come from here,
-        never from raw time.monotonic(), or an injected test clock and real time get
-        compared against each other (R2-8: that inverted on low-uptime machines)."""
+        never raw time.monotonic(), so an injected test clock and real time are never
+        compared against each other."""
         return self._clock()
 
     def try_claim_refresh(self, key) -> bool:
@@ -233,10 +233,9 @@ class ScanWorker:
             if self._thread is not None and self._thread.is_alive():
                 return
             if self._pending_force:
-                # A user-forced run armed while another run was in flight OUTRANKS
-                # adoption (R2-6): request_rescan's contract says a forced run is never
-                # satisfied by someone else's result, and leaving the flag armed would
-                # detonate inside a later TTL refresh as a surprise full re-download.
+                # An armed forced run OUTRANKS adoption: it is never satisfied by
+                # someone else's result, and leaving the flag armed would detonate
+                # inside a later TTL refresh as a surprise full re-download.
                 self._start_locked(adopt_ok=False)
                 return
             store = self._store_or_none()
@@ -336,10 +335,10 @@ class ScanWorker:
         self._phase = "fetch"
         self._started_at = time.monotonic()          # wait()'s grace anchor: REAL clock
         # The adopt-check birth time comes from the STORE's clock (identical to
-        # monotonic in production; coherent under an injected test clock — R2-8), and is
-        # captured BEFORE the serial-lock wait, or a result landing while we queue
-        # wouldn't count. The resolved store rides along as a thread arg so _run can
-        # never re-resolve a different one than the clock came from.
+        # monotonic in production; coherent under an injected test clock), captured
+        # BEFORE the serial-lock wait — a result landing while we queue must count.
+        # The resolved store rides along as a thread arg so _run can never re-resolve
+        # a different one than the clock came from.
         store = self._store_or_none()
         run_started = store.now() if store is not None else self._started_at
         self._thread = threading.Thread(target=self._run,
@@ -349,8 +348,7 @@ class ScanWorker:
 
     def _on_progress(self, done: int, total: int, label: str) -> None:
         # Phase classification feeds the status line's "Reading cache / Downloading /
-        # Screening n/total" text. (A scrolling per-name download log existed here until
-        # 2026-08-11 — removed with the full-page progress view, per user request.)
+        # Screening n/total" text.
         label = str(label)
         if label.startswith(_PRICE_PREFIX):
             phase = "cache" if "cached" in label[len(_PRICE_PREFIX):] else "fetch"

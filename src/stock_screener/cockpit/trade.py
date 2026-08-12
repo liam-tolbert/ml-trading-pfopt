@@ -257,8 +257,7 @@ def _trading_days_since(last, today) -> Optional[int]:
 def _stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload) -> dict:
     """A zero-share plan row for a HELD name whose buy failed the sizing gates: submit's
     held path sends no buy anyway and only re-arms the GTC stop, so this row exists purely
-    to carry ``stop_price`` there instead of the name silently losing stop maintenance
-    (§6.3's build-time stop gap, closed §6.39)."""
+    to carry ``stop_price`` there instead of the name silently losing stop maintenance."""
     return {"ticker": t, "shares": 0, "price": round(price, 2),
             "pivot": round(float(pivot), 2) if pivot else None,
             "pivot_frozen": bool(frozen),
@@ -318,7 +317,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     kept). Each plan entry carries ``pivot_frozen`` (True when its pivot came from ``pivots``).
     Omit ``pivots`` and every name uses its scan-derived levels as before.
 
-    ``held`` (optional ``{ticker: shares}``) closes §6.3's build-time stop gap: a HELD
+    ``held`` (optional ``{ticker: shares}``) closes the build-time stop gap: a HELD
     name whose buy fails a sizing gate (rounds < 1 share, or under the $50 floor) is
     emitted as a zero-share ``stop_only=True`` row instead of skipped, so submit's held
     path still re-arms its protective stop. Names skipped before levels exist (not in
@@ -393,8 +392,8 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
         if order_type == "limit":
             # A stop AT/ABOVE the current price means the base broke down below its
             # pivot: the zone-top limit would be MARKETABLE, fill ~at the price, and the
-            # OTO stop leg would arm above the market — an instant stop-out (R2-3). The
-            # market path rejects the same numbers at submit; reject here at the source.
+            # OTO stop leg would arm above the market — an instant stop-out. The market
+            # path rejects the same numbers at submit; reject here at the source.
             if stop and stop > 0 and price and stop >= price:
                 skipped.append({"ticker": t, "reason":
                                 "stop not below the current price — the base has broken "
@@ -433,7 +432,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             shares = int(amount)
 
         # A held name failing a sizing gate still needs its stop maintained — emit a
-        # stop-only row (shares=0) instead of dropping it (§6.3 gap; needs a valid stop).
+        # stop-only row (shares=0) instead of dropping it (needs a valid stop).
         _held_fallback = bool(held and held.get(t, 0) > 0 and stop and stop > 0)
         if shares < 1:
             if _held_fallback:
@@ -601,7 +600,7 @@ def _open_cockpit_buys(client, *, GetOrdersRequest, QueryOrderStatus, OrderSide)
     """Symbols with an OPEN cockpit BUY order.
 
     The documented cadence submits after the close, so a queued BUY (or a resting GTC
-    limit, §6.41) has no position yet — :func:`submit_buy_plan`'s only 'already invested'
+    limit) has no position yet — :func:`submit_buy_plan`'s only 'already invested'
     guard is ``get_all_positions()``, which wouldn't see it. Skipping these on a
     re-submit prevents a second BUY (double position, double risk)."""
     return {od.symbol for od in _open_cockpit_buy_orders(
@@ -611,10 +610,10 @@ def _open_cockpit_buys(client, *, GetOrdersRequest, QueryOrderStatus, OrderSide)
 
 def cancel_pending_buys() -> dict:
     """Cancel every OPEN cockpit BUY order (``SEPA…`` tags only — never sells, stops, or
-    other tools' orders). THE control for a resting GTC limit whose setup broke (§6.41's
-    limits rest until filled or canceled; the pending-buy guard blocks re-submits but
-    could not cancel). Canceling an unfilled OTO parent cancels its held stop leg too —
-    nothing was bought, so there is nothing left to protect.
+    other tools' orders). THE control for a resting GTC limit whose setup broke (limits
+    rest until filled or canceled; the pending-buy guard blocks re-submits but cannot
+    cancel). Canceling an unfilled OTO parent cancels its held stop leg too — nothing
+    was bought, so there is nothing left to protect.
 
     Returns ``{"cancelled": [{ticker, id}], "errors": [{ticker, id, error}]}``; one
     failed cancel never aborts the rest. Raises :class:`TradeUnavailable` only for
@@ -651,7 +650,7 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
     (replacement rejected). NEVER lowers a stop: it only cancels + replaces to RAISE. GTC so
     the stop persists across sessions.
 
-    Cancel-before-place is guarded (review finding #14, same pattern as
+    Cancel-before-place is guarded (same pattern as
     :func:`submit_position_sell`): if the replacement submit fails AFTER the old stop was
     cancelled, the previous stop is RESTORED at its old level for the full held quantity —
     the position is never silently left unprotected. A failed restore is loudly reported."""
@@ -736,20 +735,19 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       10%-cap since a protective stop is risk-reducing.
     * **not held** — a BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
       leg (the stop activates only after the buy fills, so it works even when the buy is queued
-      to the next open). The whole OTO is **GTC** — verified live on paper 2026-08-04: the stop
-      leg is held until the buy fills, then rests as a GTC stop that SURVIVES the close.
-      (Previously DAY on the belief a market entry couldn't be GTC: an intraday fill's stop leg
-      expired at that day's close minutes later — the PEBK incident — leaving the position
-      unprotected until a manual re-arm.) The held-name ratchet manages (only ever raises) the
-      same stop from the next re-arm on. Without ``attach_stop``, a plain market BUY.
+      to the next open). The whole OTO is **GTC** end-to-end: the stop leg is held until
+      the buy fills, then rests as a GTC stop that SURVIVES the close — a DAY leg would
+      expire at that day's close, leaving an intraday fill unprotected overnight. The
+      held-name ratchet manages (only ever raises) the same stop from the next re-arm
+      on. Without ``attach_stop``, a plain market BUY.
 
       An entry carrying a positive ``limit_price`` (a ``build_buy_plan(order_type="limit")``
       plan) is sent as a **limit** BUY instead: with ``attach_stop`` a GTC OTO limit + stop
-      leg — the same §6.38 GTC-end-to-end shape, so a fill on ANY later day is protected the
+      leg — same GTC-end-to-end shape, so a fill on ANY later day is protected the
       moment it happens, and an unfilled limit rests until filled or canceled (the pending-buy
       guard blocks re-submits meanwhile); without ``attach_stop`` a DAY limit that expires at
-      the close. Stop validity is checked against the LIMIT (the worst-case fill), not the
-      last close. No ``limit_price`` → the market behavior above, unchanged.
+      the close. Stop validity is checked against the worst-case fill. No ``limit_price``
+      → the market behavior above, unchanged.
 
       **Build-time intent is binding:** an entry stamped ``rearm_only`` (held when the plan
       was built — the preview showed it with no checkbox and "no buy") or ``stop_only``
@@ -817,13 +815,12 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
             # Not held — a BUY (market, or limit when the entry carries a limit_price),
             # with an OTO protective stop when attach_stop is on.
             #
-            # Build-time-intent guard (review 2026-08-09, HIGH): a row the plan preview
-            # showed as "already held — stop re-arm only, no buy" (``rearm_only``, stamped
-            # by the app from the BUILD-time holdings) or a zero-share ``stop_only`` row
-            # must NEVER convert into a buy just because the position closed between
-            # Build and Submit (its GTC stop firing is enough) — the user was shown no
-            # checkbox and consented to no buy. Same guard kills qty<1 rows before they
-            # reach the API as noise.
+            # Build-time-intent guard: a row the plan preview showed as "already held —
+            # stop re-arm only, no buy" (``rearm_only``, stamped from BUILD-time
+            # holdings) or a zero-share ``stop_only`` row must NEVER convert into a buy
+            # just because the position closed between Build and Submit (its GTC stop
+            # firing is enough) — the user was shown no checkbox and consented to no
+            # buy. Same guard kills qty<1 rows before they reach the API as noise.
             if o.get("rearm_only") or o.get("stop_only") or int(o.get("shares", 0)) < 1:
                 results.append({**o, "status": "skipped",
                                 "detail": "position closed since the plan was built — "
@@ -842,9 +839,9 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                 "detail": "invalid limit price — set a limit > 0"})
                 continue
             limit = float(_lim) if _lim else None
-            # The 10% cap binds on the worst-case fill: for a limit row RECOMPUTE from the
-            # (possibly user-EDITED) limit — the entry's est_value is build-time and an
-            # upward edit would otherwise slip past the cap (R2-9). Market rows keep the
+            # The 10% cap binds on the worst-case fill: for a limit row RECOMPUTE from
+            # the (possibly user-EDITED) limit — the entry's est_value is build-time and
+            # an upward edit would otherwise slip past the cap. Market rows keep the
             # build value (the price isn't editable).
             _est = o["shares"] * limit if limit else o["est_value"]
             if _est > max_allowed:
@@ -852,19 +849,18 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                 "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
                 continue
             if attach_stop:
-                # Stop validity is against the WORST fill either way: a limit BUY can fill
-                # anywhere at or below the limit — including ~the current price when the
-                # limit is marketable — so the stop must clear BOTH (R2-3).
+                # Stop validity is against the WORST fill either way: a limit BUY can
+                # fill anywhere at or below the limit — including ~the current price
+                # when the limit is marketable — so the stop must clear BOTH.
                 _worst = min(limit, o["price"]) if limit else o["price"]
                 if not stop_is_valid(stop, _worst):
                     results.append({**o, "status": "skipped",
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
                     continue
-                # GTC OTO (verified live 2026-08-04): the paper API accepts a GTC parent
-                # and the stop leg inherits GTC ("held" until the fill), so the protective
-                # stop persists past the close. A DAY leg expired AT the close — a 15:58
-                # buy left its stop dead two minutes later (the PEBK incident). The same
+                # GTC OTO: the stop leg inherits GTC ("held" until the fill), so the
+                # protective stop persists past the close — a DAY leg expires AT the
+                # close and can leave an intraday fill unprotected overnight. The same
                 # shape covers a limit that fills days later: its stop arms on the fill.
                 if limit:
                     req = LimitOrderRequest(
@@ -952,11 +948,11 @@ def fetch_positions() -> dict:
             from . import data_feed as _df_mod
             data_feed = _df_mod
             # NEVER queue the Positions page behind the bulk pipeline: _YF_LOCK
-            # (R2-2) serializes every in-process download, so while a scan/refresh is
-            # mid-sweep this small fetch would wait on it — and the page (with its SELL
-            # controls) waits on this fetch. Selling needs only Alpaca data;
-            # current_price comes from the Position objects either way, and the
-            # SMA-50/volume advisories tolerate a cache bar. (2026-08-11, the NMM sell.)
+            # serializes every in-process download, so while a scan/refresh is mid-sweep
+            # this small fetch would wait on it — and the page (with its SELL controls)
+            # waits on this fetch. Selling needs only Alpaca data; current_price comes
+            # from the Position objects either way, and the SMA-50/volume advisories
+            # tolerate a cache bar.
             frames = data_feed.get_many_prices(
                 symbols, allow_network=not data_feed.network_busy())
         except Exception:
@@ -1096,7 +1092,7 @@ def submit_position_sell(symbol: str, qty: int) -> dict:
     ``SEPAsell-``) → re-place a GTC stop for any REMAINING shares at the SAME (never
     lower) level. If the market sell fails AFTER the cancel, the previous stop is
     restored for the full held quantity — the position is never silently left
-    unprotected (the cancel-before-place gap done right; cf. review finding #14).
+    unprotected (the cancel-before-place gap done right).
 
     No $50 floor / 10%-cap / tradability gate: like the stop re-arm path, a sell is
     risk-reducing. ``qty`` above the held count clamps to it (a stale page is the only

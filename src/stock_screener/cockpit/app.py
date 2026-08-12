@@ -340,7 +340,7 @@ def _wl_persist() -> None:
 def _invalidate_trade_plan() -> None:
     """A built trade plan is a snapshot (prices, sizing, watchlist membership). Any event
     that changes its inputs — re-scan, watchlist edit, sizing tweak — drops it so a stale
-    plan can't linger rendered and submittable (review item 19). Deliberately does NOT
+    plan can't linger rendered and submittable. Deliberately does NOT
     bump trade_build_n: the next Build bumps it and re-seeds the buy/stop widget keys."""
     st.session_state.pop("trade_plan", None)
     st.session_state.pop("trade_result", None)
@@ -504,8 +504,7 @@ if res is None:
     # TRUE cold start only: the very first scan on this machine (every later restart
     # loads the persisted last scan and renders the table instantly, with the status
     # line showing refresh progress). The old full-page progress bar + download log
-    # were removed here 2026-08-11 on user request — recover from git history if ever
-    # wanted again.
+    # were removed on purpose — recover from git history if ever wanted again.
     st.info("First scan in progress — the table appears when it completes (a few "
             "minutes cold). Switching pages won't cancel it. After this one-time "
             "scan, restarts load the last result instantly.")
@@ -515,7 +514,7 @@ if res is None:
 # The page renders from THIS res snapshot for the whole script run — a background
 # refresh landing mid-render can't tear it; adoption happens on the next run. A changed
 # as_of means the data under any built trade plan changed too (a background refresh is a
-# re-scan for §6.31-item-19 purposes) — drop the plan.
+# re-scan as far as the plan is concerned) — drop the plan.
 _snap0 = _worker.snapshot()
 _res_as_of = _snap0.get("as_of")
 if st.session_state.get("_res_as_of") not in (None, _res_as_of):
@@ -691,7 +690,7 @@ with st.sidebar:
                  "fills on any later pullback to it, even a failed breakout weeks on: "
                  "cancel it (🗑 button below) if the setup breaks. Sizing, risk, and the "
                  "10% cap use the worst-case fill. With a stop attached the order is GTC "
-                 "end-to-end (§6.38) and its stop arms whenever the fill happens; without "
+                 "end-to-end and its stop arms whenever the fill happens; without "
                  "a stop it's a DAY order that expires at the close.")
         _order_type = "limit" if _ot_label.startswith("Limit") else "market"
         st.caption(f"{'Limit' if _order_type == 'limit' else 'Market'} BUYs: {_size_note}. "
@@ -772,7 +771,7 @@ with st.sidebar:
                     key="trade_attach_stop",
                     help="Places a stop-loss under each buy via a GTC OTO order — the stop leg "
                          "waits for the fill, then rests as a persistent GTC stop that survives "
-                         "the close (§6.38). If a name is already held, no buy is sent — a GTC "
+                         "the close. If a name is already held, no buy is sent — a GTC "
                          "stop protects the whole position and, per Minervini, only ever "
                          "RATCHETS UP: a re-arm that would lower the stop is ignored and the "
                          "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
@@ -828,7 +827,7 @@ with st.sidebar:
                     _edstop = st.session_state.get(f"stop_{_t}_{_nonce}", _o["stop_price"])
                     # Worst-case fill: a limit BUY can fill anywhere at or below the limit —
                     # including ~the current price when the limit is marketable — so validation
-                    # and the live risk read key off min(edited limit, price) (R2-3).
+                    # and the live risk read key off min(edited limit, price).
                     _basis = (min(_edlim, _o["price"]) if (_is_lim and _edlim)
                               else _o["price"])
                     if _held_sh > 0 or not _on:
@@ -850,8 +849,8 @@ with st.sidebar:
                                     "— fills only on a pullback into the zone")
                     elif (_is_lim and _on and _held_sh <= 0 and _o.get("pivot")
                             and _o["price"] < _o["pivot"]):
-                        # Below-pivot name: the zone-top limit is MARKETABLE — it fills at
-                        # once at ~the current price, BELOW the buy zone (R2-4a honesty).
+                        # Below-pivot name: the zone-top limit is MARKETABLE — it fills
+                        # at once at ~the current price, BELOW the buy zone.
                         _cA.caption(f"  ↳ ⚠ price {_o['price']:,.2f} is below the pivot "
                                     f"{_o['pivot']:,.2f} — this limit is marketable and "
                                     f"fills immediately at ~{_o['price']:,.2f}, below "
@@ -887,7 +886,7 @@ with st.sidebar:
                     # stamped rearm_only: the preview showed it with NO checkbox and an
                     # explicit "no buy" caption, so if its position closes between Build and
                     # Submit (a GTC stop firing), submit must SKIP it — never convert it
-                    # into an unconsented full-size buy (review 2026-08-09, HIGH).
+                    # into an unconsented full-size buy.
                     _final = [{**_o,
                                "rearm_only": _held.get(_o["ticker"], 0) > 0,
                                "stop_price": st.session_state.get(
@@ -933,8 +932,8 @@ with st.sidebar:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
 
     # --- Cancel resting cockpit buys — THE control for a GTC limit whose setup broke
-    # (a resting limit otherwise fills on any later pullback, §6.41/R2-4). Outside the
-    # watchlist block: a pending buy can outlive its watchlist entry. ------------------ #
+    # (a resting limit otherwise fills on any later pullback). Outside the watchlist
+    # block: a pending buy can outlive its watchlist entry. ---------------------------- #
     if st.button("🗑 Cancel pending cockpit buys", key="cancel_pending",
                  help="Cancels every OPEN cockpit BUY order (SEPA-tagged only — queued "
                       "market buys and resting GTC limits; an unfilled OTO stop leg dies "
@@ -1211,8 +1210,8 @@ with colSide:
                       kwargs={"judged_pivot": _app_pivot}, width="stretch",
                       help="Adds the name AND freezes the current pivot as your judged "
                            "trigger level (shown in Step 4).")
-        # §6.19 post-breakout freeze warning: freezing a pivot the price is ALREADY above
-        # arms a trigger whose crossing event may be behind it (PECO) — the ≥1.5× volume
+        # Post-breakout freeze warning: freezing a pivot the price is ALREADY above
+        # arms a trigger whose crossing event may be behind it — the ≥1.5× volume
         # close it waits for may never come. Say so at freeze time, for ⭐ and 📌 alike.
         _wl_df = payload.get("df")
         _wl_close = (float(_wl_df["Close"].iloc[-1])
@@ -1267,7 +1266,7 @@ with st.container(border=True):
     # Price levels — neutral (WHERE you'd act, not WHETHER to).
     # The pivot shown here is the DETECTED one (recomputed every scan, drifts with new
     # bars) — NOT the watchlist's frozen 📌 level, which is what triggers fire on and
-    # trade plans price off. The tooltip keeps the two from being conflated (§6.36).
+    # trade plans price off. The tooltip keeps the two from being conflated.
     _fz_pivot = (_wl_entry(pick) or {}).get("judged_pivot")
     _pivot_help = ("The scan's **detected** pivot — recomputed from the price history on "
                    "every scan, so it drifts as new bars arrive. The buy zone, stop, and "

@@ -48,10 +48,10 @@ _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
 # Pool size for the cache-read pre-pass (local parquet reads only — pyarrow releases the
 # GIL; measured ~1.7x over serial on a 4,200-name warm scan). yf.download stays serial.
 _CACHE_READ_WORKERS = 16
-# Process-wide serialization of yf.download itself (R2-2). yfinance (0.2.65) resets a
-# module-global result dict at the top of EVERY download() and spin-waits on its length
-# with no timeout — two concurrent calls wipe each other's frames, and the loser can
-# hang forever. scan_worker's _SCAN_SERIAL only serializes scan-vs-scan; script-thread
+# Process-wide serialization of yf.download itself. yfinance resets a module-global
+# result dict at the top of EVERY download() and spin-waits on its length with no
+# timeout — two concurrent calls wipe each other's frames, and the loser can hang
+# forever. scan_worker's _SCAN_SERIAL only serializes scan-vs-scan; script-thread
 # fetches (freshen_prices, the Check-triggers button, the Positions page) run in the
 # SAME process as the background scan thread and must share this lock. Held per ATTEMPT
 # (inside _download_batch, released during retry backoff) so a waiting fetch is blocked
@@ -490,9 +490,9 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             # this gate too, keeping the top-up paths deterministically reachable.
             try:
                 df = pd.read_parquet(path)
-                # Content-side companion check (R2-5b): the mtime says the FILE was
-                # written post-settle, but a lagging provider response (the full-fetch
-                # path has no R2-5 gate) can persist a frame whose last bar predates the
+                # Content-side companion check: the mtime says the FILE was written
+                # post-settle, but a lagging provider response (via the ungated
+                # full-fetch persist) can leave a frame whose last bar predates the
                 # latest settled session. Serve as settled only when the FRAME is
                 # current too; else fall through to the cheap incremental top-up.
                 if len(df) and _frame_settled_current(df.index[-1]):
@@ -579,12 +579,12 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                         full_fetch.append(sym)        # re-baseline in the full pass below
                         continue
                     out[sym] = merged
-                    # Persist ONLY when the fetch reached the cache's newest bar (R2-5):
-                    # an overlap-only response (provider lag) must not re-stamp the
-                    # mtime, or a post-cutoff rewrite would arm the settled-close gate
-                    # on a frame LACKING the settled bar — served as "settled" all
-                    # weekend with no healing fetch. ``>=`` is load-bearing (the ~16:30
-                    # settle of today's bar lands with max == last and MUST persist);
+                    # Persist ONLY when the fetch reached the cache's newest bar: an
+                    # overlap-only response (provider lag) must not re-stamp the mtime,
+                    # or a post-cutoff rewrite would arm the settled-close gate on a
+                    # frame LACKING the settled bar — served as "settled" all weekend
+                    # with no healing fetch. ``>=`` is load-bearing (the ~16:30 settle
+                    # of today's bar lands with max == last and MUST persist);
                     # ``index.max()`` not ``[-1]`` (_clean_prices never sorts).
                     if (new is not None and len(new)
                             and pd.Timestamp(new.index.max()).normalize() >= _last):

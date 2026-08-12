@@ -172,7 +172,7 @@ def filter_candidates(cand: Optional[pd.DataFrame], min_rs: float = 0.0,
     (min_rs: ``rsr is None or rsr < min_rs`` including the ``min_rs == 0`` off-switch;
     require_vcp; min_fundamental_score). These three settings only SUBSET already-computed
     rows, so the app scans once with the loosest gates and applies slider tweaks as
-    instant boolean masks instead of re-running the multi-minute screen (review item 18).
+    instant boolean masks instead of re-running the multi-minute screen.
     Returns a NEW frame — never mutates the memoized ScanResult (whose empty case is a
     columnless ``pd.DataFrame()``)."""
     if cand is None or len(cand) == 0:
@@ -190,7 +190,7 @@ def filter_candidates(cand: Optional[pd.DataFrame], min_rs: float = 0.0,
 def detect_breakout_prior_high(df: pd.DataFrame, cp: float, phase_info: Dict,
                                vcp: Optional[Dict]) -> Dict:
     """Cockpit wrapper around the vendored ``detect_breakout`` that makes its Base/Pivot
-    branches REACHABLE (review item 23). The vendored ``find_base_high``/``find_pivot_high``
+    branches REACHABLE. The vendored ``find_base_high``/``find_pivot_high``
     windows INCLUDE the current bar while every cockpit caller passes ``cp`` = that same
     bar's close, so ``cp > high-including-cp`` could never fire and the only reachable
     non-VCP branch was the 50-SMA reclaim. Here the 60/20-day highs are taken over the bars
@@ -285,12 +285,10 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             phase_info = classify_phase(df, cp)
             phase_results.append({"ticker": t, "phase": phase_info.get("phase", 0)})
 
-            # NOTE (2026-08-09): a tail-only SMA-200 stub (Close.iloc[-220:]) was tried
-            # here and REVERTED — pandas' rolling mean uses a sliding-sum kernel, so the
-            # tail slice differs from the full series by ~1 ulp at the consumed points
-            # (parity test caught it), which could flip a knife-edge template gate.
-            # Determinism beats the modest saving; don't re-attempt without an exact
-            # window-mean equivalent.
+            # A tail-only SMA-200 stub (Close.iloc[-220:]) was tried here and REVERTED:
+            # pandas' rolling mean is a sliding-sum kernel, so a tail slice differs from
+            # the full series by ~1 ulp at the consumed points — enough to flip a
+            # knife-edge template gate. Don't re-attempt without an exact window mean.
             sma200 = calculate_sma(df["Close"], 200)
             tmpl = validate_minervini_trend_template(cp, phase_info, sma200)
             if tmpl.get("criteria_passed", 0) < cfg.min_criteria:

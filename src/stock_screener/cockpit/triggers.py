@@ -56,10 +56,10 @@ REPORT_SCHEMA = 1
 # The full per-name status vocabulary, pinned by the test suite — a new status must be
 # registered here or the report test fails. "untracked" = the name no longer passes the
 # 8/8 trend template (it left the scan table): kept on the watchlist, but its trigger is
-# NOT evaluated until it re-qualifies. "crossed" (§6.19 open item, built §6.36) = above
-# the frozen pivot WITHOUT volume confirmation — the quiet drift the volume gate will
-# never fire on (PECO). Rendered loud so "it left without me" stops looking identical to
-# "still basing"; NOT a buy signal.
+# NOT evaluated until it re-qualifies. "crossed" = above the frozen pivot WITHOUT
+# volume confirmation — the quiet drift the volume gate will never fire on. Rendered
+# loud so "it left without me" stops looking identical to "still basing"; NOT a buy
+# signal.
 STATUSES = ("no_data", "untracked", "no_pivot", "stale", "extended", "triggered",
             "crossed", "watch")
 
@@ -145,8 +145,8 @@ def no_session_since(mtime_epoch: float, now=None) -> bool:
 def frame_settled_current(last_bar_date, now=None) -> bool:
     """True when a frame ENDING at ``last_bar_date`` already contains every bar that can
     exist: that bar's session has settled and no later session has started (evenings /
-    weekends / pre-open). The settled-close gate's content-side companion (R2-5b): the
-    file mtime says WHEN it was written; this says whether what's INSIDE is actually the
+    weekends / pre-open). The settled-close gate's content-side companion: the file
+    mtime says WHEN it was written; this says whether what's INSIDE is actually the
     latest settled data — a lagging provider response persisted post-cutoff would
     otherwise serve a short frame as "settled" for the whole no-session window. Routes
     through the module-global ``no_session_since`` (tests patch it there). Never raises;
@@ -304,9 +304,9 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         out["pct_from_pivot"] = round((close / pivot - 1.0) * 100.0, 2)
         out["triggered"] = bool(out["close_above_pivot"] and out["volume_confirmed"]
                                 and not out["stale"])
-        # `not stale` for symmetry with `triggered` (R2-10): a stale Friday bar above
-        # the pivot is no more a live cross than it is a live trigger — the status
-        # precedence hid this, but the raw boolean is documented as authoritative.
+        # `not stale` for symmetry with `triggered`: a stale Friday bar above the
+        # pivot is no more a live cross than it is a live trigger — the raw boolean
+        # is documented as authoritative.
         out["crossed"] = bool(out["close_above_pivot"] and not out["volume_confirmed"]
                               and not out["stale"])
 
@@ -393,9 +393,9 @@ def save_trigger_report(report: dict, dir_path=None) -> Path:
     """Write ``triggers_YYYY-MM-DD.json`` (same-day rerun overwrites = idempotent).
     ``dir_path`` defaults to ``cache.TRIGGERS_DIR`` read at CALL time (patchable).
 
-    Atomic (R2-7): tmp + ``os.replace``, mirroring data_feed's ``_atomic_to_parquet`` —
-    the app's 🔔 button and the half-hourly scheduled job run in SEPARATE processes and
-    can hit the same day-file; an in-place truncate-write could interleave into invalid
+    Atomic (tmp + ``os.replace``, mirroring data_feed's ``_atomic_to_parquet``) — the
+    app's 🔔 button and the half-hourly scheduled job run in SEPARATE processes and can
+    hit the same day-file; an in-place truncate-write could interleave into invalid
     JSON, which the loader silently skips, serving the PREVIOUS day all weekend if the
     ~16:30 settled report was the casualty."""
     d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
