@@ -15,7 +15,7 @@ Funnel:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -250,6 +250,26 @@ def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
     return float(rmv_series.iloc[-1]) if len(rmv_series) else None
 
 
+def template_chain(df: pd.DataFrame, close: Optional[float] = None
+                   ) -> Optional[Tuple[dict, dict]]:
+    """The trend-template chain on ONE ticker's daily frame: ``(template_dict,
+    phase_info)``, or None when the frame is too short for ``classify_phase`` (< 200
+    rows). Raises on chain errors — each caller keeps its own failure policy (the scan
+    records, the trigger check fails open, the positions read degrades).
+
+    Always pass the FULL frame: pandas' rolling mean is a sliding-sum kernel, so a tail
+    slice (e.g. ``Close.iloc[-220:]``) differs from the full series by ~1 ulp at the
+    consumed points — enough to flip a knife-edge template gate. Returns the full
+    template dict rather than a bare count because the scan stores it in payloads and a
+    count-only helper would force a second (expensive) ``classify_phase``."""
+    if df is None or len(df) < 200:
+        return None
+    cp = float(close) if close is not None else float(df["Close"].iloc[-1])
+    phase_info = classify_phase(df, cp)
+    sma200 = calculate_sma(df["Close"], 200)
+    return validate_minervini_trend_template(cp, phase_info, sma200), phase_info
+
+
 def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                     spy: pd.DataFrame,
                     get_fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
@@ -282,15 +302,11 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
         if not np.isfinite(cp):
             continue
         try:
-            phase_info = classify_phase(df, cp)
+            chain = template_chain(df, cp)
+            if chain is None:
+                continue
+            tmpl, phase_info = chain
             phase_results.append({"ticker": t, "phase": phase_info.get("phase", 0)})
-
-            # A tail-only SMA-200 stub (Close.iloc[-220:]) was tried here and REVERTED:
-            # pandas' rolling mean is a sliding-sum kernel, so a tail slice differs from
-            # the full series by ~1 ulp at the consumed points — enough to flip a
-            # knife-edge template gate. Don't re-attempt without an exact window mean.
-            sma200 = calculate_sma(df["Close"], 200)
-            tmpl = validate_minervini_trend_template(cp, phase_info, sma200)
             if tmpl.get("criteria_passed", 0) < cfg.min_criteria:
                 continue
 

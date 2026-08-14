@@ -23,8 +23,12 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from src.stock_screener.cockpit import cache  # noqa: E402
+from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
+from src.stock_screener.cockpit import triggers  # noqa: E402 (latest report = SPY fallback)
+from src.stock_screener.cockpit.export import load_watchlist  # noqa: E402
 
 # Warm the universe scan in the background so it's already fetching/screening by the time
 # the user opens the scan page (inert under AppTest — see scan_worker.autostart).
@@ -144,6 +148,37 @@ _sp = st.session_state.get("sell_pending")
 if _sp and _sp.get("symbol") not in {p["symbol"] for p in positions}:
     st.session_state.pop("sell_pending", None)
 
+# --- Sell pillars (P1-P4): every input is best-effort; a pillar with no data reads "—" ------- #
+_open_by_sym = {}
+try:
+    # Journal entry dates/prices for P1 — the shared fills cache (same jr_nonce as the
+    # Journal page's Refresh). Alpaca down => pillars degrade, the page still renders.
+    _fills = journal_cache.cached_fills(st.session_state.get("jr_nonce", 1))["fills"]
+    _open_by_sym = {r["symbol"]: r for r in trade.build_trade_journal(_fills)["open"]}
+except Exception:
+    _open_by_sym = {}
+try:
+    _wl_pivots = {e["ticker"]: e.get("judged_pivot")
+                  for e in load_watchlist(cache.WATCHLIST_JSON)}
+except Exception:
+    _wl_pivots = {}
+_regime = _spy = None
+try:
+    # Newest scan result if one exists — None on a true cold start and under AppTest.
+    _regime = getattr(scan_worker.get_worker().latest(), "regime", None)
+except Exception:
+    _regime = None
+if _regime is None:
+    try:
+        _spy = (triggers.load_latest_trigger_report() or {}).get("spy")
+    except Exception:
+        _spy = None
+_pillars = {p["symbol"]: trade.sell_pillars(
+                p, entry_date=(_open_by_sym.get(p["symbol"]) or {}).get("entry_date"),
+                pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy)
+            for p in positions}
+_PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
+
 # --- Positions table ------------------------------------------------------------------------ #
 import pandas as pd  # noqa: E402
 
@@ -152,6 +187,10 @@ rows = [{
     "current_price": p["current_price"],
     "gain_pct": (p["gain_pct"] * 100.0 if p["gain_pct"] is not None else None),
     "stage": p.get("stage") or "",
+    "P1": _PICON[_pillars[p["symbol"]]["P1"]["status"]],
+    "P2": _PICON[_pillars[p["symbol"]]["P2"]["status"]],
+    "P3": _PICON[_pillars[p["symbol"]]["P3"]["status"]],
+    "P4": _PICON[_pillars[p["symbol"]]["P4"]["status"]],
     "market_value": p["market_value"], "unrealized_pl": p["unrealized_pl"],
     "current_stop": p["current_stop"], "sma_50": p["sma_50"],
     "earnings": _earnings_cell(p),
@@ -167,6 +206,21 @@ col_config = {
     "stage": st.column_config.Column(
         "Stage", help="The stop ladder by gain: underwater · fresh (<16%) · working "
                       "(16-20%, stop → breakeven) · well in profit (≥20%, trail 50-day)."),
+    "P1": st.column_config.Column(
+        "P1", help="Breakout holding: Day-0 close below pivot, decisive close below "
+                   "pivot, close below the breakout bar's low, and the laggard clock "
+                   "(no ~3% cushion by ~day 10; flat-to-red by day 15). Needs the "
+                   "journal entry date; pivot flags need the watchlist's frozen pivot."),
+    "P2": st.column_config.Column(
+        "P2", help="Trend template on the holding — strict: anything under 8/8 is a "
+                   "fail (a knife-edge SMA criterion can flip it for a day)."),
+    "P3": st.column_config.Column(
+        "P3", help="The tape: scan regime when available, else the trigger report's "
+                   "SPY-only read. Risk-off = demote every yellow flag to red."),
+    "P4": st.column_config.Column(
+        "P4", help="Earnings window: inside ~21 days a loss or <8% cushion fails "
+                   "(a stop can't protect against a gap); a real cushion still says "
+                   "trim to hold-through size."),
     "market_value": _num("Mkt value", format="$%.0f"),
     "unrealized_pl": _num("Unreal. P&L", format="$%.0f"),
     "current_stop": _num("Stop", format="$%.2f",
@@ -181,10 +235,14 @@ col_config = {
     "advisories": st.column_config.Column("Advisories", width="large"),
 }
 col_order = ["symbol", "qty", "avg_entry", "current_price", "gain_pct", "stage",
+             "P1", "P2", "P3", "P4",
              "market_value", "unrealized_pl", "current_stop", "sma_50", "earnings",
              "advisories"]
 st.dataframe(pd.DataFrame(rows), column_config=col_config, column_order=col_order,
              hide_index=True, width="stretch")
+st.caption("Sell pillars — P1 breakout holding · P2 trend template · P3 tape · "
+           "P4 earnings. Any ❌ kills the thesis; the stop is only the disaster floor "
+           "between checks. — = not enough data (journal / frozen pivot / scan).")
 
 # --- Stop management: basis + per-row editable stops + re-arm -------------------------------- #
 st.markdown("#### 🛡️ Stops & sells")
@@ -209,6 +267,11 @@ for p in positions:
     _eff = f" · {_BASIS_LABELS.get(eff, eff).split(' (')[0].lower()}" if basis == "auto" else ""
     cA.caption(f"• **{sym}** {p['qty']} sh · {_g}{_eff}"
                + (f" · {' · '.join(p['advisories'])}" if p["advisories"] else ""))
+    _flagged = [(k, v) for k, v in _pillars.get(sym, {}).items()
+                if v["status"] in ("fail", "warn")]
+    if _flagged:
+        cA.caption("  ↳ " + " · ".join(f"{k} {_PICON[v['status']]} {v['detail']}"
+                                       for k, v in _flagged))
     cB.number_input(f"stop {sym}", min_value=0.0, value=float(seed), step=0.01, format="%.2f",
                     key=f"posstop_{sym}_{_nonce}_{basis}", label_visibility="collapsed")
     _ed = st.session_state.get(f"posstop_{sym}_{_nonce}_{basis}", seed)

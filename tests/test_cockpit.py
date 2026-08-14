@@ -1891,16 +1891,19 @@ def test_trade_plan_preview_renders_stop_controls():
     import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod, cache
+    from src.stock_screener.cockpit import journal_cache, scan as scanmod, cache, trade
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    journal_cache.cached_fills.clear()          # process-global cache; keep this run offline
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(scanmod, "run_scan", return_value=result), \
             patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
-            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"), \
+            patch.object(trade, "fetch_order_fills",
+                         side_effect=trade.TradeUnavailable("offline")):
         at = AppTest.from_file(app_path, default_timeout=60)
         at.session_state["watchlist"] = [                # non-empty -> trade section renders
             {"ticker": "AAA", "judged_pivot": None, "date_added": None,
@@ -1923,6 +1926,92 @@ def test_trade_plan_preview_renders_stop_controls():
     stops = [n for n in at.number_input if n.key == "stop_AAA_1"]
     assert stops, "per-ticker stop number_input did not render"
     assert stops[0].value == 92.5, f"stop should default to computed value, got {stops[0].value}"
+
+
+def test_trade_panel_risk_guidance():
+    """§6.51 progressive exposure at the point of sizing: in risk mode the panel shows
+    the last-10 closed form ("2W/8L … pilot size") from the shared journal cache and a
+    one-click "Use suggested" button that writes the risk widget and invalidates the
+    built plan — never silently changing the user's input. A failed journal read renders
+    "journal unavailable", never blocks the panel, and is memoized per session so an
+    Alpaca outage costs exactly ONE fetch attempt."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_panel_risk_guidance (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import journal_cache, scan as scanmod, cache, trade
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+
+    def canned_fills():
+        # 10 tagged round trips: 2 winners (+10%) and 8 losers (-6%) -> pilot size.
+        fills = []
+        for i in range(10):
+            sym = f"T{i:02d}"
+            fills.append({"symbol": sym, "side": "buy", "qty": 10, "price": 100.0,
+                          "time": f"2026-06-{i + 1:02d}T14:30:00Z", "order_id": f"b{i}",
+                          "client_order_id": f"SEPAcockpit-{sym}-1"})
+            fills.append({"symbol": sym, "side": "sell", "qty": 10,
+                          "price": 110.0 if i < 2 else 94.0,
+                          "time": f"2026-06-{i + 11:02d}T14:30:00Z", "order_id": f"s{i}",
+                          "client_order_id": ""})
+        return {"account": {"account_number": "PA1", "equity": 100000.0, "cash": 0.0,
+                            "using_dedicated": True}, "fills": fills}
+
+    def _seed(at):
+        at.session_state["watchlist"] = [
+            {"ticker": "AAA", "judged_pivot": None, "date_added": None,
+             "pivot_source": None, "note": ""}]
+        at.session_state["trade_mode"] = "Risk % to stop"
+
+    # 1) guidance + one-click apply
+    journal_cache.cached_fills.clear()
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"), \
+            patch.object(trade, "fetch_order_fills", return_value=canned_fills()):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        _seed(at)
+        at.session_state["trade_plan"] = {"plan": [], "skipped": [], "account": {},
+                                          "build_ts": 1}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        rendered = " ".join(str(getattr(c, "value", "")) for c in at.caption)
+        assert "2W/8L" in rendered and "pilot size" in rendered, rendered
+        btns = [b for b in at.button if b.key == "risk_apply"]
+        assert btns and "0.50%" in btns[0].label, "apply button missing or mislabeled"
+        btns[0].click().run()
+        assert at.session_state["trade_amt_risk"] == 0.5, "suggestion not applied"
+        assert "trade_plan" not in at.session_state, "apply must invalidate the plan"
+
+    # 2) journal down: caption degrades, panel lives, exactly ONE fetch attempt/session
+    calls = {"n": 0}
+
+    def _dead():
+        calls["n"] += 1
+        raise trade.TradeUnavailable("no creds")
+
+    journal_cache.cached_fills.clear()
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"), \
+            patch.object(trade, "fetch_order_fills", _dead):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        _seed(at)
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        rendered = " ".join(str(getattr(c, "value", "")) for c in at.caption)
+        assert "journal unavailable" in rendered, rendered
+        at.run()                                        # rerun -> memoized failure
+        assert calls["n"] == 1, f"outage must cost one attempt, got {calls['n']}"
 
 
 def test_trade_plan_preview_marks_held_names():
@@ -2496,6 +2585,111 @@ def test_position_advisories():
         assert not any("Earnings" in a for a in position_advisories(quiet)), quiet
 
 
+def test_sell_pillars():
+    """§6.52: the Step-E doctrine as per-position P1-P4 statuses (pure, pinned today).
+    P1 fails on Day-0 close below pivot / decisive (>2%) close / 2nd consecutive close /
+    close below the breakout bar's low / flat-to-red at day 15+, warns on no-3%-cushion
+    at day 10+, degrades without an entry date or pivot. P2 is STRICT (user decision:
+    7/8 fails). P3 reads the scan regime, falls back to the trigger report's SPY note.
+    P4 fails on loss-or-thin-cushion inside the 21-day window, warns with a real
+    cushion. A bare pos dict (no new keys) yields four unknowns, never a raise."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import sell_pillars
+
+    TODAY = "2026-08-12"                                   # a Wednesday
+
+    def P(**kw):
+        base = {"last_close": None, "gain_pct": None, "df": None,
+                "template_criteria": None, "earnings_in": None}
+        base.update(kw)
+        return base
+
+    def S(r):                                              # status shorthand
+        return {k: v["status"] for k, v in r.items()}
+
+    # all-ok: day 5, cushioned, above pivot, 8/8, risk-on, report far out. The tz-aware
+    # UTC entry (the journal's native form) must land on the ET trading date.
+    ok = sell_pillars(
+        P(last_close=108.0, gain_pct=0.05, template_criteria=8, earnings_in=40,
+          df=_trigger_frame(TODAY, [108.0] * 30)),
+        entry_date=pd.Timestamp("2026-08-05 14:30", tz="UTC"), pivot=100.0,
+        regime={"regime": "RISK-ON (Strong)", "should_generate_buys": True},
+        today=TODAY)
+    assert S(ok) == {"P1": "ok", "P2": "ok", "P3": "ok", "P4": "ok"}, ok
+    assert "day 5" in ok["P1"]["detail"]
+
+    # P1 Day-0: entered today, settled back below the pivot -> the breakout never happened
+    d0 = sell_pillars(P(last_close=99.0, gain_pct=-0.01,
+                        df=_trigger_frame(TODAY, [101.0] * 29 + [99.0])),
+                      entry_date=TODAY, pivot=100.0, today=TODAY)
+    assert d0["P1"]["status"] == "fail" and "Day-0" in d0["P1"]["detail"]
+
+    # P1 decisive: closed >2% below the pivot
+    dec = sell_pillars(P(last_close=97.4, gain_pct=-0.03), entry_date="2026-08-05",
+                       pivot=100.0, today=TODAY)
+    assert dec["P1"]["status"] == "fail" and "decisive" in dec["P1"]["detail"]
+
+    # P1 second consecutive close below the pivot (neither decisive on its own)
+    two = sell_pillars(P(last_close=99.0, gain_pct=-0.01,
+                         df=_trigger_frame(TODAY, [101.0] * 28 + [99.5, 99.0])),
+                       entry_date="2026-08-05", pivot=100.0, today=TODAY)
+    assert two["P1"]["status"] == "fail" and "consecutive" in two["P1"]["detail"]
+
+    # P1 breakout-bar low: still above the pivot, but under the entry bar's low
+    bo = sell_pillars(P(last_close=98.5, gain_pct=-0.015,
+                        df=_trigger_frame(TODAY, [100.0] * 25 + [98.5] * 5)),
+                      entry_date="2026-08-05", pivot=95.0, today=TODAY)
+    assert bo["P1"]["status"] == "fail" and "breakout bar" in bo["P1"]["detail"]
+
+    # P1 laggard clock: day 12 with +1% -> warn; day 18 flat-to-red -> fail
+    lag = sell_pillars(P(last_close=101.0, gain_pct=0.01), entry_date="2026-07-27",
+                       pivot=100.0, today=TODAY)
+    assert lag["P1"]["status"] == "warn" and "cushion" in lag["P1"]["detail"]
+    stall = sell_pillars(P(last_close=100.5, gain_pct=-0.01), entry_date="2026-07-17",
+                         pivot=100.0, today=TODAY)
+    assert stall["P1"]["status"] == "fail" and "flat-to-red" in stall["P1"]["detail"]
+
+    # P1 degradation: no journal episode -> unknown; no pivot -> clock-only partial
+    assert sell_pillars(P(), today=TODAY)["P1"]["status"] == "unknown"
+    nopiv = sell_pillars(P(last_close=108.0, gain_pct=0.05), entry_date="2026-08-05",
+                         today=TODAY)
+    assert nopiv["P1"]["status"] == "ok" and "clock only" in nopiv["P1"]["detail"]
+
+    # P2 strict: 8 ok, 7 FAILS (user decision), 5 fails, None unknown
+    assert sell_pillars(P(template_criteria=8), today=TODAY)["P2"]["status"] == "ok"
+    p27 = sell_pillars(P(template_criteria=7), today=TODAY)["P2"]
+    assert p27["status"] == "fail" and "7/8" in p27["detail"]
+    assert sell_pillars(P(template_criteria=5), today=TODAY)["P2"]["status"] == "fail"
+    assert sell_pillars(P(), today=TODAY)["P2"]["status"] == "unknown"
+
+    # P3: scan regime beats everything; SPY note is the partial fallback
+    off = sell_pillars(P(), regime={"regime": "RISK-OFF", "should_generate_buys": False},
+                       today=TODAY)
+    assert off["P3"]["status"] == "fail" and "risk-off" in off["P3"]["detail"].lower()
+    assert sell_pillars(P(), spy_note={"trend": "Bullish"},
+                        today=TODAY)["P3"]["status"] == "ok"
+    assert sell_pillars(P(), spy_note={"trend": "Bearish"},
+                        today=TODAY)["P3"]["status"] == "warn"
+    assert sell_pillars(P(), today=TODAY)["P3"]["status"] == "unknown"
+
+    # P4: the earnings window vs the cushion
+    assert sell_pillars(P(earnings_in=10, gain_pct=-0.05),
+                        today=TODAY)["P4"]["status"] == "fail"          # loss into report
+    thin = sell_pillars(P(earnings_in=10, gain_pct=0.02), today=TODAY)["P4"]
+    assert thin["status"] == "fail" and "trim/exit" in thin["detail"]   # thin cushion
+    assert sell_pillars(P(earnings_in=10, gain_pct=0.10),
+                        today=TODAY)["P4"]["status"] == "warn"          # real cushion
+    assert sell_pillars(P(earnings_in=40, gain_pct=0.10),
+                        today=TODAY)["P4"]["status"] == "ok"
+    assert sell_pillars(P(earnings_in=-5), today=TODAY)["P4"]["status"] == "ok"
+    assert sell_pillars(P(), today=TODAY)["P4"]["status"] == "unknown"
+
+    # a bare dict with NONE of the new keys: four unknowns, no raise
+    bare = sell_pillars({}, today=TODAY)
+    assert S(bare) == {"P1": "unknown", "P2": "unknown", "P3": "unknown",
+                       "P4": "unknown"}, bare
+
+
 def test_position_stage():
     """The stop-ladder stage label mirrors suggest_stop's auto thresholds exactly."""
     from src.stock_screener.cockpit.trade import position_stage
@@ -2619,12 +2813,15 @@ def test_positions_page_renders():
     except Exception as e:
         print(f"  SKIP test_positions_page_renders (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
-    from src.stock_screener.cockpit import trade
+    from src.stock_screener.cockpit import cache, journal_cache, trade
 
     offline = {
         "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
                     "using_dedicated": True, "positions_count": 1, "total_unrealized_pl": 300.0},
+        # Deliberately NO template_criteria/df keys — the sell-pillar read must tolerate a
+        # pre-§6.52 position dict end-to-end (all-unknown pillars, no raise).
         "positions": [{
             "symbol": "AAA", "qty": 10, "avg_entry": 100.0, "current_price": 130.0,
             "market_value": 1300.0, "cost_basis": 1000.0, "unrealized_pl": 300.0,
@@ -2635,7 +2832,13 @@ def test_positions_page_renders():
         }],
     }
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
-    with patch.object(trade, "fetch_positions", return_value=offline):
+    journal_cache.cached_fills.clear()          # process-global cache; keep this run offline
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(trade, "fetch_positions", return_value=offline), \
+            patch.object(trade, "fetch_order_fills",
+                         side_effect=trade.TradeUnavailable("offline")), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(page, default_timeout=60)
         at.run()
     assert not at.exception, f"positions page raised: {at.exception}"
@@ -2654,8 +2857,9 @@ def test_positions_page_sell_flow():
     except Exception as e:
         print(f"  SKIP test_positions_page_sell_flow (AppTest unavailable: {e})")
         return
+    import tempfile
     from unittest.mock import patch
-    from src.stock_screener.cockpit import trade
+    from src.stock_screener.cockpit import cache, journal_cache, trade
 
     offline = {
         "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
@@ -2686,7 +2890,13 @@ def test_positions_page_sell_flow():
         return hits[0]
 
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
-    with patch.object(trade, "fetch_positions", return_value=offline), \
+    journal_cache.cached_fills.clear()          # process-global cache; keep this run offline
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(trade, "fetch_positions", return_value=offline), \
+            patch.object(trade, "fetch_order_fills",
+                         side_effect=trade.TradeUnavailable("offline")), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"), \
             patch.object(trade, "submit_position_sell", side_effect=_fake_sell):
         at = AppTest.from_file(page, default_timeout=60)
         at.run()
@@ -2712,6 +2922,89 @@ def test_positions_page_sell_flow():
     rendered = " ".join(str(getattr(m, "value", ""))
                         for m in list(at.markdown) + list(getattr(at, "caption", [])))
     assert "submitted" in rendered and "re-placed" in rendered, rendered
+
+
+def test_positions_page_sell_pillars():
+    """§6.52 composition on the page: journal open episode -> P1 entry date, watchlist ->
+    frozen pivot, canned trigger report -> P3 SPY fallback; the legend renders and a
+    laggard (day ~20, +1%) shows its per-row P1 warn detail. With the journal down every
+    journal-fed pillar degrades to unknown and the page still renders."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_positions_page_sell_pillars (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import cache, journal_cache, trade
+    from src.stock_screener.cockpit.export import make_entry, save_watchlist
+    from src.stock_screener.cockpit.triggers import save_trigger_report
+
+    offline = {
+        "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
+                    "using_dedicated": True, "positions_count": 1, "total_unrealized_pl": 10.0},
+        "positions": [{
+            "symbol": "AAA", "qty": 10, "avg_entry": 100.0, "current_price": 101.0,
+            "market_value": 1010.0, "cost_basis": 1000.0, "unrealized_pl": 10.0,
+            "unrealized_plpc": 0.01, "lastday_price": 101.0, "current_stop": 92.0,
+            "has_stop": True, "sma_50": 95.0, "last_close": 101.0, "volume_ratio": 1.0,
+            "gain_pct": 0.01, "below_sma50": False, "next_earnings": None,
+            "earnings_in": None, "stage": "fresh", "advisories": [],
+            "template_criteria": 8,                    # df omitted on purpose (.get path)
+        }],
+    }
+    # Open episode entered ~20 trading days ago (relative to the REAL clock — the page
+    # doesn't pin today): day_n >= 10 with +1% stays a cushion warn at any later date.
+    entry_iso = (pd.Timestamp.now(tz="UTC") - pd.offsets.BDay(20)).isoformat()
+    fills = {"account": offline["account"],
+             "fills": [{"symbol": "AAA", "side": "buy", "qty": 10, "price": 100.0,
+                        "time": entry_iso, "order_id": "1",
+                        "client_order_id": "SEPAcockpit-AAA-1"}]}
+    canned_report = {"schema": 1, "date": "2026-08-11", "generated_at": "2026-08-11T16:31:00-04:00",
+                     "spy": {"phase": 2, "phase_name": "Stage 2 - Advancing", "trend": "Bullish"},
+                     "names": [], "summary": {"n": 0}}
+
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
+
+    def _rendered(at):
+        return " ".join(str(getattr(m, "value", ""))
+                        for m in list(at.markdown) + list(getattr(at, "caption", [])))
+
+    # 1) full composition: pivot from the watchlist, entry from the journal, SPY fallback
+    journal_cache.cached_fills.clear()
+    with tempfile.TemporaryDirectory() as _tmp:
+        wl = Path(_tmp) / "watchlist.json"
+        trg = Path(_tmp) / "triggers"
+        save_watchlist(wl, [make_entry("AAA", 100.0, date_added="2026-07-01",
+                                       pivot_source="judged")])
+        save_trigger_report(canned_report, trg)
+        with patch.object(trade, "fetch_positions", return_value=offline), \
+                patch.object(trade, "fetch_order_fills", return_value=fills), \
+                patch.object(cache, "WATCHLIST_JSON", wl), \
+                patch.object(cache, "TRIGGERS_DIR", trg):
+            at = AppTest.from_file(page, default_timeout=60)
+            at.run()
+    assert not at.exception, f"positions page raised: {at.exception}"
+    rendered = _rendered(at)
+    assert "Sell pillars" in rendered, "pillar legend missing"
+    assert "cushion" in rendered and "sell into strength" in rendered, \
+        f"laggard P1 warn detail missing: {rendered[-500:]}"
+
+    # 2) journal down: every journal-fed pillar unknown, page alive, no flagged captions
+    journal_cache.cached_fills.clear()
+    with tempfile.TemporaryDirectory() as _tmp:
+        with patch.object(trade, "fetch_positions", return_value=offline), \
+                patch.object(trade, "fetch_order_fills",
+                             side_effect=trade.TradeUnavailable("down")), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+            at = AppTest.from_file(page, default_timeout=60)
+            at.run()
+    assert not at.exception, f"positions page raised: {at.exception}"
+    rendered = _rendered(at)
+    assert "Sell pillars" in rendered
+    assert "sell into strength" not in rendered, "no journal -> no laggard read"
 
 
 # --------------------------------------------------------------------------- #
@@ -2808,6 +3101,58 @@ def test_journal_stats():
     assert allwin["avg_loss_pct"] is None and allwin["win_loss_ratio"] is None
 
 
+def test_suggest_risk_pct():
+    """§6.51 progressive exposure: last-10 form maps to pilot 0.5% (negative expectancy
+    or batting < .300), base 1.0% (in between, or a thin/empty sample), strong 1.25%
+    (batting ≥ .500 with positive expectancy — expectancy is checked FIRST, so a .500
+    hitter with negative expectancy still pilots). The exit-date re-sort is pinned:
+    build_trade_journal emits closed trades grouped by SYMBOL, so an unsorted "last 10"
+    would read an alphabetical accident, not recent form."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import suggest_risk_pct
+
+    def T(sym, exit_day, pl_pct):
+        return {"symbol": sym, "exit_date": pd.Timestamp(f"2026-07-{exit_day:02d}"),
+                "pl": pl_pct * 1000.0, "pl_pct": pl_pct, "hold_days": 5}
+
+    # pilot: 2W/8L, negative expectancy
+    pilot = suggest_risk_pct([T(f"S{i}", i + 1, 0.10 if i < 2 else -0.06)
+                              for i in range(10)])
+    assert pilot["risk_pct"] == 0.5 and "pilot" in pilot["reason"]
+    assert "2W/8L" in pilot["reason"]
+
+    # strong: 6W/4L, positive expectancy
+    strong = suggest_risk_pct([T(f"S{i}", i + 1, 0.10 if i < 6 else -0.05)
+                               for i in range(10)])
+    assert strong["risk_pct"] == 1.25 and "press" in strong["reason"]
+
+    # base: batting .400 with positive expectancy sits between the gates
+    base = suggest_risk_pct([T(f"S{i}", i + 1, 0.15 if i < 4 else -0.05)
+                             for i in range(10)])
+    assert base["risk_pct"] == 1.0 and "normal" in base["reason"]
+
+    # .500 batting but negative expectancy (small wins, big losses) -> still pilot
+    churn = suggest_risk_pct([T(f"S{i}", i + 1, 0.01 if i < 5 else -0.10)
+                              for i in range(10)])
+    assert churn["risk_pct"] == 0.5
+
+    # thin sample and empty history -> base, flagged as such
+    thin = suggest_risk_pct([T(f"S{i}", i + 1, 0.10) for i in range(3)])
+    assert thin["risk_pct"] == 1.0 and "sample" in thin["reason"]
+    empty = suggest_risk_pct([])
+    assert empty["risk_pct"] == 1.0 and empty["n"] == 0
+
+    # exit-date sorting: 5 OLD winners under late-alphabet symbols, 7 RECENT losers under
+    # early-alphabet symbols. Symbol-grouped order puts the losers first, so an unsorted
+    # tail would read 5W/5L (strong); the true last 10 by exit date read 3W/7L -> pilot.
+    trades = ([T(f"ZZ{i}", i + 1, 0.10) for i in range(5)]          # exits Jul 1-5
+              + [T(f"AA{i}", i + 10, -0.05) for i in range(7)])     # exits Jul 10-16
+    grouped = sorted(trades, key=lambda t: t["symbol"])             # journal emit order
+    sorted_read = suggest_risk_pct(grouped)
+    assert sorted_read["risk_pct"] == 0.5, \
+        f"last-10 must be by exit date, not symbol order: {sorted_read['reason']}"
+
+
 def test_fetch_order_fills_offline():
     """fetch_order_fills pages through the closed-order history with until= (exclusive),
     drops never-filled orders, normalizes sides/qty/price, and returns fills oldest-first —
@@ -2884,7 +3229,7 @@ def test_journal_page_renders():
         print(f"  SKIP test_journal_page_renders (AppTest unavailable: {e})")
         return
     from unittest.mock import patch
-    from src.stock_screener.cockpit import trade
+    from src.stock_screener.cockpit import journal_cache, trade
 
     offline = {
         "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
@@ -2902,6 +3247,7 @@ def test_journal_page_renders():
         ],
     }
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "3_Journal.py")
+    journal_cache.cached_fills.clear()          # process-global cache; take THIS patch's data
     with patch.object(trade, "fetch_order_fills", return_value=offline):
         at = AppTest.from_file(page, default_timeout=60)
         at.run()
@@ -3603,6 +3949,115 @@ def test_check_triggers_pure():
     assert rep2["intraday"] is False
 
 
+def test_pullback_trigger():
+    """§6.50 pullback status (the low-risk secondary entry after a crossed-without-volume
+    breakout, e.g. the 127/208 crossed names in the 8/9 hunt): a prior settled close beat
+    the band top (pivot*1.02) on/after date_added, today's close is back within ±2% of
+    the frozen pivot, and volume is dry (session-normalized pace <= 0.8x). Stateless —
+    derived from the daily frame, no watchlist schema change. Precedence: triggered
+    outranks pullback outranks crossed; the raw booleans stay authoritative. The dry
+    read uses volume_pace so a morning's mechanically-low raw ratio can't false-fire
+    intraday (the same frame that is NOT dry at 11:00 is dry at 16:30)."""
+    from src.stock_screener.cockpit.export import make_entry
+    from src.stock_screener.cockpit.triggers import (
+        STATUSES, check_one, check_triggers, format_report)
+
+    TODAY = "2026-07-10"                                    # a Friday
+    PIVOT = 100.0
+
+    def E(t, date_added="2026-07-01"):
+        return make_entry(t, PIVOT, date_added=date_added, pivot_source="judged")
+
+    def F(today_close, today_vol, spike_close=103.0, spike_at=55):
+        closes = [98.0] * 60
+        closes[spike_at] = spike_close                      # the earlier cross
+        closes[-1] = today_close
+        vols = [1000] * 59 + [today_vol]
+        return _trigger_frame(TODAY, closes, vols)
+
+    SETTLED = f"{TODAY} 16:30"
+
+    # (a) crossed at 103 days ago, today 101 (+1%) on 0.7x volume, settled -> PULLBACK.
+    # The raw crossed boolean survives (close above pivot, no volume confirm) — status
+    # precedence, not the boolean, decides the display.
+    r = check_one(E("PBK"), F(101.0, 700), None, today=TODAY, now=SETTLED)
+    assert r["status"] == "pullback" and r["pullback"] is True, r
+    assert r["crossed_earlier"] is True and r["crossed"] is True
+    assert r["triggered"] is False
+
+    # (b) slight undercut (-1%) still counts — Minervini's secondary entry tolerates a
+    # small poke below the pivot; crossed is False here (close not above pivot).
+    rb = check_one(E("PBK"), F(99.0, 700), None, today=TODAY, now=SETTLED)
+    assert rb["status"] == "pullback" and rb["crossed"] is False
+
+    # (c) same shape on 1.5x volume -> triggered outranks, and 1.5x is not dry
+    rc = check_one(E("PBK"), F(101.0, 1500), None, today=TODAY, now=SETTLED)
+    assert rc["status"] == "triggered" and rc["pullback"] is False
+
+    # (d) ordinary volume (1.0x): in-band but not dry -> stays crossed
+    rd = check_one(E("PBK"), F(101.0, 1000), None, today=TODAY, now=SETTLED)
+    assert rd["status"] == "crossed" and rd["pullback"] is False
+
+    # (e) prior high never beat the band top (101.5 < 102) -> "retraced" is not real
+    re_ = check_one(E("PBK"), F(101.0, 700, spike_close=101.5), None,
+                    today=TODAY, now=SETTLED)
+    assert re_["status"] == "crossed" and re_["crossed_earlier"] is False
+
+    # (f) the cross predates date_added -> a re-freeze reset the clock -> excluded
+    rf = check_one(E("PBK"), F(101.0, 700, spike_at=5), None, today=TODAY, now=SETTLED)
+    assert rf["status"] == "crossed" and rf["crossed_earlier"] is False
+
+    # (g) stale bar -> no pullback alert (no live read at all)
+    rg = check_one(E("PBK"), F(101.0, 700), None,
+                   today="2026-07-13", now="2026-07-13 16:30")
+    assert rg["status"] == "stale" and rg["pullback"] is False
+
+    # (h) -3% is a failing base, not a pullback -> watch
+    rh = check_one(E("PBK"), F(97.0, 700), None, today=TODAY, now=SETTLED)
+    assert rh["status"] == "watch" and rh["pullback"] is False
+
+    # (i) intraday guard: at 11:00 the same 0.7x bar paces ~3x for the time of day ->
+    # NOT dry -> no morning misfire; the settled run reads it dry (case a).
+    ri = check_one(E("PBK"), F(101.0, 700), None, today=TODAY, now=f"{TODAY} 11:00")
+    assert ri["status"] == "crossed" and ri["pullback"] is False
+
+    # report level: summary bucket, registered vocabulary, ASCII explainer
+    assert "pullback" in STATUSES
+    rep = check_triggers([E("PBK")], {"PBK": F(101.0, 700)},
+                         today=TODAY, now=SETTLED)
+    assert rep["summary"]["pullback"] == ["PBK"]
+    txt = format_report(rep)
+    assert "PULLBACK (" in txt and "PBK" in txt
+    txt.encode("ascii")                                     # cp1252 log stays safe
+
+
+def test_template_chain_helper():
+    """§6.52's template_chain extraction: byte-identical criteria to the inline
+    classify_phase -> full-frame SMA-200 -> validate chain it replaced in scan/triggers/
+    positions, and None (not a raise) under classify_phase's 200-row floor."""
+    from src.stock_screener.cockpit.scan import template_chain
+    from src.stock_screener.minervini_screener.screening import (
+        calculate_sma, classify_phase, validate_minervini_trend_template)
+
+    df = _trigger_frame("2026-07-10", [100.0 + i * 0.3 for i in range(260)])
+    cp = float(df["Close"].iloc[-1])
+    chain = template_chain(df, cp)
+    assert chain is not None
+    tmpl, phase_info = chain
+    ref = validate_minervini_trend_template(cp, classify_phase(df, cp),
+                                            calculate_sma(df["Close"], 200))
+    assert tmpl["criteria_passed"] == ref["criteria_passed"]
+    assert tmpl["criteria_details"] == ref["criteria_details"]
+    assert phase_info.get("phase") is not None
+
+    # close defaults to the frame's last close
+    dflt = template_chain(df)
+    assert dflt is not None and dflt[0]["criteria_passed"] == tmpl["criteria_passed"]
+
+    assert template_chain(df.iloc[-150:]) is None           # short frame -> None
+    assert template_chain(None) is None
+
+
 def test_early_close_calendar_and_gate():
     """Item 17: NYSE half days (July 3 Mon-Thu, day after Thanksgiving, Dec 24 Mon-Thu).
     The session clock shortens to 09:30-13:00 (pace divisor + intraday cutoff), and the
@@ -3953,9 +4408,13 @@ def test_trigger_report_sidebar_renders():
             {"ticker": "CRSX", "status": "crossed", "judged_pivot": 100.0,
              "pivot_source": "judged", "close": 100.8, "volume_ratio_50": 0.7,
              "crossed": True},                             # §6.36 quiet drift above pivot
+            {"ticker": "PBKX", "status": "pullback", "judged_pivot": 100.0,
+             "pivot_source": "judged", "close": 100.8, "volume_ratio_50": 0.6,
+             "pullback": True, "crossed_earlier": True},   # §6.50 secondary-entry setup
             {"ticker": "NOPX", "status": "no_pivot"},      # sparse row must render too
         ],
-        "summary": {"n": 4, "triggered": ["TRGX"], "crossed": ["CRSX"], "extended": [],
+        "summary": {"n": 5, "triggered": ["TRGX"], "pullback": ["PBKX"],
+                    "crossed": ["CRSX"], "extended": [],
                     "stale": [], "earnings_soon": ["TRGX"], "no_data": [],
                     "no_pivot": ["NOPX"], "auto_frozen": []},
     }
@@ -3977,6 +4436,8 @@ def test_trigger_report_sidebar_renders():
     assert "pace 2.8" in rendered, "intraday volume pace not rendered"
     assert "CRSX" in rendered and "crossed" in rendered, "crossed name not rendered"
     assert "quiet drift" in rendered, "crossed explainer caption not rendered"
+    assert "PBKX" in rendered and "pullback" in rendered, "pullback name not rendered"
+    assert "secondary entry" in rendered, "pullback explainer caption not rendered"
 
 
 def test_freeze_warning_post_breakout():

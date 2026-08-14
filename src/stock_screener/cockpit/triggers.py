@@ -28,17 +28,21 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import pandas as pd
 
 from src.stock_screener.minervini_screener.screening import (
-    analyze_spy_trend, calculate_sma, calculate_stop_loss, classify_phase,
-    validate_minervini_trend_template)
+    analyze_spy_trend, calculate_stop_loss, classify_phase)
 from . import cache
 from .export import make_entry
-from .scan import _days_to_earnings, _entry_levels, detect_breakout_prior_high
+from .scan import (_days_to_earnings, _entry_levels, detect_breakout_prior_high,
+                   template_chain)
 from .vcp import detect_vcp
 
 TRIGGER_VOL_RATIO = 1.5     # Minervini's breakout confirmation (mirrors trade.HEAVY_VOL_RATIO)
 VOL_AVG_DAYS = 50           # ...vs the 50-day average volume, EXCLUDING today's bar
 VOL_CONTEXT_DAYS = 20       # the scan's window — reported as context, never the gate
 EXTENDED_PCT = 0.05         # close > pivot * 1.05 = past the buy zone ("don't chase")
+PULLBACK_BAND = 0.02        # +/-2% of pivot = the low-risk secondary-entry zone; below
+                            # -2% the base is failing, not pulling back
+DRY_VOL_RATIO = 0.8         # "dry" = clearly below the 50-day average volume -- the
+                            # quiet-side mirror of the 1.5x confirmation gate
 EARNINGS_SOON_DAYS = 21     # mirror the app's ⚠ earnings window
 MIN_ROWS_FOR_PIVOT = 200    # classify_phase needs >= 200 rows to compute a pivot
 TEMPLATE_CRITERIA = 8       # mirror ScanConfig.min_criteria — the scan table's hard gate
@@ -59,9 +63,11 @@ REPORT_SCHEMA = 1
 # NOT evaluated until it re-qualifies. "crossed" = above the frozen pivot WITHOUT
 # volume confirmation — the quiet drift the volume gate will never fire on. Rendered
 # loud so "it left without me" stops looking identical to "still basing"; NOT a buy
-# signal.
+# signal. "pullback" = a name that crossed earlier has retraced to within the band of
+# its frozen pivot on dry volume — the low-risk secondary-entry setup; an alert to
+# judge the chart, still not a buy signal.
 STATUSES = ("no_data", "untracked", "no_pivot", "stale", "extended", "triggered",
-            "crossed", "watch")
+            "pullback", "crossed", "watch")
 
 
 def _today_et(today=None) -> pd.Timestamp:
@@ -225,11 +231,19 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
 
     Returns the per-name report dict (see ``check_triggers``). ``status`` is a display
     convenience with precedence no_data -> untracked -> no_pivot -> stale -> extended ->
-    triggered -> crossed -> watch; the booleans stay authoritative. ``triggered`` requires close above the frozen
+    triggered -> pullback -> crossed -> watch; the booleans stay authoritative.
+    ``triggered`` requires close above the frozen
     pivot AND the 50-day volume gate AND a bar dated today (a Friday bar must not re-fire
     on a Monday-holiday run). ``crossed`` = close above the pivot WITHOUT the volume
     confirm — the quiet drift the trigger can't fire on (a name frozen post-breakout may
-    sit here forever); informational, never a buy signal. ``volume_pace`` (intraday context, NEVER the gate) is the
+    sit here forever); informational, never a buy signal. ``pullback`` = a prior settled
+    close beat the band top (pivot × (1+PULLBACK_BAND)) on/after ``date_added`` and
+    today's close is back within ±PULLBACK_BAND of the pivot on dry volume — extended
+    (+5%) and triggered (≥1.5×) can't co-occur with it, so only the pullback-over-crossed
+    ordering ever bites; stateless, so a triggered-then-retraced name alerts whether or
+    not the user bought it. ``volume_pace`` (intraday context, NEVER the ``triggered``
+    gate — but pullback's DRY read uses it so a morning's mechanically-low raw ratio
+    can't false-read as dry) is the
     50-day ratio divided by the fraction of the session elapsed at ``now`` — "is volume
     running hot for this time of day?"; equals the plain ratio after the close."""
     t = _today_et(today)
@@ -242,7 +256,7 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         "volume": None, "volume_ratio_50": None, "volume_ratio_20": None,
         "volume_ratio_50_scaled": None, "early_close": bool(_early_close(t)),
         "volume_pace": None, "volume_confirmed": None, "triggered": False,
-        "crossed": None, "untracked": False,
+        "crossed": None, "crossed_earlier": None, "pullback": None, "untracked": False,
         "extended": None, "pct_from_pivot": None, "earnings_in": None,
         "earnings_soon": None, "error": None,
     }
@@ -274,11 +288,10 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         # template-chain error fail OPEN (keep evaluating, never blind the check).
         if len(df) >= MIN_ROWS_FOR_PIVOT:
             try:
-                phase_info = classify_phase(df, close)
-                sma200 = calculate_sma(df["Close"], 200)
-                tmpl = validate_minervini_trend_template(close, phase_info, sma200)
-                out["untracked"] = bool(
-                    tmpl.get("criteria_passed", 0) < TEMPLATE_CRITERIA)
+                chain = template_chain(df, close)
+                if chain is not None:
+                    out["untracked"] = bool(
+                        chain[0].get("criteria_passed", 0) < TEMPLATE_CRITERIA)
             except Exception:
                 out["untracked"] = False
         if out["untracked"]:
@@ -310,9 +323,26 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         out["crossed"] = bool(out["close_above_pivot"] and not out["volume_confirmed"]
                               and not out["stale"])
 
+        prior = df["Close"].iloc[:-1]
+        da = pd.to_datetime(entry.get("date_added"), errors="coerce")
+        if pd.notna(da):
+            # Bars before the pivot decision don't count: a re-freeze resets the
+            # clock — a cross of the OLD level is not a cross of this one.
+            prior = prior[prior.index >= da.normalize()]
+        out["crossed_earlier"] = bool((prior > pivot * (1.0 + PULLBACK_BAND)).any())
+        dry = out["volume_pace"]
+        if dry is not None and out["early_close"]:
+            # Pace normalizes within the short session only; rescale to full-day terms
+            # (the inverse of the gate scaling) so a normal half day isn't read as dry.
+            dry = dry * (SESSION_LEN_MIN / _session_len_min(t))
+        out["pullback"] = bool(out["crossed_earlier"] and out["stale"] is False
+                               and abs(close / pivot - 1.0) <= PULLBACK_BAND
+                               and dry is not None and dry <= DRY_VOL_RATIO)
+
         out["status"] = ("stale" if out["stale"]
                          else "extended" if out["extended"]
                          else "triggered" if out["triggered"]
+                         else "pullback" if out["pullback"]
                          else "crossed" if out["crossed"]
                          else "watch")
     except Exception as e:                                # per-name failures never abort the run
@@ -360,6 +390,7 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
         # by STATUS, not the raw booleans: an extended name that also cleared price+volume
         # keeps triggered=True in its row, but the summary files it under "don't chase".
         "triggered": [n["ticker"] for n in names if n["status"] == "triggered"],
+        "pullback": [n["ticker"] for n in names if n["status"] == "pullback"],
         "crossed": [n["ticker"] for n in names if n["status"] == "crossed"],
         "extended": [n["ticker"] for n in names if n["status"] == "extended"],
         "stale": [n["ticker"] for n in names if n.get("stale")],
@@ -469,6 +500,7 @@ def format_report(report: dict) -> str:
                 + (f"  ERR: {n['error']}" if n.get("error") else ""))
     s = report.get("summary", {})
     lines.append(f"summary: {len(s.get('triggered', []))} triggered, "
+                 f"{len(s.get('pullback', []))} pullback, "
                  f"{len(s.get('crossed', []))} crossed, "
                  f"{len(s.get('extended', []))} extended, {len(s.get('stale', []))} stale, "
                  f"{len(s.get('no_pivot', []))} without a pivot, of {s.get('n', 0)}")
@@ -477,6 +509,11 @@ def format_report(report: dict) -> str:
                      f"volume confirmation -- a quiet drift is not a buy; wait for a "
                      f">={TRIGGER_VOL_RATIO}x volume close, or plan a pullback/secondary "
                      "entry off the pivot.")
+    if s.get("pullback"):
+        lines.append(f"PULLBACK ({', '.join(s['pullback'])}): crossed the frozen pivot "
+                     f"earlier, now back within {PULLBACK_BAND:.0%} of it on dry volume "
+                     f"(<= {DRY_VOL_RATIO}x) -- the low-risk secondary-entry zone; judge "
+                     "the chart, stop goes just below the pivot.")
     if s.get("untracked"):
         lines.append(f"UNTRACKED ({', '.join(s['untracked'])}): no longer passes the "
                      f"{TEMPLATE_CRITERIA}/8 trend template -- kept on the watchlist, but "

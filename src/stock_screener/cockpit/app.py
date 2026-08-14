@@ -23,7 +23,9 @@ import streamlit as st  # noqa: E402
 from streamlit.errors import StreamlitAPIException  # noqa: E402
 
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
+from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
+from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
@@ -344,6 +346,32 @@ def _invalidate_trade_plan() -> None:
     bump trade_build_n: the next Build bumps it and re-seeds the buy/stop widget keys."""
     st.session_state.pop("trade_plan", None)
     st.session_state.pop("trade_result", None)
+
+
+def _risk_guidance():
+    """Recent-form sizing guidance for the risk mode, memoized per (session, jr_nonce):
+    a failed journal read is remembered as None so an Alpaca outage costs ONE fetch
+    attempt per session — the trade panel must never re-block on every rerun. Only the
+    cockpit's own tagged trades drive the cockpit's sizing."""
+    n = st.session_state.get("jr_nonce", 1)
+    memo = st.session_state.get("risk_guide")
+    if memo is not None and memo.get("nonce") == n:
+        return memo["data"]
+    try:
+        fills = journal_cache.cached_fills(n)["fills"]
+        closed = [t for t in trade.build_trade_journal(fills)["closed"] if t["tagged"]]
+        data = trade.suggest_risk_pct(closed)
+    except Exception:
+        data = None
+    st.session_state["risk_guide"] = {"nonce": n, "data": data}
+    return data
+
+
+def _apply_risk_suggestion(v: float) -> None:
+    # on_click callbacks run before widgets instantiate, so writing the widget key here
+    # is safe; the same assignment mid-script would raise.
+    st.session_state["trade_amt_risk"] = float(v)
+    _invalidate_trade_plan()
 
 
 def _wl_add(ticker: str, judged_pivot=None, note: str = "", persist: bool = True) -> None:
@@ -669,7 +697,11 @@ with st.sidebar:
             _size_note = f"{int(_amount)} shares per name"
         else:                                    # Risk % to stop (Minervini position sizer)
             _mode = "risk"
-            _amount = st.number_input("Risk % of equity per trade", min_value=0.0, value=1.0,
+            # Seed-if-absent instead of value=: the "Use suggested" callback writes this
+            # key, and a widget carrying both a default and session state would warn.
+            if "trade_amt_risk" not in st.session_state:
+                st.session_state["trade_amt_risk"] = 1.0
+            _amount = st.number_input("Risk % of equity per trade", min_value=0.0,
                                       step=0.25, key="trade_amt_risk",
                                       on_change=_invalidate_trade_plan,
                                       help="A stop-out costs about this % of equity. Note a "
@@ -678,6 +710,17 @@ with st.sidebar:
                                            "12.5% position, which the 10% single-order cap "
                                            "clamps (realized risk then falls below target).")
             _size_note = f"{_amount:.2f}% of equity risked to each stop"
+            # Progressive exposure: recent form at the point of sizing (risk mode only —
+            # the journal pull is paid the first time this mode is opened per session).
+            _guide = _risk_guidance()
+            if _guide is None:
+                st.caption("journal unavailable — no sizing guidance")
+            else:
+                st.caption(f"📒 {_guide['reason']}")
+                if abs(_guide["risk_pct"] - float(_amount)) > 1e-9:
+                    st.button(f"Use suggested {_guide['risk_pct']:.2f}%",
+                              key="risk_apply", on_click=_apply_risk_suggestion,
+                              args=(_guide["risk_pct"],))
         _ot_label = st.radio(
             "Order type", ["Market", "Limit (no-chase cap)"], horizontal=True,
             key="trade_order_type", on_change=_invalidate_trade_plan,
@@ -992,8 +1035,9 @@ with st.sidebar:
         if _rep.get("all_stale"):
             st.caption("💤 No new bar on the report date (weekend/holiday?) — "
                        "no trigger can fire from a stale bar.")
-        _ticons = {"triggered": "🔔", "crossed": "↗", "extended": "⬆", "watch": "👀",
-                   "stale": "💤", "no_pivot": "⚠", "no_data": "⚠", "untracked": "🚫"}
+        _ticons = {"triggered": "🔔", "pullback": "↩", "crossed": "↗", "extended": "⬆",
+                   "watch": "👀", "stale": "💤", "no_pivot": "⚠", "no_data": "⚠",
+                   "untracked": "🚫"}
         for _n in _rep.get("names", []):
             _st = _n.get("status", "?")
             _t = _n.get("ticker", "?")
@@ -1028,6 +1072,10 @@ with st.sidebar:
             st.caption("↗ crossed = above its frozen pivot but NOT volume-confirmed — a "
                        "quiet drift is not a buy; wait for a ≥1.5× volume close, or plan "
                        "a pullback/secondary entry off the pivot.")
+        if _rep.get("summary", {}).get("pullback"):
+            st.caption("↩ pullback = crossed its frozen pivot earlier, now back within "
+                       "~2% of it on dry volume (≤0.8×) — the low-risk secondary entry; "
+                       "judge the chart, stop goes just below the pivot.")
         if _rep.get("summary", {}).get("untracked"):
             st.caption("🚫 untracked = fell out of the 8/8 trend template — kept on the "
                        "watchlist, but the trigger is not evaluated until it "

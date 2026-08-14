@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
 
@@ -35,14 +36,6 @@ st.markdown(
     "<style>.block-container{padding-top:4rem;padding-bottom:2rem;}"
     'div[data-testid="stVerticalBlock"]{gap:0.6rem;}</style>',
     unsafe_allow_html=True)
-
-
-@st.cache_data(show_spinner="Reading the order history…")
-def _cached_fills(nonce):
-    # Reference the MODULE attribute (trade.fetch_order_fills) so a test patch is honored; the
-    # nonce lets Refresh bust the cache. TradeUnavailable isn't cached, so a credentials fix +
-    # Refresh recovers.
-    return trade.fetch_order_fills()
 
 
 def _pct(v, signed=False, digits=1):
@@ -62,10 +55,10 @@ if "jr_nonce" not in st.session_state:
     st.session_state.jr_nonce = 1
 if st.button("🔄 Refresh"):
     st.session_state.jr_nonce += 1
-    _cached_fills.clear()
+    journal_cache.cached_fills.clear()
 
 try:
-    data = _cached_fills(st.session_state.jr_nonce)
+    data = journal_cache.cached_fills(st.session_state.jr_nonce)
 except trade.TradeUnavailable as e:
     st.warning(str(e))
     st.stop()

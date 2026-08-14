@@ -43,6 +43,19 @@ EARNINGS_CUSHION_MIN = 0.08  # min profit cushion to comfortably hold a position
 # Suggested-stop bases for the re-arm action; "auto" picks per position by its gain.
 STOP_BASES = ("auto", "initial", "breakeven", "sma50")
 
+# --- Progressive exposure (risk-% guidance off recent closed trades) ------------------------ #
+RISK_GUIDE_LAST_N = 10      # recent form, not lifetime stats, drives exposure
+RISK_GUIDE_MIN_TRADES = 5   # below this the sample says nothing — stay at base
+RISK_PCT_PILOT = 0.5        # cold numbers -> half the base unit until they improve
+RISK_PCT_BASE = 1.0         # the widget default — neutral evidence
+RISK_PCT_STRONG = 1.25      # proven recent edge -> press modestly, never double
+
+# --- Sell pillars (P1 breakout-holding thresholds; P2-P4 reuse constants above) ------------- #
+P1_CUSHION_PCT = 0.03       # real breakouts pay quickly — want ~3% by the cushion day
+P1_CUSHION_DAYS = 10        # trading days; no cushion by here -> sell into strength
+P1_STALL_DAYS = 15          # flat-to-red by here -> exit (calibration, not scripture)
+DECISIVE_BELOW_PIVOT_PCT = 0.02  # a close >2% below the pivot is decisive, not noise
+
 # The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which owns
 # the shared ALPACA_API_KEY/SECRET pair). Each paper account has its own key pair, so prefer
 # the dedicated "Minervini Trader" keys, falling back to the shared pair only if unset. The
@@ -252,6 +265,145 @@ def _trading_days_since(last, today) -> Optional[int]:
         return len(pd.bdate_range(a, b)) - 1
     except Exception:
         return None
+
+
+def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
+                 spy_note=None, today=None) -> dict:
+    """The sell doctrine's four thesis pillars for ONE holding. Pure, display-only.
+
+    Any pillar failing kills the trade — the stop is only the disaster floor for what
+    happens between checks. Reads SETTLED closes (``pos["last_close"]`` / ``pos["df"]``),
+    never the live print. Tolerates missing inputs everywhere: each pillar degrades to
+    ``unknown`` rather than raising, and a bare position dict (no new keys) yields four
+    unknowns. Returns ``{"P1".."P4": {"status": "ok"|"warn"|"fail"|"unknown",
+    "detail": str}}``.
+
+    * P1 breakout holding — needs ``entry_date`` (the journal open-episode's first buy;
+      tz-aware timestamps are read in exchange time) and ideally ``pivot`` (the
+      watchlist's frozen level; without it only the laggard clock runs). Day-0 close
+      back below the pivot, a decisive close below it (>2% or a 2nd consecutive), or a
+      close below the breakout bar's low fail outright; a stalled clock warns at day
+      ``P1_CUSHION_DAYS`` without a ``P1_CUSHION_PCT`` cushion and fails flat-to-red at
+      day ``P1_STALL_DAYS``.
+    * P2 template — STRICT: anything under 8/8 fails (user decision; expect occasional
+      one-day red flips when a knife-edge SMA criterion wobbles).
+    * P3 tape — the scan regime dict when available, else the trigger report's SPY-only
+      read (partial: ok/warn), else unknown.
+    * P4 earnings — inside the ``EARNINGS_SOON_DAYS`` window a loss or a thin cushion
+      (< ``EARNINGS_CUSHION_MIN``) fails; a real cushion still warns (trim to
+      hold-through size). ``earnings_in`` None reads unknown — "no report scheduled"
+      and "data missing" are indistinguishable upstream."""
+    import pandas as pd
+
+    def _pill(status, detail):
+        return {"status": status, "detail": detail}
+
+    # ---- P1: the breakout itself -------------------------------------------------- #
+    last_close = pos.get("last_close")
+    gain = pos.get("gain_pct")
+    df = pos.get("df")
+    if entry_date is None:
+        p1 = _pill("unknown", "no journal episode — refresh the Journal page")
+    else:
+        try:
+            e = pd.Timestamp(entry_date)
+            if e.tzinfo is not None:
+                e = e.tz_convert("America/New_York").tz_localize(None)
+            e = e.normalize()
+        except Exception:
+            e = None
+        if e is None:
+            p1 = _pill("unknown", "unreadable entry date")
+        else:
+            if today is None:
+                t_now = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
+            else:
+                t_now = pd.Timestamp(today).normalize()
+            day_n = _trading_days_since(e, t_now)
+            fails: List[str] = []
+            warns: List[str] = []
+            if pivot and last_close is not None:
+                if day_n == 0 and last_close < pivot:
+                    fails.append("Day-0 close back below the pivot — the breakout "
+                                 "never happened; sell next open")
+                if last_close < pivot * (1.0 - DECISIVE_BELOW_PIVOT_PCT):
+                    fails.append(f"closed {(1 - last_close / pivot) * 100:.1f}% below "
+                                 "the pivot — decisive break")
+                elif (df is not None and len(df) >= 2
+                        and float(df["Close"].iloc[-1]) < pivot
+                        and float(df["Close"].iloc[-2]) < pivot):
+                    fails.append("second consecutive close below the pivot")
+            if df is not None and len(df) and last_close is not None:
+                try:
+                    bo = df[df.index <= e]
+                    if len(bo):
+                        bo_low = float(bo["Low"].iloc[-1])
+                        if last_close < bo_low:
+                            fails.append("closed below the breakout bar's low — "
+                                         "no grace day")
+                except Exception:
+                    pass
+            if day_n is not None and gain is not None:
+                if day_n >= P1_STALL_DAYS and gain <= 0:
+                    fails.append(f"day {day_n} and flat-to-red — exit")
+                elif day_n >= P1_CUSHION_DAYS and gain < P1_CUSHION_PCT:
+                    warns.append(f"day {day_n}, no {P1_CUSHION_PCT * 100:.0f}% cushion "
+                                 "— sell into strength")
+            note = "" if pivot else " (no frozen pivot — clock only)"
+            if fails:
+                p1 = _pill("fail", "; ".join(fails) + note)
+            elif warns:
+                p1 = _pill("warn", "; ".join(warns) + note)
+            elif day_n is None and last_close is None:
+                p1 = _pill("unknown", "no bars to judge" + note)
+            else:
+                p1 = _pill("ok", f"day {day_n}, holding{note}")
+
+    # ---- P2: Stage-2 structure ---------------------------------------------------- #
+    tc = pos.get("template_criteria")
+    if tc is None:
+        p2 = _pill("unknown", "no template read (no bars)")
+    elif int(tc) >= 8:
+        p2 = _pill("ok", "8/8 trend template")
+    else:
+        p2 = _pill("fail", f"{int(tc)}/8 — template broken")
+
+    # ---- P3: the tape ------------------------------------------------------------- #
+    if isinstance(regime, dict) and regime.get("regime") is not None:
+        if regime.get("should_generate_buys"):
+            p3 = _pill("ok", str(regime.get("regime")))
+        else:
+            p3 = _pill("fail", f"{regime.get('regime')} — risk-off: demote yellow "
+                               "flags to red, laggards go first")
+    elif isinstance(spy_note, dict) and spy_note.get("trend"):
+        trend = str(spy_note["trend"])
+        if trend.lower().startswith("bull"):
+            p3 = _pill("ok", f"SPY {trend} (trigger-report read, no breadth)")
+        else:
+            p3 = _pill("warn", f"SPY {trend} (trigger-report read, no breadth)")
+    else:
+        p3 = _pill("unknown", "no scan or trigger report yet")
+
+    # ---- P4: the earnings window -------------------------------------------------- #
+    ei = pos.get("earnings_in")
+    if ei is None:
+        p4 = _pill("unknown", "no earnings date")
+    elif ei < 0:
+        p4 = _pill("ok", f"reported {-int(ei)}d ago")
+    elif ei > EARNINGS_SOON_DAYS:
+        p4 = _pill("ok", f"next report {int(ei)}d out")
+    elif gain is None:
+        p4 = _pill("warn", f"report in {int(ei)}d — cushion unknown")
+    elif gain < 0:
+        p4 = _pill("fail", f"report in {int(ei)}d with a loss — a loss is never "
+                           "carried into a report")
+    elif gain < EARNINGS_CUSHION_MIN:
+        p4 = _pill("fail", f"report in {int(ei)}d, cushion {gain * 100:.0f}% < "
+                           f"{EARNINGS_CUSHION_MIN * 100:.0f}% — trim/exit first")
+    else:
+        p4 = _pill("warn", f"report in {int(ei)}d — trim to hold-through size")
+
+    return {"P1": p1, "P2": p2, "P3": p3, "P4": p4}
 
 
 def _stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload) -> dict:
@@ -1018,6 +1170,16 @@ def fetch_positions() -> dict:
             gain_pct = (price - avg_entry) / avg_entry
         below_sma50 = bool(sma_50 is not None and last_close is not None and last_close < sma_50)
 
+        template_criteria = None
+        if df is not None and len(df):
+            try:
+                from .scan import template_chain
+                _chain = template_chain(df)
+                if _chain is not None:
+                    template_criteria = int(_chain[0].get("criteria_passed", 0))
+            except Exception:
+                template_criteria = None
+
         next_earnings, earnings_in = earn.get(sym, (None, None))
         pos = {
             "symbol": sym, "qty": qty, "avg_entry": avg_entry, "current_price": price,
@@ -1031,6 +1193,7 @@ def fetch_positions() -> dict:
             "gain_pct": gain_pct, "below_sma50": below_sma50,
             "next_earnings": next_earnings, "earnings_in": earnings_in,
             "stage": position_stage(gain_pct),
+            "template_criteria": template_criteria, "df": df,
         }
         pos["advisories"] = position_advisories(pos)
         positions.append(pos)
@@ -1324,6 +1487,41 @@ def journal_stats(closed: List[dict]) -> dict:
         "avg_hold_days_win": _mean([t["hold_days"] for t in wins]),
         "avg_hold_days_loss": _mean([t["hold_days"] for t in losses]),
     }
+
+
+def suggest_risk_pct(closed: List[dict], last_n: int = RISK_GUIDE_LAST_N) -> dict:
+    """Progressive-exposure risk-% suggestion from the LAST ``last_n`` closed trades. Pure.
+
+    Trades smaller after losses, earns the right to size up: batting ~.300 at the ~2:1
+    payoff the 7-8% stop discipline targets is roughly breakeven, so below that — or with
+    outright negative expectancy — the recent read is not working and the unit halves
+    (``RISK_PCT_PILOT``). Batting ≥ .500 with positive expectancy steps up ONE notch
+    (``RISK_PCT_STRONG`` — progressive exposure is stepwise, and the 10% single-order cap
+    still clamps position size). A thin sample (< ``RISK_GUIDE_MIN_TRADES``) stays at
+    ``RISK_PCT_BASE`` and never raises. ``closed`` rows come from
+    :func:`build_trade_journal`, which groups by SYMBOL — this function re-sorts by
+    ``exit_date`` so "last N" means the most recent, not an alphabetical accident.
+
+    Returns ``{risk_pct, reason, n, wins, losses, batting_avg, expectancy_pct}`` with the
+    numbers baked into ``reason`` for display at the point of sizing."""
+    recent = sorted(closed or [], key=lambda t: t["exit_date"])[-last_n:]
+    s = journal_stats(recent)
+    n, wins, losses = s["n"], s["wins"], s["losses"]
+    batting, expectancy = s["batting_avg"], s["expectancy_pct"]
+    base = {"n": n, "wins": wins, "losses": losses,
+            "batting_avg": batting, "expectancy_pct": expectancy}
+    if n < RISK_GUIDE_MIN_TRADES:
+        return {**base, "risk_pct": RISK_PCT_BASE,
+                "reason": (f"only {n} closed trade(s) — default sizing until the "
+                           "sample grows")}
+    exp_s = f"{expectancy * 100:+.1f}%"
+    form = f"last {n} closed: {wins}W/{losses}L, expectancy {exp_s}"
+    if expectancy <= 0 or batting < 0.3:
+        return {**base, "risk_pct": RISK_PCT_PILOT, "reason": f"{form} — pilot size"}
+    if batting >= 0.5:
+        return {**base, "risk_pct": RISK_PCT_STRONG,
+                "reason": f"{form} — press modestly"}
+    return {**base, "risk_pct": RISK_PCT_BASE, "reason": f"{form} — normal size"}
 
 
 def fetch_order_fills() -> dict:
