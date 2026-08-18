@@ -37,6 +37,14 @@ Architecture at a glance:
   `query1.finance.yahoo.com` / `query2.finance.yahoo.com`,
   `paper-api.alpaca.markets`, `data.sec.gov`, `www.sec.gov`, or
   `www.nasdaqtrader.com`.
+- **Container DNS on a Pi-hole host:** the host's `/etc/resolv.conf` likely
+  points at `127.0.0.1`; Docker strips loopback nameservers from containers
+  and silently falls back to 8.8.8.8 — the cockpit's traffic would bypass
+  Pi-hole, and would break entirely if the router blocks outside DNS. Fix:
+  uncomment the `dns:` lines in `docker-compose.yml` with the Pi's **LAN IP**
+  (e.g. `192.168.1.2`, never `127.0.0.1`). Verify after first start:
+  `docker compose run --rm trigger python -c "import socket; print(socket.gethostbyname('query1.finance.yahoo.com'))"`
+  should succeed, and the query should appear in the Pi-hole query log.
 
 ## 1. Install Docker
 

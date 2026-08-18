@@ -17,6 +17,11 @@ services:
       - HOME=/tmp
     volumes:
       - ./data:/app/data
+    # On a Pi-hole host, /etc/resolv.conf usually points at 127.0.0.1; Docker
+    # strips loopback nameservers from containers and silently falls back to
+    # 8.8.8.8 (bypasses Pi-hole; breaks if the router blocks outside DNS).
+    # Uncomment with the Pi's LAN IP to route container DNS through Pi-hole:
+    # dns: ["192.168.1.2"]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)"]
       interval: 60s
@@ -36,4 +41,5 @@ services:
       - HOME=/tmp
     volumes:
       - ./data:/app/data
+    # dns: ["192.168.1.2"]   # keep in sync with the app service's dns note
     command: ["python", "src/stock_screener/cockpit/eod_trigger.py"]
