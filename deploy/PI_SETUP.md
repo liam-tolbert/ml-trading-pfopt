@@ -52,7 +52,8 @@ Architecture at a glance:
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker pi        # then log out/in
 sudo systemctl enable --now docker
-docker compose version            # must be the v2 plugin ("Docker Compose version v2...")
+docker compose version            # any version is fine as long as this exact command works
+                                  # (the compose CLI plugin, v2+; NOT the legacy python docker-compose v1)
 ```
 
 ## 2. Clone the repo
