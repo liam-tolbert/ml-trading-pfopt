@@ -1,0 +1,42 @@
+# Whitelist (BuildKit): ignore everything, re-include the cockpit closure.
+# Keeps data/, .git, notebooks, docs/, the legacy ML pipeline, and the
+# sqlalchemy-trapped screener modules out of the image by construction.
+*
+
+!.streamlit/config.toml
+!deploy/requirements.txt
+
+# --- cockpit app ---
+!src/stock_screener/cockpit/**
+!src/stock_screener/minervini_sepa_system.md
+
+# --- vendored pure rule modules + attribution (the data/ layer stays out:
+#     its __init__ eager-loads sqlalchemy) ---
+!src/stock_screener/minervini_screener/__init__.py
+!src/stock_screener/minervini_screener/LICENSE
+!src/stock_screener/minervini_screener/PROVENANCE.md
+!src/stock_screener/minervini_screener/screening/__init__.py
+!src/stock_screener/minervini_screener/screening/phase_indicators.py
+!src/stock_screener/minervini_screener/screening/signal_engine.py
+!src/stock_screener/minervini_screener/screening/benchmark.py
+!src/stock_screener/minervini_screener/screening/indicators.py
+
+# --- trade panel dependency (lazy import in cockpit/trade.py) ---
+!src/portfolio_experimentation/alpaca_trader.py
+
+# --- test-gate closure: the suite imports backtest_daily.synthetic_provider,
+#     whose package __init__ eagerly pulls the engine chain ---
+!src/stock_screener/backtest_daily/**
+!src/stock_screener/momentum_lib.py
+!src/ml_stock_prediction/backtest_lib.py
+!tests/test_cockpit.py
+!tests/vcp_labels.py
+!tests/fixtures/vcp_bench/**
+
+# --- re-excludes (last match wins) ---
+src/stock_screener/backtest_daily/wrds_provider.py
+src/stock_screener/backtest_daily/ingest_wrds.py
+src/stock_screener/backtest_daily/run_backtest.py
+**/__pycache__
+**/*.pyc
+.env

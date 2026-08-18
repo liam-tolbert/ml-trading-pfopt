@@ -1,0 +1,19 @@
+# Early warning on push: the same offline suite the Pi's deploy gate runs
+# in-image. The Pi's local gate remains the backstop — this just surfaces red
+# before the Pi ever pulls.
+name: offline-tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r deploy/requirements.txt
+      - run: python tests/test_cockpit.py

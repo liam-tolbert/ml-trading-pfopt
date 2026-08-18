@@ -1,0 +1,2 @@
+*.sh            text eol=lf
+deploy/units/** text eol=lf

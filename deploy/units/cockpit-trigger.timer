@@ -1,0 +1,12 @@
+[Unit]
+Description=Half-hourly SEPA trigger checks, 09:30-16:30 ET weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 10..16:00,30:00 America/New_York
+# A missed intraday check is skipped, never replayed late.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

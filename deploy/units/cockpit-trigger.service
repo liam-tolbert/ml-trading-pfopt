@@ -1,0 +1,14 @@
+[Unit]
+Description=SEPA cockpit watchlist trigger check (one-shot container)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ml-trading-pfopt
+ExecStart=/usr/bin/docker compose run --rm trigger
+# A trigger run is a couple of batched yfinance calls; if it hangs past this,
+# kill it — the next half-hourly fire covers.
+TimeoutStartSec=900

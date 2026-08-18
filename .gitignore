@@ -1,5 +1,4 @@
 *.csv
-*.txt
 *.pkl
 *.xlsx
 *.parquet
@@ -7,8 +6,11 @@
 __pycache__/
 .ipynb_checkpoints/
 .env
-*.json
 *.md
-data/wrds/
+data/
+src/data/
 *.log
 *.bat
+!deploy/**
+!src/stock_screener/minervini_sepa_system.md
+!src/stock_screener/minervini_screener/PROVENANCE.md

@@ -1,0 +1,39 @@
+# Both services resolve cockpit:live and share ./data — the trigger writes
+# watchlist.json under the same merge-before-save protocol as the app, so they
+# must never point at different volumes. deploy/deploy.sh is the ONLY thing
+# that builds and retags cockpit:live (no build: key here — keeps the test
+# gate unbypassable).
+services:
+  app:
+    image: cockpit:live
+    container_name: cockpit-app
+    restart: unless-stopped
+    user: "1000:1000"
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      - TZ=America/New_York
+      - HOME=/tmp
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=5)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  # One-shot: fired by cockpit-trigger.timer as `docker compose run --rm
+  # trigger` (fresh container per fire, mirroring the old fresh-process-per-run
+  # semantics). The manual profile keeps `up -d` from ever starting it.
+  trigger:
+    image: cockpit:live
+    profiles: ["manual"]
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      - TZ=America/New_York
+      - HOME=/tmp
+    volumes:
+      - ./data:/app/data
+    command: ["python", "src/stock_screener/cockpit/eod_trigger.py"]

@@ -1,0 +1,14 @@
+[Unit]
+Description=SEPA cockpit pull-based deploy (git pull, test gate, promote/rollback)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ml-trading-pfopt
+ExecStart=/home/pi/ml-trading-pfopt/deploy/deploy.sh
+# First build + full test gate on a Pi 4 can take a while; never kill a deploy
+# mid-promotion.
+TimeoutStartSec=3600
