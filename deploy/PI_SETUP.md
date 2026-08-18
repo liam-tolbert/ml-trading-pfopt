@@ -50,7 +50,7 @@ Architecture at a glance:
 
 ```
 curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker pi        # then log out/in
+sudo usermod -aG docker $USER     # then log out/in
 sudo systemctl enable --now docker
 docker compose version            # any version is fine as long as this exact command works
                                   # (the compose CLI plugin, v2+; NOT the legacy python docker-compose v1)
@@ -58,12 +58,19 @@ docker compose version            # any version is fine as long as this exact co
 
 ## 2. Clone the repo
 
+As your normal login user, **without sudo** — a sudo clone makes the tree
+root-owned and every later step (scp, deploys, container writes) fails with
+permission denied:
+
 ```
-git clone https://github.com/liam-tolbert/ml-trading-pfopt.git /home/pi/ml-trading-pfopt
+git clone https://github.com/liam-tolbert/ml-trading-pfopt.git ~/ml-trading-pfopt
 ```
 
-(`deploy.sh` and the systemd units assume this exact path; edit them if you
-put it elsewhere.)
+`deploy.sh` locates the repo from its own path, so any home directory works.
+The systemd unit files contain a literal username/path — step 7 rewrites them
+for your user as they're installed. Never edit tracked files inside the
+checkout itself: a modified tracked file trips the deploy's dirty-checkout
+halt forever after.
 
 ## 3. Secrets
 
@@ -71,9 +78,11 @@ Copy the laptop's `.env` into the repo root on the Pi (from Git Bash on the
 laptop, in the repo root):
 
 ```
-scp .env pi@<pi>:/home/pi/ml-trading-pfopt/.env
-ssh pi@<pi> chmod 600 /home/pi/ml-trading-pfopt/.env
+scp .env <user>@<pi>:ml-trading-pfopt/.env
+ssh <user>@<pi> chmod 600 ml-trading-pfopt/.env
 ```
+
+(Remote paths without a leading `/` are relative to your home on the Pi.)
 
 Only the Alpaca paper keys are used (`ALPACA_API_KEY_MINERVINI` /
 `ALPACA_API_KEY_SECRET_MINERVINI`, plus the shared fallbacks) — but these are
@@ -85,8 +94,8 @@ Skipping this works but the first scan re-downloads ~2 years of history for
 ~4,200 tickers from the Pi's IP. From the laptop repo root:
 
 ```
-scp -r data/cockpit pi@<pi>:/home/pi/ml-trading-pfopt/data/
-scp data/tickers.txt pi@<pi>:/home/pi/ml-trading-pfopt/data/   # optional fallback universe
+scp -r data/cockpit <user>@<pi>:ml-trading-pfopt/data/
+scp data/tickers.txt <user>@<pi>:ml-trading-pfopt/data/   # optional fallback universe
 ```
 
 ~120 MB. Afterwards the app restart is instant (`last_scan.pkl`) and scans are
@@ -95,7 +104,7 @@ incremental top-ups.
 ## 5. First deploy (by hand)
 
 ```
-cd /home/pi/ml-trading-pfopt
+cd ~/ml-trading-pfopt
 ./deploy/deploy.sh
 ```
 
@@ -117,8 +126,13 @@ The report should print; `--no-write` guarantees nothing is persisted.
 
 ## 7. Install the timers
 
+The unit files ship with user `pi` and `/home/pi` paths; rewrite the
+**installed copies** for your actual user (the repo copies stay untouched —
+editing those would dirty the checkout and halt deploys):
+
 ```
 sudo cp deploy/units/* /etc/systemd/system/
+sudo sed -i "s|/home/pi|$HOME|g; s|^User=pi|User=$USER|" /etc/systemd/system/cockpit-*.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now cockpit-trigger.timer cockpit-deploy.timer
 systemctl list-timers 'cockpit-*'

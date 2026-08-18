@@ -6,7 +6,9 @@
 # checkout; app and trigger only ever run cockpit:live.
 set -euo pipefail
 
-REPO=/home/pi/ml-trading-pfopt
+# Self-locating: never edit this on the box — a locally modified tracked file
+# makes every future deploy halt at the dirty-checkout gate.
+REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
 exec 9>/tmp/cockpit-deploy.lock
