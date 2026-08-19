@@ -22,7 +22,7 @@ git fetch origin
 REMOTE=$(git rev-parse origin/main)
 DEPLOYED=$(docker image inspect cockpit:live \
              --format '{{index .Config.Labels "cockpit.sha"}}' 2>/dev/null || echo none)
-[ "$REMOTE" = "$DEPLOYED" ] && exit 0
+[ "$REMOTE" = "$DEPLOYED" ] && { echo "up to date: cockpit:live is already $DEPLOYED"; exit 0; }
 
 git checkout -q main
 git merge --ff-only origin/main   # divergence/force-push halts loudly here
