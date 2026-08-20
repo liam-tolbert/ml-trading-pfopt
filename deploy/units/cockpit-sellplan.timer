@@ -1,0 +1,12 @@
+[Unit]
+Description=Evening sell-plan build, 16:40 ET weekdays (after the settled trigger run)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 16:40:00 America/New_York
+# A missed evening plan is skipped, not replayed late — the pillars belong to the
+# settled close, and the morning executor refuses stale plans anyway.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

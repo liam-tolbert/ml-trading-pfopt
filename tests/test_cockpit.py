@@ -5509,6 +5509,201 @@ def test_scan_worker_progress_classification():
     assert "log" not in s, "the download log was removed — snapshot must not carry one"
 
 
+def test_build_sell_plan_matrix():
+    """§6.55 auto-sell planner: name-specific hard fails (P1/P4) plan a FULL exit on
+    the first failing settled close; P2 (strict template, known one-day SMA noise
+    flips) needs TWO consecutive failing closes fed by the prior plan's snapshot; P3
+    (tape) and every warn are report-only notes; unknowns never trade; a zero-qty row
+    snapshots but cannot order."""
+    from src.stock_screener.cockpit import sells
+
+    def pil(**kw):
+        base = {k: {"status": "ok", "detail": ""} for k in ("P1", "P2", "P3", "P4")}
+        for k, v in kw.items():
+            base[k] = {"status": v, "detail": f"{k} {v}"}
+        return base
+
+    poss = [{"symbol": s, "qty": 10} for s in
+            ("AAA", "BBB", "CCC", "DDD", "EEE", "FFF")] + [{"symbol": "GGG", "qty": 0}]
+    pillars = {"AAA": pil(P1="fail"),          # immediate
+               "BBB": pil(P4="fail"),          # immediate
+               "CCC": pil(P2="fail"),          # first close -> streak only
+               "DDD": pil(P3="fail"),          # report-only
+               "EEE": pil(P1="warn", P4="warn"),
+               "FFF": pil(P2="unknown"),
+               "GGG": pil(P1="fail")}          # qty 0 -> no order
+    plan = sells.build_sell_plan(poss, pillars, prior_plan=None, today="2026-08-18")
+    by = {o["symbol"]: o for o in plan["orders"]}
+    assert set(by) == {"AAA", "BBB"}, f"unexpected orders: {sorted(by)}"
+    assert by["AAA"]["qty"] == 10 and by["AAA"]["status"] == "planned"
+    assert any("P1 fail" in r for r in by["AAA"]["reasons"])
+    assert any("CCC" in n and "streak" in n for n in plan["notes"])
+    assert any("DDD" in n and "P3" in n for n in plan["notes"])
+    assert plan["snapshot"]["CCC"]["P2"]["status"] == "fail"
+    assert plan["snapshot"]["GGG"]["P1"]["status"] == "fail"
+    assert plan["date"] == "2026-08-18"
+
+    # Second consecutive P2 failing close, fed by the prior plan's snapshot -> order.
+    plan2 = sells.build_sell_plan([{"symbol": "CCC", "qty": 7}],
+                                  {"CCC": pil(P2="fail")},
+                                  prior_plan=plan, today="2026-08-19")
+    assert [o["symbol"] for o in plan2["orders"]] == ["CCC"]
+    assert plan2["orders"][0]["qty"] == 7
+    assert any("2nd consecutive" in r for r in plan2["orders"][0]["reasons"])
+
+
+def test_sell_plan_persistence_and_veto():
+    """§6.55 plan files: atomic dated save, newest-parseable load, ``before=`` excludes
+    same/later dates (the evening planner must read YESTERDAY's snapshot, never its own
+    same-day rerun), corrupt files skipped, and veto flips only still-planned orders."""
+    import tempfile
+    from src.stock_screener.cockpit import sells
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p1 = {"date": "2026-08-18", "generated_at": "x", "orders": [
+              {"symbol": "AAA", "qty": 10, "reasons": ["P1 fail: x"],
+               "status": "planned", "detail": ""}],
+              "snapshot": {}, "notes": [], "executed_at": None}
+        p2 = {"date": "2026-08-19", "generated_at": "x", "orders": [],
+              "snapshot": {"AAA": {"P2": {"status": "fail", "detail": ""}}},
+              "notes": [], "executed_at": None}
+        sells.save_sell_plan(p1, tmp)
+        sells.save_sell_plan(p2, tmp)
+        (Path(tmp) / "sell_plan_2026-08-20.json").write_text("{corrupt",
+                                                             encoding="utf-8")
+        assert sells.load_latest_sell_plan(tmp)["date"] == "2026-08-19"
+        assert sells.load_latest_sell_plan(tmp, before="2026-08-19")["date"] == \
+            "2026-08-18"
+        assert sells.load_latest_sell_plan(tmp, before="2026-08-18") is None
+
+        plan = sells.load_latest_sell_plan(tmp, before="2026-08-19")
+        assert sells.veto_order(plan, "AAA") is True
+        assert plan["orders"][0]["status"] == "vetoed"
+        assert sells.veto_order(plan, "AAA") is False       # already vetoed
+        assert sells.veto_order(plan, "ZZZ") is False       # no such order
+
+
+def test_execute_sell_plan_gates_and_idempotency():
+    """§6.55 morning executor: AUTOSELL gate (ships dark), stale-plan refusal (same-day
+    and two-sessions-old both refused), veto respected, a no-longer-held name skipped
+    (never shorted), qty clamped to CURRENT holdings, per-order failure recording, and
+    a rerun resubmits nothing (failed stays failed for a human — blind retry after an
+    ambiguous broker failure could double-sell)."""
+    from src.stock_screener.cockpit import sells
+
+    def mkplan():
+        return {"date": "2026-08-18", "generated_at": "x", "orders": [
+                {"symbol": "AAA", "qty": 10, "reasons": ["P1"], "status": "planned",
+                 "detail": ""},
+                {"symbol": "BBB", "qty": 5, "reasons": ["P4"], "status": "vetoed",
+                 "detail": ""},
+                {"symbol": "CCC", "qty": 5, "reasons": ["P4"], "status": "planned",
+                 "detail": ""},
+                {"symbol": "DDD", "qty": 8, "reasons": ["P1"], "status": "planned",
+                 "detail": ""}],
+                "snapshot": {}, "notes": [], "executed_at": None}
+
+    calls = []
+
+    def submit(sym, qty):
+        calls.append((sym, qty))
+        if sym == "DDD":
+            return {"status": "failed", "detail": "boom"}
+        return {"status": "submitted", "detail": "ok"}
+
+    held = {"AAA": 6, "DDD": 8}              # AAA shrank; CCC gone; BBB vetoed
+    s = sells.execute_sell_plan(mkplan(), submit=submit, held_by_symbol=held,
+                                today="2026-08-19", enabled=False)
+    assert s["status"] == "disabled" and not calls
+    s = sells.execute_sell_plan(mkplan(), submit=submit, held_by_symbol=held,
+                                today="2026-08-20", enabled=True)
+    assert s["status"] == "stale" and not calls
+    s = sells.execute_sell_plan(mkplan(), submit=submit, held_by_symbol=held,
+                                today="2026-08-18", enabled=True)
+    assert s["status"] == "stale" and not calls
+
+    plan = mkplan()
+    s = sells.execute_sell_plan(plan, submit=submit, held_by_symbol=held,
+                                today="2026-08-19", enabled=True)
+    assert calls == [("AAA", 6), ("DDD", 8)], f"unexpected submits: {calls}"
+    assert s["status"] == "partial"
+    assert s["submitted"] == ["AAA"] and s["failed"] == ["DDD"]
+    assert s["vetoed"] == ["BBB"] and s["skipped"] == ["CCC"]
+    by = {o["symbol"]: o for o in plan["orders"]}
+    assert by["AAA"]["status"] == "submitted" and by["DDD"]["status"] == "failed"
+    assert by["CCC"]["status"] == "skipped" and "no longer held" in by["CCC"]["detail"]
+    assert plan["executed_at"]
+
+    calls.clear()
+    s2 = sells.execute_sell_plan(plan, submit=submit, held_by_symbol=held,
+                                 today="2026-08-19", enabled=True)
+    assert calls == [] and s2["submitted"] == []
+
+
+def test_positions_page_sell_plan_veto():
+    """§6.55 page surface: the evening plan renders with its reasons and the disarmed
+    note (AUTOSELL unset), and the Veto button rewrites the plan file on disk
+    (planned -> vetoed) so the morning executor will skip the order."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_positions_page_sell_plan_veto (AppTest unavailable: {e})")
+        return
+    import os
+    import tempfile
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import cache, journal_cache, sells, trade
+
+    offline = {
+        "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
+                    "using_dedicated": True, "positions_count": 1,
+                    "total_unrealized_pl": 10.0},
+        "positions": [{
+            "symbol": "AAA", "qty": 10, "avg_entry": 100.0, "current_price": 101.0,
+            "market_value": 1010.0, "cost_basis": 1000.0, "unrealized_pl": 10.0,
+            "unrealized_plpc": 0.01, "lastday_price": 101.0, "current_stop": 92.0,
+            "has_stop": True, "sma_50": 95.0, "last_close": 101.0, "volume_ratio": 1.0,
+            "gain_pct": 0.01, "below_sma50": False, "next_earnings": None,
+            "earnings_in": None, "stage": "fresh", "advisories": [],
+            "template_criteria": 8,
+        }],
+    }
+    plan = {"date": "2026-08-18", "generated_at": "x",
+            "orders": [{"symbol": "AAA", "qty": 10,
+                        "reasons": ["P1 fail: day-0 close below the pivot"],
+                        "status": "planned", "detail": ""}],
+            "snapshot": {}, "notes": [], "executed_at": None}
+
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
+    journal_cache.cached_fills.clear()
+    with tempfile.TemporaryDirectory() as _tmp:
+        wl = Path(_tmp) / "watchlist.json"
+        trg = Path(_tmp) / "triggers"
+        sells.save_sell_plan(plan, trg)
+        with patch.object(trade, "fetch_positions", return_value=offline), \
+                patch.object(trade, "fetch_order_fills",
+                             side_effect=trade.TradeUnavailable("down")), \
+                patch.object(cache, "WATCHLIST_JSON", wl), \
+                patch.object(cache, "TRIGGERS_DIR", trg), \
+                patch.dict(os.environ, {"AUTOSELL": ""}):
+            at = AppTest.from_file(page, default_timeout=60)
+            at.run()
+            assert not at.exception, f"positions page raised: {at.exception}"
+            rendered = " ".join(str(getattr(m, "value", ""))
+                                for m in list(at.markdown)
+                                + list(getattr(at, "caption", [])))
+            assert "Planned auto-sells" in rendered, "plan section missing"
+            assert "P1 fail" in rendered, "order reason missing"
+            assert "not armed" in rendered, "disarmed note missing"
+            btns = [b for b in at.button if b.key == "veto_AAA_2026-08-18"]
+            assert btns, "veto button missing"
+            btns[0].click()
+            at.run()
+            assert not at.exception, f"veto rerun raised: {at.exception}"
+        saved = sells.load_latest_sell_plan(trg)
+    assert saved["orders"][0]["status"] == "vetoed", saved["orders"][0]
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items())
              if k.startswith("test_") and callable(v)]

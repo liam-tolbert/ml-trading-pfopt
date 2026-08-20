@@ -152,6 +152,28 @@ settled-close report the daily 16:35 ritual reads). Deploy fires: 17:30 ET
 weekdays + Sat 10:00 ET — always outside market hours, so a mid-day push never
 changes trading behavior mid-session.
 
+### Auto-sell timers (optional — P1-P4 sell automation)
+
+Two more units automate the sell doctrine: `cockpit-sellplan.timer` (16:40 ET
+weekdays) evaluates the sell pillars on every holding and writes a *plan*;
+`cockpit-sellexec.timer` (09:25 ET weekdays) submits any still-planned full
+exits so they fill at the open. Between the two, the Positions page shows the
+plan with per-order **Veto** buttons — your overnight veto window.
+
+```
+sudo systemctl enable --now cockpit-sellplan.timer cockpit-sellexec.timer
+```
+
+The morning executor is **disarmed by default**: it does nothing until you add
+`AUTOSELL=1` to `.env`. Run order of a first test: let one evening plan
+generate, check it on the Positions page, then
+`docker compose run --rm trigger python src/stock_screener/cockpit/sell_cli.py execute --dry-run`
+before arming. What it will and won't do: only name-specific hard fails
+(P1 breakout broken / P2 template broken two closes running / P4 earnings
+without cushion) sell, always the full position; P3 (market regime) and all
+warns are report-only; vetoed orders are never submitted; a stale plan
+(evaluation older than the last session) is refused.
+
 ## 8. CUTOVER (do this only after steps 5–7 succeed)
 
 On the **laptop**:

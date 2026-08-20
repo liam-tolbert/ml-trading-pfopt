@@ -1,0 +1,12 @@
+[Unit]
+Description=Morning sell-plan execution, 09:25 ET weekdays (orders queue for the open)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:25:00 America/New_York
+# A missed morning fire must NOT execute late in the session — the plan was priced at
+# yesterday's close and the doctrine is next-OPEN execution only.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

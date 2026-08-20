@@ -1,0 +1,12 @@
+[Unit]
+Description=SEPA cockpit evening sell plan (P1-P4 pillars -> tonight's plan file)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ml-trading-pfopt
+ExecStart=/usr/bin/docker compose run --rm trigger python src/stock_screener/cockpit/sell_cli.py plan
+TimeoutStartSec=900

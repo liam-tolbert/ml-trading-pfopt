@@ -26,6 +26,7 @@ import streamlit as st  # noqa: E402
 from src.stock_screener.cockpit import cache  # noqa: E402
 from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
+from src.stock_screener.cockpit import sells  # noqa: E402 (evening sell plan + veto)
 from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
 from src.stock_screener.cockpit import triggers  # noqa: E402 (latest report = SPY fallback)
 from src.stock_screener.cockpit.export import load_watchlist  # noqa: E402
@@ -92,6 +93,17 @@ def _do_sell(symbol, qty):
     st.session_state.pop("sell_pending", None)
     st.session_state["pos_nonce"] = st.session_state.get("pos_nonce", 1) + 1
     _cached_positions.clear()
+
+
+def _do_veto(symbol):
+    """Veto callback: re-read the plan from disk (the evening CLI or another session may
+    have rewritten it since this render), mark the order vetoed, save atomically."""
+    try:
+        p = sells.load_latest_sell_plan()
+        if p and sells.veto_order(p, symbol):
+            sells.save_sell_plan(p)
+    except Exception as e:
+        st.session_state["veto_error"] = str(e)
 
 
 def _earnings_cell(p) -> str:
@@ -243,6 +255,32 @@ st.dataframe(pd.DataFrame(rows), column_config=col_config, column_order=col_orde
 st.caption("Sell pillars — P1 breakout holding · P2 trend template · P3 tape · "
            "P4 earnings. Any ❌ kills the thesis; the stop is only the disaster floor "
            "between checks. — = not enough data (journal / frozen pivot / scan).")
+
+# --- Planned auto-sells: evening plan → overnight veto → morning submit --------------------- #
+_plan = None
+try:
+    _plan = sells.load_latest_sell_plan()
+except Exception:
+    _plan = None
+if _plan and _plan.get("orders"):
+    st.markdown("#### 🌙 Planned auto-sells")
+    _armed = ("**ARMED** — still-planned orders submit at ~9:25 ET"
+              if sells.autosell_enabled() else "not armed (`AUTOSELL` unset) — plan only")
+    st.caption(f"Evening plan **{_plan.get('date')}** · morning submit {_armed}. "
+               "Veto anything you disagree with before the open; a vetoed order is never "
+               "submitted (its stop stays armed as your floor).")
+    _OICON = {"planned": "🕗", "vetoed": "🚫", "submitted": "✅",
+              "failed": "⚠️", "skipped": "—"}
+    for o in _plan["orders"]:
+        c1, c2 = st.columns([5, 1])
+        c1.caption(f"{_OICON.get(o.get('status'), '•')} **{o['symbol']}** ×{o['qty']} — "
+                   f"{o.get('status')} · " + "; ".join(o.get("reasons", []))
+                   + (f" · {o['detail']}" if o.get("detail") else ""))
+        if o.get("status") == sells.ORDER_PLANNED:
+            c2.button("Veto", key=f"veto_{o['symbol']}_{_plan.get('date')}",
+                      width="stretch", on_click=_do_veto, args=(o["symbol"],))
+    if st.session_state.get("veto_error"):
+        st.error(f"Veto failed: {st.session_state.pop('veto_error')}")
 
 # --- Stop management: basis + per-row editable stops + re-arm -------------------------------- #
 st.markdown("#### 🛡️ Stops & sells")
