@@ -126,17 +126,18 @@ The report should print; `--no-write` guarantees nothing is persisted.
 
 ## 7. Install the timers
 
-The unit files ship with user `pi` and `/home/pi` paths; rewrite the
-**installed copies** for your actual user (the repo copies stay untouched —
-editing those would dirty the checkout and halt deploys):
+One command installs and arms everything — it copies every `deploy/units/`
+unit, rewrites the shipped `pi` user/home for **your** user in the installed
+copies (the repo copies stay untouched — editing those would dirty the
+checkout and halt deploys), removes any cockpit unit the repo no longer ships,
+reloads systemd, and (re)enables + restarts every timer:
 
 ```
-sudo cp deploy/units/* /etc/systemd/system/
-sudo sed -i "s|/home/pi|$HOME|g; s|^User=pi|User=$USER|" /etc/systemd/system/cockpit-*.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now cockpit-trigger.timer cockpit-deploy.timer
-systemctl list-timers 'cockpit-*'
+sudo ./deploy/install-units.sh
 ```
+
+Re-run it any time the units change — it's idempotent, and `deploy.sh` prints
+a reminder with this exact command whenever a deploy touched the unit files.
 
 Sanity-check the schedules (they are written in ET and stay correct across
 DST):
@@ -160,11 +161,9 @@ weekdays) evaluates the sell pillars on every holding and writes a *plan*;
 exits so they fill at the open. Between the two, the Positions page shows the
 plan with per-order **Veto** buttons — your overnight veto window.
 
-```
-sudo systemctl enable --now cockpit-sellplan.timer cockpit-sellexec.timer
-```
-
-The morning executor is **disarmed by default**: it does nothing until you add
+`install-units.sh` above installs and enables these two timers along with the
+rest — that's safe, because the morning executor is **disarmed by default**:
+it does nothing until you add
 `AUTOSELL=1` to `.env`. Run order of a first test: let one evening plan
 generate, check it on the Positions page, then
 `docker compose run --rm trigger python src/stock_screener/cockpit/sell_cli.py execute --dry-run`

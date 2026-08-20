@@ -66,4 +66,13 @@ done
 docker image prune -f >/dev/null
 docker builder prune -f --keep-storage=2GB >/dev/null 2>&1 || true
 
+# systemd units can't be applied from here (needs root; deliberately not passwordless
+# sudo for repo-sourced code) — detect a change and tell the human exactly what to run.
+if [ "$DEPLOYED" != "none" ] \
+        && ! git diff --quiet "$DEPLOYED..$SHA" -- deploy/units deploy/install-units.sh \
+        2>/dev/null; then
+    echo "NOTE: systemd units changed in this deploy — apply them with:"
+    echo "      sudo $REPO/deploy/install-units.sh"
+fi
+
 echo "DEPLOYED $SHA (previous: $DEPLOYED)"
