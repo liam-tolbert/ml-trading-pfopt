@@ -421,10 +421,10 @@ def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
     Every scan ALWAYS tops up the latest bars (``max_age_days=0.0`` — the same semantics
     as the EOD trigger and freshen_prices): a cache with today's bar re-fetches just the
     latest bars, an older cache fetches only its missing days, and only cold names (or a
-    genuine split/dividend re-baseline) pay the full 2y download. The old 30-minute
-    freshness window is GONE — scan_worker's process-wide refresh throttle
-    (REFRESH_TTL_SECONDS) is now the only fetch-rate limiter, so a scan that runs IS
-    fresh by construction. Zero network still happens when no market session has elapsed
+    genuine split/dividend re-baseline) pay the full 2y download. There is no freshness
+    window here — scan RATE is governed entirely by the callers (scan_worker's schedule
+    REFRESH_SCHEDULE_ET + the explicit Re-scan buttons), so a scan that runs IS fresh
+    by construction. Zero network still happens when no market session has elapsed
     since the cache was written (``data_feed._cache_settled`` — evenings/weekends/
     pre-open: no new bar can exist). ``force=True`` is the explicit full-re-download
     escape hatch (the app's Advanced ⟳ button) and bypasses even that."""

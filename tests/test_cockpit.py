@@ -5206,42 +5206,48 @@ def test_worker_serves_stale_while_refreshing():
         assert store.get(w._key2()).result == {"scan": 2}
 
 
-def test_scan_store_refresh_throttle():
-    """try_claim_refresh grants at most one claim per TTL, only once an entry is at
-    least TTL old; claims are recorded on START so a failed/slow refresh can't
-    retry-loop. Fake clock — no real time passes. (The worker's adopt check reads the
-    SAME store clock via ResultStore.now(), so fake values never meet real monotonic —
-    R2-8.)"""
-    from src.stock_screener.cockpit.scan_worker import ResultStore
+def test_scan_refresh_schedule():
+    """Background refreshes are SCHEDULED (Mon-Fri 16:05 ET + Sat 10:30 ET), never
+    interaction-driven: _next_fire picks the next slot STRICTLY after now, and
+    _scheduled_refresh publishes through the store under the serial lock — a raising
+    runner returns False and leaves the previous entry intact."""
+    import pandas as pd
+    from src.stock_screener.cockpit import scan_worker as sw
 
-    now = {"t": 1000.0}
-    store = ResultStore(ttl=1800.0, clock=lambda: now["t"])
-    key = ("full_us", 8)
+    def at(s):
+        return pd.Timestamp(s, tz="America/New_York")
 
-    assert store.try_claim_refresh(key) is False     # no entry yet
-    store.put(key, {"scan": 1})
-    assert store.try_claim_refresh(key) is False     # entry fresh
-    now["t"] += 1799.0
-    assert store.try_claim_refresh(key) is False     # one second short
-    now["t"] += 2.0
-    assert store.try_claim_refresh(key) is True      # stale -> claim granted
-    assert store.try_claim_refresh(key) is False     # claimed -> locked for a TTL
-    now["t"] += 1801.0
-    assert store.try_claim_refresh(key) is True      # window reopens
+    assert sw._next_fire(at("2026-08-19 12:00")) == at("2026-08-19 16:05")  # Wed noon
+    assert sw._next_fire(at("2026-08-19 16:05")) == at("2026-08-20 16:05")  # strict >
+    assert sw._next_fire(at("2026-08-21 17:00")) == at("2026-08-22 10:30")  # Fri -> Sat
+    assert sw._next_fire(at("2026-08-22 11:00")) == at("2026-08-24 16:05")  # Sat -> Mon
+    assert sw._next_fire(at("2026-08-23 09:00")) == at("2026-08-24 16:05")  # Sun -> Mon
+
+    store = sw.ResultStore()
+    key = (sw.DEFAULT_UNIVERSE, sw.DEFAULT_MIN_CRITERIA)
+    assert sw._scheduled_refresh(store=store, runner=lambda: {"scan": "sched"}) is True
+    assert store.get(key).result == {"scan": "sched"}
+
+    def boom():
+        raise RuntimeError("boom")
+
+    assert sw._scheduled_refresh(store=store, runner=boom) is False
+    assert store.get(key).result == {"scan": "sched"}, \
+        "a failed scheduled refresh must not clobber the served result"
 
 
-def test_rescan_bypasses_throttle_and_updates_store():
-    """A manual rescan always runs (never satisfied by the store) and stamps the claim,
-    so a FAILED manual rescan doesn't get shadow-retried by the background throttle a
-    moment later; ensure_started right after sees the stamped claim + the error key and
-    starts nothing."""
+def test_rescan_always_runs_and_no_interaction_refresh():
+    """A manual rescan always re-scans (never satisfied by the store's fresh entry); a
+    FAILED rescan keeps serving the stale result; and ensure_started NEVER starts a
+    background refresh on interaction — not on a fresh entry, not on an old one, not
+    after an error. Recovery paths are the Retry button and the process scheduler
+    only."""
     from unittest.mock import patch
 
     from src.stock_screener.cockpit import scan as scanmod
     from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
 
-    now = {"t": 1000.0}
-    store = ResultStore(ttl=1800.0, clock=lambda: now["t"])
+    store = ResultStore()
     calls = {"n": 0}
     fail = {"on": False}
 
@@ -5256,21 +5262,19 @@ def test_rescan_bypasses_throttle_and_updates_store():
         w.ensure_started()
         assert w.wait(grace=10.0) == {"scan": 1} and calls["n"] == 1
 
-        now["t"] += 3600.0                           # entry now VERY stale
+        w.ensure_started()                           # done result -> nothing starts
+        assert calls["n"] == 1, "interaction must never refresh a done result"
+
         fail["on"] = True
         w.request_rescan()                           # manual -> runs (and fails)
         w._thread.join(10)
         assert calls["n"] == 2 and w.snapshot()["status"] == "error"
+        assert w.latest() == {"scan": 1}, "failed rescan keeps serving stale"
 
-        w.ensure_started()                           # claim stamped by the rescan ->
-        w._thread.join(10)                           # (dead rescan thread; nothing new starts)
-        assert calls["n"] == 2, "no shadow auto-refresh right after a manual rescan"
-
-        now["t"] += 1801.0                           # a full TTL later the throttle
-        fail["on"] = False                           # window reopens legitimately
-        w.ensure_started()
+        fail["on"] = False
+        w.ensure_started()                           # error key -> no auto-retry, ever
         w._thread.join(10)
-        assert calls["n"] == 3 and w.wait(grace=10.0) == {"scan": 3}
+        assert calls["n"] == 2, "interaction must never retry a failed run"
 
 
 def test_save_trigger_report_atomic():
@@ -5306,9 +5310,11 @@ def test_save_trigger_report_atomic():
 def test_scan_store_persists_and_reloads():
     """A completed scan is pickled (atomically) and a NEW store — a server restart —
     serves it on the first get: same result, ORIGINAL completed_wall (the 'data as of'
-    display), and maximally-stale completed_mono so the TTL throttle grants an immediate
-    background refresh, while an in-flight run's adopt check can never be satisfied by
-    it. Corrupt / wrong-version / wrong-key pickles fail open to a cold start."""
+    display), and completed_mono = -inf so an in-flight run's adopt check can never be
+    satisfied by it. ensure_started serves the loaded entry WITHOUT starting any
+    network refresh (the process scheduler owns refreshes now — restarts must not
+    trigger a download per §6.56). Corrupt / wrong-version / wrong-key pickles fail
+    open to a cold start."""
     import pickle as _pickle
     import tempfile
 
@@ -5330,18 +5336,15 @@ def test_scan_store_persists_and_reloads():
         assert ent2 is not None and ent2.result == {"scan": "persisted"}
         assert ent2.completed_wall == ent1.completed_wall     # original scan time kept
         assert ent2.completed_mono == float("-inf")           # never adoptable mid-run
-        assert s2.try_claim_refresh(key) is True, \
-            "a loaded (stale-by-definition) entry must grant an immediate refresh"
 
-        # the worker end-to-end: a fresh session adopts the loaded entry instantly
+        # the worker end-to-end: a fresh session adopts the loaded entry instantly and
+        # starts NOTHING (run_scan is deliberately unpatched — a network refresh here
+        # would be the exact page-entry download the scheduler change removed).
         s3 = ResultStore(persist_path=pkl)
         w = ScanWorker(store=s3)
         assert w.latest() is None                             # nothing adopted yet
-        # ensure_started adopts AND (claim granted) kicks a refresh; we only assert the
-        # instant serve here — run_scan isn't patched, so block the refresh from running
-        # by pre-claiming the TTL slot.
-        s3.stamp_claim(key)
         w.ensure_started()
+        assert w._thread is None, "page entry must never start a network refresh"
         assert w.latest() == {"scan": "persisted"}
         assert w.result_if_ready() == {"scan": "persisted"}
 
@@ -5376,7 +5379,7 @@ def test_scan_store_persists_and_reloads():
 def test_pending_force_survives_adoption():
     """R2-6: a Full-re-download armed while another run is in flight must RUN once the
     thread dies — adoption of another session's newer store result must not swallow it
-    (and it must not detonate later inside a TTL refresh). The forced run's result wins;
+    (and it must not detonate later inside a scheduled refresh). The forced run's result wins;
     the flag is consumed."""
     import threading as th
     from unittest.mock import patch
@@ -5418,32 +5421,19 @@ def test_pending_force_survives_adoption():
     assert w._pending_force is False
 
 
-def test_worker_clock_coherence_refresh_rescans():
-    """R2-8 direction 1: with a fake store clock far ABOVE real monotonic (1e9), the OLD
-    mixed-clock adopt check wrongly adopted the stale entry on EVERY machine — the TTL
-    refresh must actually re-scan."""
-    from unittest.mock import patch
+def test_scheduled_refresh_always_rescans():
+    """The scheduled refresh must RE-SCAN even when the store already holds an entry —
+    it exists to advance the data, and adopting its own entry would make it a no-op
+    forever. (Replaces the old R2-8 direction-1 TTL test: with scheduling, the refresh
+    path never consults the adopt check at all, so the mixed-clock hazard can't reach
+    it; direction 2 — queued-worker adoption — still pins the store-clock coherence.)"""
+    from src.stock_screener.cockpit import scan_worker as sw
 
-    from src.stock_screener.cockpit import scan as scanmod
-    from src.stock_screener.cockpit.scan_worker import ResultStore, ScanWorker
-
-    now = {"t": 1e9}
-    store = ResultStore(ttl=1800.0, clock=lambda: now["t"])
-    calls = {"n": 0}
-
-    def fake(*a, **kw):
-        calls["n"] += 1
-        return {"scan": calls["n"]}
-
-    with patch.object(scanmod, "run_scan", side_effect=fake):
-        w = ScanWorker(store=store)
-        w.ensure_started()
-        assert w.wait(grace=10.0) == {"scan": 1}
-        now["t"] += 3600.0                           # entry stale -> TTL refresh fires
-        w.ensure_started()
-        w._thread.join(10)
-    assert calls["n"] == 2 and w.wait(grace=10.0) == {"scan": 2}, \
-        "the refresh must re-scan, not adopt its own stale entry"
+    store = sw.ResultStore(clock=lambda: 1e9)         # extreme clock: must not matter
+    key = (sw.DEFAULT_UNIVERSE, sw.DEFAULT_MIN_CRITERIA)
+    store.put(key, {"scan": 1})
+    assert sw._scheduled_refresh(store=store, runner=lambda: {"scan": 2}) is True
+    assert store.get(key).result == {"scan": 2}, "refresh must replace, never adopt"
 
 
 def test_worker_clock_coherence_queued_adopts():

@@ -13,6 +13,11 @@ AppTest sessions stay isolated and a browser refresh starts clean. The actual ``
 call is serialized process-wide (``_SCAN_SERIAL``) so two sessions of the LAN app (laptop +
 phone) can't race yfinance or the CSV price caches with duplicate concurrent downloads.
 
+Background refreshes are driven by a process-wide SCHEDULER (``REFRESH_SCHEDULE_ET``),
+never by page interaction: entering or clicking a page serves the stored result and
+downloads nothing. The only network paths are the true cold start, the explicit
+Re-scan/full-re-download buttons, and the scheduled refresh itself.
+
 ``scan.run_scan`` is resolved at call time inside the thread, so a test's
 ``patch.object(scan, "run_scan", ...)`` is honored exactly like the old inline call.
 """
@@ -36,9 +41,12 @@ DEFAULT_MIN_CRITERIA = 8
 
 _SCAN_SERIAL = threading.Lock()    # process-wide: one real scan at a time, ever
 
-# The one-per-this-many-seconds cap on BACKGROUND refreshes (user spec: at most one
-# every half hour, process-wide). Explicit Re-scan / full-re-download always bypass.
-REFRESH_TTL_SECONDS = 30 * 60
+# Background refreshes are SCHEDULED, never interaction-driven: on the always-on
+# server every page visit after a quiet half hour was kicking a multi-minute universe
+# sweep. (weekday-set, hour, minute) in America/New_York — Mon-Fri 16:05 gives the
+# 16:10 close-of-day ritual a near-settled read; Sat 10:30 feeds the weekend hunt.
+# Explicit Re-scan / full-re-download always run immediately regardless.
+REFRESH_SCHEDULE_ET = (({0, 1, 2, 3, 4}, 16, 5), ({5}, 10, 30))
 
 # The last completed ScanResult, pickled so a SERVER RESTART serves it instantly (the
 # store itself is process memory). Loaded lazily on the first miss; any load failure
@@ -69,12 +77,9 @@ class ResultStore:
     process identity). Streamlit-free and clock-injectable so unit tests run without a
     browser session or real sleeps."""
 
-    def __init__(self, ttl: float = REFRESH_TTL_SECONDS, clock=time.monotonic,
-                 persist_path=None) -> None:
+    def __init__(self, clock=time.monotonic, persist_path=None) -> None:
         self._lock = threading.Lock()
         self._entries: Dict[tuple, StoreEntry] = {}
-        self._last_claim: Dict[tuple, float] = {}
-        self.ttl = ttl
         self._clock = clock
         self._persist_path = persist_path       # None (unit tests) = no disk I/O at all
         self._load_attempted = False            # one lazy load per process, success or not
@@ -91,9 +96,9 @@ class ResultStore:
         """Adopt the pickled last scan for ``key`` (caller holds ``_lock``). The entry's
         completed_wall is the ORIGINAL scan time ("data as of yesterday 18:30");
         completed_mono is -inf — monotonic clocks don't survive a restart, and -inf makes
-        the entry (a) maximally stale, so the TTL throttle grants an immediate background
-        refresh, and (b) never adoptable by an in-flight run's adopt-while-queued check
-        (a run that already started should really scan). Any failure → None (cold scan)."""
+        the entry never adoptable by an in-flight run's adopt-while-queued check (a run
+        that already started should really scan). It is served as-is until the next
+        SCHEDULED refresh or a manual Re-scan. Any failure → None (cold scan)."""
         try:
             with open(self._persist_path, "rb") as f:
                 d = pickle.load(f)
@@ -145,34 +150,89 @@ class ResultStore:
         compared against each other."""
         return self._clock()
 
-    def try_claim_refresh(self, key) -> bool:
-        """Atomically claim the one-per-TTL background-refresh slot: True iff an entry
-        exists, it is at least ``ttl`` old, and nothing claimed within the last ``ttl``.
-        The claim is recorded ON START (not completion), so a slow or FAILED refresh
-        can't retry-loop — the next attempt opens a full TTL after this one."""
-        with self._lock:
-            ent = self._entries.get(key)
-            if ent is None:
-                return False
-            now = self._clock()
-            if now - ent.completed_mono < self.ttl:
-                return False
-            last = self._last_claim.get(key)
-            if last is not None and now - last < self.ttl:
-                return False
-            self._last_claim[key] = now
-            return True
-
-    def stamp_claim(self, key) -> None:
-        """Record a claim without conditions — a MANUAL rescan counts against the
-        background throttle, so an auto-refresh doesn't fire minutes after one."""
-        with self._lock:
-            self._last_claim[key] = self._clock()
-
 
 # The production singleton (inert under AppTest): survives page/session churn in
 # memory, and a SERVER RESTART via the last-scan pickle.
 _STORE = ResultStore(persist_path=_LAST_SCAN_PKL)
+
+
+# ---- Scheduled background refreshes ---------------------------------------------- #
+_SCHED_LOCK = threading.Lock()
+_SCHED_STARTED = False
+
+
+def _next_fire(now):
+    """Next REFRESH_SCHEDULE_ET slot strictly after ``now`` (a tz-aware ET Timestamp).
+    Pure. The scheduled wall times never fall inside a DST transition window, so
+    ``replace`` on a tz-aware timestamp is safe."""
+    import pandas as pd
+    best = None
+    for days, hh, mm in REFRESH_SCHEDULE_ET:
+        for ahead in range(8):
+            cand = (now + pd.Timedelta(days=ahead)).replace(
+                hour=hh, minute=mm, second=0, microsecond=0)
+            if cand.dayofweek in days and cand > now:
+                if best is None or cand < best:
+                    best = cand
+                break
+    return best
+
+
+def _scheduled_refresh(store=None, runner=None) -> bool:
+    """One scheduled scan: run under the process-wide serial lock and publish through
+    the store. It deliberately never consults the adopt check — a refresh exists to
+    ADVANCE the data, and adopting its own entry would make it a no-op forever.
+    Sessions pick the result up on their next script run (``ensure_started`` adopts
+    newer store entries). Injectable for tests; True on success, and a raising runner
+    leaves the store's previous entry intact."""
+    if store is None:
+        store = None if _testing() else _STORE
+    if store is None:
+        return False
+    try:
+        with _SCAN_SERIAL:
+            if runner is None:
+                from . import scan
+                res = scan.run_scan(universe=DEFAULT_UNIVERSE,
+                                    cfg=scan.ScanConfig(min_criteria=DEFAULT_MIN_CRITERIA))
+            else:
+                res = runner()
+            store.put((DEFAULT_UNIVERSE, DEFAULT_MIN_CRITERIA), res)
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+def _scheduler_loop() -> None:
+    """Sleep-until-next-slot loop (daemon thread). Chunked sleeps so a suspended or
+    clock-stepped host converges instead of oversleeping by the drift."""
+    import pandas as pd
+    while True:
+        now = pd.Timestamp.now(tz="America/New_York")
+        nxt = _next_fire(now)
+        if nxt is None:
+            time.sleep(3600.0)
+            continue
+        wait_s = (nxt - now).total_seconds()
+        while wait_s > 0:
+            time.sleep(min(wait_s, 300.0))
+            wait_s = (nxt - pd.Timestamp.now(tz="America/New_York")).total_seconds()
+        _scheduled_refresh()
+
+
+def start_scheduler() -> None:
+    """Start the refresh scheduler once per process. Inert under the AppTest tell —
+    a real scheduled scan inside a test process would hit the network."""
+    global _SCHED_STARTED
+    if _testing():
+        return
+    with _SCHED_LOCK:
+        if _SCHED_STARTED:
+            return
+        _SCHED_STARTED = True
+    threading.Thread(target=_scheduler_loop, name="sepa-scan-sched",
+                     daemon=True).start()
 
 _PRICE_PREFIX = "Prices · "        # run_scan's fetch-phase progress label prefix
 
@@ -225,17 +285,18 @@ class ScanWorker:
         """Adopt the newest store result, then start a scan for the current key unless
         one is running or already landed. A failed run does NOT auto-retry (its error
         sticks to the key — an auto-retry would hammer yfinance in a rerun loop); the
-        page's Retry button goes through ``request_rescan`` for a fresh key. When the
-        adopted/held result is older than ``REFRESH_TTL_SECONDS`` and the store grants
-        the one-per-TTL claim, a BACKGROUND refresh starts under a fresh generation —
-        ``latest()`` keeps serving the stale result meanwhile."""
+        page's Retry button goes through ``request_rescan`` for a fresh key. Page
+        interaction NEVER starts a background refresh — the only network paths are the
+        true cold start (no result anywhere), an explicit Re-scan, and the process
+        scheduler's ``_scheduled_refresh`` (whose result lands in the store and is
+        adopted here on the next script run)."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             if self._pending_force:
                 # An armed forced run OUTRANKS adoption: it is never satisfied by
                 # someone else's result, and leaving the flag armed would detonate
-                # inside a later TTL refresh as a surprise full re-download.
+                # inside a later scheduled refresh as a surprise full re-download.
                 self._start_locked(adopt_ok=False)
                 return
             store = self._store_or_none()
@@ -243,15 +304,8 @@ class ScanWorker:
                 ent = store.get(self._key2())
                 if ent is not None and (self._completed_at is None
                                         or ent.completed_wall > self._completed_at):
-                    self._adopt_locked(ent)               # another session's scan landed
+                    self._adopt_locked(ent)               # a newer scan landed
             if self._status in ("done", "error") and self._result_key == self._key():
-                # The TTL claim also covers the ERROR state: a failed background refresh
-                # retries once the window reopens (claim-on-start spaced the attempts).
-                # A cold-start error can't loop here — no store entry, claim denied —
-                # so the no-auto-retry rule for true failures still holds.
-                if store is not None and store.try_claim_refresh(self._key2()):
-                    self._generation += 1                 # refresh runs under a fresh key
-                    self._start_locked(adopt_ok=True)
                 return
             self._start_locked(adopt_ok=True)
 
@@ -268,14 +322,10 @@ class ScanWorker:
         cancelled (yfinance has no abort) — the bumped generation makes its result land
         stale, and the page's ``ensure_started`` starts the fresh run when it finishes.
         A user-forced run is never satisfied by someone else's result (``adopt_ok``
-        False), and it stamps the store's refresh claim so an automatic background
-        refresh doesn't fire minutes after a manual one."""
+        False)."""
         with self._lock:
             self._generation += 1
             self._pending_force = self._pending_force or force
-            store = self._store_or_none()
-            if store is not None:
-                store.stamp_claim(self._key2())
             if self._thread is None or not self._thread.is_alive():
                 self._start_locked(adopt_ok=False)
 
@@ -385,8 +435,11 @@ class ScanWorker:
 
 
 def get_worker() -> ScanWorker:
-    """The session's worker, created on first touch (any page)."""
+    """The session's worker, created on first touch (any page). Also the process-wide
+    hook that arms the refresh scheduler — every cockpit entry point passes through
+    here, and the scheduler self-guards to one thread per process."""
     import streamlit as st
+    start_scheduler()
     w = st.session_state.get("_scan_worker")
     if not isinstance(w, ScanWorker):
         w = ScanWorker()
