@@ -1,0 +1,12 @@
+[Unit]
+Description=SEPA cockpit morning armed-entry execute (at most one buy for the open)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ml-trading-pfopt
+ExecStart=/usr/bin/docker compose run --rm trigger python src/stock_screener/cockpit/entry_cli.py execute
+TimeoutStartSec=600

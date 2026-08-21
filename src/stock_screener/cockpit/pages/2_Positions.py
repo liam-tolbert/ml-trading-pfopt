@@ -83,11 +83,14 @@ def _cancel_sell():
     st.session_state.pop("sell_pending", None)
 
 
-def _do_sell(symbol, qty):
-    """Confirm-sell callback: submits the FROZEN pending quantity (not the live qty widget),
-    then busts the cache so the next run shows the reduced position + re-placed stop."""
+def _do_sell(symbol, qty, remainder_stop=None):
+    """Confirm-sell callback: submits the FROZEN pending quantity (not the live qty
+    widget), then busts the cache so the next run shows the reduced position +
+    re-placed stop. ``remainder_stop`` (the free-roll's breakeven move) rides the
+    ratchet inside submit_position_sell — it can only ever raise the level."""
     try:
-        st.session_state["sell_result"] = trade.submit_position_sell(symbol, qty)
+        st.session_state["sell_result"] = trade.submit_position_sell(
+            symbol, qty, remainder_stop=remainder_stop)
     except trade.TradeUnavailable as e:
         st.session_state["sell_result"] = {"error": str(e)}
     st.session_state.pop("sell_pending", None)
@@ -190,6 +193,15 @@ _pillars = {p["symbol"]: trade.sell_pillars(
                 pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy)
             for p in positions}
 _PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
+# R-multiples off the frozen pivot's reconstructed stop ('~' = 8% approximation).
+_rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
+                                         _wl_pivots.get(p["symbol"]))
+           for p in positions}
+
+
+def _r_cell(sym) -> str:
+    _r, _approx = _rmults.get(sym, (None, True))
+    return "" if _r is None else f"{'~' if _approx else ''}{_r:.1f}"
 
 # --- Positions table ------------------------------------------------------------------------ #
 import pandas as pd  # noqa: E402
@@ -198,6 +210,7 @@ rows = [{
     "symbol": p["symbol"], "qty": p["qty"], "avg_entry": p["avg_entry"],
     "current_price": p["current_price"],
     "gain_pct": (p["gain_pct"] * 100.0 if p["gain_pct"] is not None else None),
+    "R": _r_cell(p["symbol"]),
     "stage": p.get("stage") or "",
     "P1": _PICON[_pillars[p["symbol"]]["P1"]["status"]],
     "P2": _PICON[_pillars[p["symbol"]]["P2"]["status"]],
@@ -215,6 +228,11 @@ col_config = {
     "avg_entry": _num("Avg entry", format="$%.2f"),
     "current_price": _num("Price", format="$%.2f"),
     "gain_pct": _num("Gain", format="%.1f%%", help="Unrealized gain/loss on the position."),
+    "R": st.column_config.Column(
+        "R", help="Gain as a multiple of the initial risk — reconstructed from the "
+                  "frozen pivot's stop when the name is watchlisted ('~' = 8% "
+                  "approximation off the entry). At ≥2R the free-roll applies: sell "
+                  "half, move the stop to breakeven, and the rest rides risk-free."),
     "stage": st.column_config.Column(
         "Stage", help="The stop ladder by gain: underwater · fresh (<16%) · working "
                       "(16-20%, stop → breakeven) · well in profit (≥20%, trail 50-day)."),
@@ -246,7 +264,7 @@ col_config = {
                          "(~8%+), otherwise trim or exit before the report."),
     "advisories": st.column_config.Column("Advisories", width="large"),
 }
-col_order = ["symbol", "qty", "avg_entry", "current_price", "gain_pct", "stage",
+col_order = ["symbol", "qty", "avg_entry", "current_price", "gain_pct", "R", "stage",
              "P1", "P2", "P3", "P4",
              "market_value", "unrealized_pl", "current_stop", "sma_50", "earnings",
              "advisories"]
@@ -263,7 +281,7 @@ try:
 except Exception:
     _plan = None
 if _plan and _plan.get("orders"):
-    st.markdown("#### 🌙 Planned auto-sells")
+    st.markdown("#### Planned auto-sells")
     _armed = ("**ARMED** — still-planned orders submit at ~9:25 ET"
               if sells.autosell_enabled() else "not armed (`AUTOSELL` unset) — plan only")
     st.caption(f"Evening plan **{_plan.get('date')}** · morning submit {_armed}. "
@@ -336,6 +354,22 @@ for p in positions:
                          on_click=_set_sell_qty, args=(sym, _nonce, max(1, _held // 2)))
             sc[3].button("All", key=f"sellqa_{sym}_{_nonce}", width="stretch",
                          on_click=_set_sell_qty, args=(sym, _nonce, _held))
+            # Free-roll at >=2R while the stop still sits below breakeven: bank half,
+            # move the remainder's stop to the entry — the rest rides risk-free.
+            _rv, _rapprox = _rmults.get(sym, (None, True))
+            if (_rv is not None and _rv >= trade.FREE_ROLL_R
+                    and (p["current_stop"] is None
+                         or p["current_stop"] < p["avg_entry"])):
+                if _held >= 2:
+                    if st.button(f"Free-roll — sell ½ {sym} + stop → breakeven",
+                                 key=f"froll_{sym}_{_nonce}", width="stretch"):
+                        st.session_state["sell_pending"] = {
+                            "symbol": sym, "qty": _held // 2, "held": _held,
+                            "stop": p["current_stop"],
+                            "remainder_stop": p["avg_entry"]}
+                else:
+                    st.caption("≥2R on a single share — no half to sell; raise the "
+                               "stop to breakeven instead (re-arm above).")
             if st.button(f"Sell (market) — {sym}", key=f"sell_{sym}_{_nonce}",
                          width="stretch"):
                 # FREEZE the quantity now — the confirm must submit what was shown, not a
@@ -348,7 +382,12 @@ for p in positions:
             if _sp and _sp.get("symbol") == sym:
                 _q, _stop = _sp["qty"], _sp.get("stop")
                 _rem = _sp["held"] - _q
-                if _stop is None:
+                _rstop = _sp.get("remainder_stop")
+                if _rstop is not None and _rem > 0:
+                    _sfx = (f"the remaining {_rem} sh get a stop at breakeven @ "
+                            f"{_rstop:.2f} (ratchet — kept if the current stop is "
+                            "higher)")
+                elif _stop is None:
                     _sfx = (f"no stop is armed; the remaining {_rem} sh stay unprotected"
                             if _rem > 0 else "no stop is armed")
                 elif _rem > 0:
@@ -359,7 +398,7 @@ for p in positions:
                 st.warning(f"Sell **{_q}/{_sp['held']} sh {sym}** at market (DAY)? {_sfx}.")
                 cc1, cc2 = st.columns(2)
                 cc1.button("✅ Confirm sell", key=f"sellgo_{sym}_{_nonce}", type="primary",
-                           width="stretch", on_click=_do_sell, args=(sym, _q))
+                           width="stretch", on_click=_do_sell, args=(sym, _q, _rstop))
                 cc2.button("Cancel", key=f"sellno_{sym}_{_nonce}", width="stretch",
                            on_click=_cancel_sell)
 

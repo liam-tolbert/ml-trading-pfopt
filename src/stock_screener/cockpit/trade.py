@@ -56,6 +56,11 @@ P1_CUSHION_DAYS = 10        # trading days; no cushion by here -> sell into stre
 P1_STALL_DAYS = 15          # flat-to-red by here -> exit (calibration, not scripture)
 DECISIVE_BELOW_PIVOT_PCT = 0.02  # a close >2% below the pivot is decisive, not noise
 
+# --- Progressive-exposure gate + free-roll -------------------------------------------------- #
+GATE_HALF_SIZE_AFTER = 2    # consecutive losing closed trades -> advise half-size probes
+FREE_ROLL_R = 2.0           # R-multiple where selling part + breakeven stop is advised
+FREE_ROLL_FRACTION = 0.5    # fraction the free-roll action sells by default
+
 # The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which owns
 # the shared ALPACA_API_KEY/SECRET pair). Each paper account has its own key pair, so prefer
 # the dedicated "Minervini Trader" keys, falling back to the shared pair only if unset. The
@@ -142,6 +147,112 @@ def fetch_held_shares() -> Dict[str, int]:
     return {p.symbol: int(float(p.qty)) for p in client.get_all_positions()}
 
 
+def _pos_float(p, name) -> Optional[float]:
+    try:
+        v = getattr(p, name, None)
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_gate_inputs() -> dict:
+    """Light inputs for :func:`gate_status`: Alpaca positions only (NO price-history
+    fetch — the unrealized figures come from the broker) plus the journal's open/closed
+    episodes. Raises :class:`TradeUnavailable` on any failure; the manual trade panel
+    treats that as gate UNKNOWN (open — the human judges), the unattended morning
+    executor as CLOSED. The asymmetric fail direction is deliberate."""
+    client, _ = _connect_paper()
+    positions = []
+    for p in client.get_all_positions():
+        positions.append({"symbol": getattr(p, "symbol", None),
+                          "qty": int(_pos_float(p, "qty") or 0),
+                          "avg_entry": _pos_float(p, "avg_entry_price"),
+                          "current_price": _pos_float(p, "current_price"),
+                          "unrealized_pl": _pos_float(p, "unrealized_pl"),
+                          "unrealized_plpc": _pos_float(p, "unrealized_plpc")})
+    j = build_trade_journal(fetch_order_fills()["fills"])
+    return {"positions": positions, "open_episodes": j["open"],
+            "closed_episodes": j["closed"]}
+
+
+def gate_status(positions: List[dict], open_episodes: List[dict],
+                closed_episodes: List[dict]) -> dict:
+    """Progressive-exposure gate: may a NEW position be opened right now? Pure.
+
+    Scope is cockpit-TAGGED positions only — an Alpaca position counts only when a
+    tagged OPEN journal episode exists for its symbol, so manual/legacy holdings never
+    poison the gate (a book of untagged names reads as flat). Rules:
+
+    * flat (no tagged positions) -> OPEN — the first pilot is always allowed;
+    * otherwise every position in the NEWEST set (all tagged positions sharing the max
+      entry DATE — same-open fills differ only by milliseconds, so day granularity)
+      must be at breakeven or better, AND the tagged book's net unrealized P&L must be
+      >= 0;
+    * ``consecutive_losses`` counts losing TAGGED closed trades from the most recent
+      backwards (re-sorted by ``exit_date`` — the journal groups by symbol; ``pl >= 0``
+      including a $0 scratch breaks the streak); at ``GATE_HALF_SIZE_AFTER`` the
+      ``probe_size_factor`` drops to 0.5. ADVISORY ONLY — surfaced in captions, never
+      auto-applied to quantities.
+
+    Sells and stop re-arms are never gated (risk-reducing). A position whose entry
+    date can't be resolved counts as newest (conservative). Returns
+    ``{open, reason, probe_size_factor, consecutive_losses}``."""
+    import pandas as pd
+
+    tagged_open = {e.get("symbol"): e for e in (open_episodes or []) if e.get("tagged")}
+    scoped = [p for p in (positions or [])
+              if p.get("symbol") in tagged_open and int(p.get("qty") or 0) > 0]
+
+    streak = 0
+    for t in sorted([t for t in (closed_episodes or []) if t.get("tagged")],
+                    key=lambda t: t.get("exit_date"), reverse=True):
+        pl = t.get("pl")
+        if pl is not None and pl < 0:
+            streak += 1
+        else:
+            break
+    factor = 0.5 if streak >= GATE_HALF_SIZE_AFTER else 1.0
+    half_note = (f"; {streak} consecutive losses — half-size probe advised"
+                 if factor < 1.0 else "")
+
+    if not scoped:
+        return {"open": True,
+                "reason": "book flat (no cockpit positions) — first pilot allowed"
+                          + half_note,
+                "probe_size_factor": factor, "consecutive_losses": streak}
+
+    def _entry_day(sym):
+        try:
+            ts = pd.Timestamp(tagged_open[sym].get("entry_date"))
+            if ts.tzinfo is not None:
+                ts = ts.tz_convert("America/New_York").tz_localize(None)
+            return ts.normalize()
+        except Exception:
+            return None
+
+    days = {p["symbol"]: _entry_day(p["symbol"]) for p in scoped}
+    known = [d for d in days.values() if d is not None]
+    newest_day = max(known) if known else None
+    newest = [p for p in scoped if days[p["symbol"]] in (None, newest_day)]
+
+    losers = [p["symbol"] for p in newest
+              if p.get("unrealized_plpc") is None or p["unrealized_plpc"] < 0]
+    if losers:
+        return {"open": False,
+                "reason": "newest position below breakeven: " + ", ".join(sorted(losers))
+                          + " — let the probe prove itself first" + half_note,
+                "probe_size_factor": factor, "consecutive_losses": streak}
+    net = sum(p.get("unrealized_pl") or 0.0 for p in scoped)
+    if net < 0:
+        return {"open": False,
+                "reason": f"net open P&L ${net:,.0f} < 0 — work the book before adding"
+                          + half_note,
+                "probe_size_factor": factor, "consecutive_losses": streak}
+    return {"open": True,
+            "reason": "newest position at breakeven+ and net open P&L >= 0" + half_note,
+            "probe_size_factor": factor, "consecutive_losses": streak}
+
+
 SIZING_MODES = ("pct", "dollars", "shares", "risk")
 
 
@@ -212,6 +323,37 @@ def position_stage(gain_pct: Optional[float]) -> Optional[str]:
     if gain_pct < TRAIL_GAIN:
         return "working"
     return "well in profit"
+
+
+def r_multiple(avg_entry, current_price, pivot=None) -> Tuple[Optional[float], bool]:
+    """The position's gain as a multiple of its reconstructed initial risk. Pure.
+
+    The entry-time stop is not persisted anywhere, so risk is reconstructed: a frozen
+    pivot whose derived stop (``pivot × (1 - DEFAULT_STOP_FROM_PIVOT)``) sits below the
+    entry reproduces the level the OTO actually attached — exact, ``approximate=False``.
+    Otherwise ``INITIAL_STOP_PCT`` off the entry (``approximate=True`` — also the path
+    when the pivot sits at/above the entry, where pivot-derived risk would be <= 0).
+    Returns ``(r, approximate)``; ``(None, True)`` on missing/degenerate inputs."""
+    try:
+        e, c = float(avg_entry), float(current_price)
+    except (TypeError, ValueError):
+        return None, True
+    if e <= 0:
+        return None, True
+    risk = None
+    approx = True
+    if pivot:
+        try:
+            stop = float(pivot) * (1.0 - DEFAULT_STOP_FROM_PIVOT)
+            if 0.0 < stop < e:
+                risk, approx = e - stop, False
+        except (TypeError, ValueError):
+            pass
+    if risk is None:
+        risk = e * INITIAL_STOP_PCT
+    if risk <= 0:
+        return None, True
+    return (c - e) / risk, approx
 
 
 def position_advisories(pos: dict) -> List[str]:
@@ -978,6 +1120,12 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                 "detail": "position closed since the plan was built — "
                                           "no buy sent (rebuild the plan to buy it)"})
                 continue
+            # Server-side backstop for the progressive-exposure gate: the panel stamps
+            # blocked buy rows so a stale client can't slip one through.
+            if o.get("gate_blocked"):
+                results.append({**o, "status": "skipped",
+                                "detail": "progressive-exposure gate closed — no buy"})
+                continue
             if t in pending_buys:
                 results.append({**o, "status": "skipped",
                                 "detail": "a cockpit BUY is already queued (pending fill) — "
@@ -1247,14 +1395,17 @@ def rearm_stops(targets: List[dict]) -> dict:
             "using_dedicated": using_dedicated, "results": results}
 
 
-def submit_position_sell(symbol: str, qty: int) -> dict:
+def submit_position_sell(symbol: str, qty: int, *,
+                         remainder_stop: Optional[float] = None) -> dict:
     """Manual market SELL of part/all of a held position (paper account), stop-aware.
 
     Shares covered by an open GTC sell-stop are RESERVED at Alpaca, so the flow is:
     cancel the symbol's open sell-stops → submit the market SELL (DAY, tagged
-    ``SEPAsell-``) → re-place a GTC stop for any REMAINING shares at the SAME (never
-    lower) level. If the market sell fails AFTER the cancel, the previous stop is
-    restored for the full held quantity — the position is never silently left
+    ``SEPAsell-``) → re-place a GTC stop for any REMAINING shares at
+    ``max(old level, remainder_stop)`` — the ratchet never lowers, and with no prior
+    stop a given ``remainder_stop`` places one (the free-roll's stop→breakeven move
+    rides this). If the market sell fails AFTER the cancel, the previous stop is
+    restored for the full held quantity at the OLD level — the position is never silently left
     unprotected (the cancel-before-place gap done right).
 
     No $50 floor / 10%-cap / tradability gate: like the stop re-arm path, a sell is
@@ -1309,11 +1460,19 @@ def submit_position_sell(symbol: str, qty: int) -> dict:
     base["stop_price"] = old_level
     cancelled = _cancel_orders(client, existing)
 
-    def _place_stop(stop_qty: int) -> bool:
+    # Ratchet: a requested remainder_stop only ever RAISES the remainder's level.
+    if remainder_stop is None:
+        eff_level = old_level
+    elif old_level is None:
+        eff_level = float(remainder_stop)
+    else:
+        eff_level = max(old_level, float(remainder_stop))
+
+    def _place_stop(stop_qty: int, level: float) -> bool:
         try:
             client.submit_order(order_data=StopOrderRequest(
                 symbol=symbol, qty=stop_qty, side=OrderSide.SELL,
-                time_in_force=TimeInForce.GTC, stop_price=round(old_level, 2),
+                time_in_force=TimeInForce.GTC, stop_price=round(level, 2),
                 client_order_id=f"SEPAstop-{symbol}-{int(time.time() * 1000)}"))
             return True
         except Exception:
@@ -1326,17 +1485,25 @@ def submit_position_sell(symbol: str, qty: int) -> dict:
     except Exception as e:
         detail = f"market sell failed: {e}"
         if cancelled and old_level is not None:
-            detail += (f"; previous stop restored @ {old_level:.2f}" if _place_stop(held)
+            # Restore at the OLD level: the sell never happened, so a raised
+            # remainder_stop has no business being in force.
+            detail += (f"; previous stop restored @ {old_level:.2f}"
+                       if _place_stop(held, old_level)
                        else "; stop restore FAILED — arm a stop manually")
         return {**base, "status": "failed", "detail": detail + clamp_note}
 
     detail = f"market SELL {qty}/{held} sh (DAY)"
     if remaining > 0:
-        if old_level is not None:
-            detail += (f"; stop re-placed @ {old_level:.2f} for the remaining {remaining} sh"
-                       if _place_stop(remaining)
-                       else f"; stop re-place FAILED — remaining {remaining} sh "
-                            "unprotected, re-arm manually")
+        if eff_level is not None:
+            if _place_stop(remaining, eff_level):
+                base["stop_price"] = eff_level
+                detail += (f"; stop re-placed @ {eff_level:.2f} for the remaining "
+                           f"{remaining} sh")
+                if old_level is not None and eff_level > old_level:
+                    detail += f" (raised from {old_level:.2f})"
+            else:
+                detail += (f"; stop re-place FAILED — remaining {remaining} sh "
+                           "unprotected, re-arm manually")
         else:
             detail += f"; remaining {remaining} sh have no stop — arm one"
     elif cancelled:

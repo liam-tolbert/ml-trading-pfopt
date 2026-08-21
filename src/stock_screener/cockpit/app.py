@@ -25,6 +25,7 @@ from streamlit.errors import StreamlitAPIException  # noqa: E402
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
 from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
+from src.stock_screener.cockpit import entries  # noqa: E402 (armed next-open entries)
 from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
@@ -33,8 +34,8 @@ from src.stock_screener.cockpit.export import (  # noqa: E402
 from src.stock_screener.cockpit.scan import filter_candidates  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, cancel_pending_buys,
-    fetch_account_summary, fetch_held_shares, freshen_prices, stop_is_valid,
-    submit_buy_plan)
+    fetch_account_summary, fetch_gate_inputs, fetch_held_shares, freshen_prices,
+    gate_status, stop_is_valid, submit_buy_plan)
 from src.stock_screener.cockpit.triggers import (load_latest_trigger_report,  # noqa: E402
                                                  save_trigger_report)
 
@@ -346,6 +347,17 @@ def _invalidate_trade_plan() -> None:
     bump trade_build_n: the next Build bumps it and re-seeds the buy/stop widget keys."""
     st.session_state.pop("trade_plan", None)
     st.session_state.pop("trade_result", None)
+
+
+def _do_disarm(ticker) -> None:
+    """Disarm callback: re-read the entry plan fresh from disk (the executor or another
+    session may have rewritten it since this render), flip, save atomically."""
+    try:
+        p = entries.load_latest_entry_plan()
+        if p and entries.disarm_row(p, ticker):
+            entries.save_entry_plan(p)
+    except Exception:
+        pass
 
 
 def _risk_guidance():
@@ -752,6 +764,19 @@ with st.sidebar:
                 _held = fetch_held_shares()
             except TradeUnavailable:
                 _held = {}
+            # Progressive-exposure gate — computed HERE (Build already talks to the
+            # broker), never at render time. Unknown (account/journal unreachable)
+            # leaves this MANUAL path open — the human judges; the unattended morning
+            # executor fails closed instead.
+            try:
+                _gi = fetch_gate_inputs()
+                _gate = gate_status(_gi["positions"], _gi["open_episodes"],
+                                    _gi["closed_episodes"])
+            except Exception:
+                _gate = {"open": None,
+                         "reason": "gate unknown (account/journal unreachable) — "
+                                   "your judgment",
+                         "probe_size_factor": 1.0, "consecutive_losses": 0}
             # Re-pull the watchlist names' latest bars so sizing/stops use CURRENT prices, not
             # the days-old closes frozen in the scan memo. The staleness guard then skips any
             # name the refresh couldn't freshen.
@@ -771,7 +796,8 @@ with st.sidebar:
             st.session_state["trade_build_n"] = _bn
             st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
                                               "account": _account, "held": _held,
-                                              "build_ts": _bn, "order_type": _order_type}
+                                              "build_ts": _bn, "order_type": _order_type,
+                                              "gate": _gate}
             st.session_state.pop("trade_result", None)
 
         _tp = st.session_state.get("trade_plan")
@@ -783,6 +809,18 @@ with st.sidebar:
             _account = _tp.get("account") or {}
             if _account.get("error"):
                 st.warning(_account["error"])
+            # Gate verdict from Build time (plans without the key — older sessions,
+            # seeded tests — read as unknown → no behavior change). Quiet when open
+            # at full size; loud when closed; advisory when half-size applies.
+            _gate = _tp.get("gate") or {}
+            _gate_closed = _gate.get("open") is False
+            if _gate_closed:
+                st.caption(f":red[**Exposure gate closed** — {_gate.get('reason')}. "
+                           "New buys are blocked; stop re-arms and sells still work.]")
+            elif _gate.get("open") is None and _gate.get("reason"):
+                st.caption(f":orange[⚠︎ {_gate.get('reason')}]")
+            elif _gate.get("probe_size_factor", 1.0) < 1.0:
+                st.caption(f":orange[⚠︎ Exposure gate open — {_gate.get('reason')}]")
             if _plan:
                 # build_buy_plan is holdings-blind; submit sends NO buy for a held name (re-arm
                 # only). So the est-value total counts only names that actually execute as buys.
@@ -918,11 +956,15 @@ with st.sidebar:
                                  "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
                     st.caption(f"Target account **…{str(_account['account_number'])[-4:]}** "
                                f"({_src}) · equity ${_account['equity']:,.0f}")
-                _c1, _c2 = st.columns(2)
+                _c1, _c2, _c3 = st.columns([2, 2, 1])
                 _n_held = sum(1 for _o in _plan if _held.get(_o["ticker"], 0) > 0)
+                # Gate closed: buys are stamped gate_blocked (submit skips them
+                # server-side too), but the button stays live while held rows need
+                # their stop re-arms — risk-reducing actions are never gated.
                 if _c1.button("✅ Submit (paper)", key="trade_submit",
                               type="primary", width="stretch",
-                              disabled=not _buys and not _n_held):
+                              disabled=(not _buys and not _n_held)
+                              or (_gate_closed and not _n_held)):
                     # Merge each ticker's edited stop + limit (session_state) into the plan
                     # entries. Only CHECKED buy rows are sent; held names always pass through
                     # (submit re-arms their stop, never buys). Each held-at-build row is
@@ -932,6 +974,8 @@ with st.sidebar:
                     # into an unconsented full-size buy.
                     _final = [{**_o,
                                "rearm_only": _held.get(_o["ticker"], 0) > 0,
+                               "gate_blocked": (_gate_closed
+                                                and _held.get(_o["ticker"], 0) <= 0),
                                "stop_price": st.session_state.get(
                                    f"stop_{_o['ticker']}_{_nonce}", _o["stop_price"]),
                                "limit_price": (st.session_state.get(
@@ -948,7 +992,32 @@ with st.sidebar:
                             st.session_state["trade_result"] = {"error": str(_e)}
                     st.session_state.pop("trade_plan", None)
                     st.rerun()
-                if _c2.button("Cancel", key="trade_cancel", width="stretch"):
+                # Arm instead of buying now: tomorrow ~9:26 ET the executor submits at
+                # most ONE of these (walk order = list order) after re-checking the
+                # exposure gate fresh — so arming is allowed even while it reads
+                # closed tonight (tonight's sell plan may free the book by the open).
+                # Limit + attached stop only: a market row would buy the open blind.
+                if _c2.button(f"Arm {len(_buys)} for open", key="trade_arm",
+                              width="stretch",
+                              disabled=not _is_lim or not _attach or not _buys,
+                              help="Writes tonight's armed entry plan (no orders now). "
+                                   "The morning executor submits at most one still-"
+                                   "armed row; disarm below anytime before the open. "
+                                   "Needs the Limit order type + attached stop."):
+                    _armed_rows = [{**_o,
+                                    "stop_price": st.session_state.get(
+                                        f"stop_{_o['ticker']}_{_nonce}",
+                                        _o["stop_price"]),
+                                    "limit_price": st.session_state.get(
+                                        f"lim_{_o['ticker']}_{_nonce}",
+                                        _o.get("limit_price"))}
+                                   for _o in _plan
+                                   if _held.get(_o["ticker"], 0) <= 0
+                                   and st.session_state.get(_buy_key(_o["ticker"]),
+                                                            _buy_default(_o))]
+                    entries.save_entry_plan(entries.build_entry_plan(_armed_rows))
+                    st.rerun()
+                if _c3.button("Cancel", key="trade_cancel", width="stretch"):
                     st.session_state.pop("trade_plan", None)
                     st.rerun()
             else:
@@ -973,6 +1042,37 @@ with st.sidebar:
                     st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
         st.caption("Empty — click ⭐ on a chart, or use the picker above.")
+
+    # --- Armed entries: tonight's plan + overnight disarm (renders with or without a
+    # built trade plan — the morning-after check needs it too) ------------------------ #
+    _ep = None
+    try:
+        _ep = entries.load_latest_entry_plan()
+    except Exception:
+        _ep = None
+    if _ep and _ep.get("rows"):
+        st.markdown("**Armed for next open**")
+        _armed_state = ("**ARMED** — executes ~9:26 ET"
+                        if entries.autobuy_enabled()
+                        else "not armed (`AUTOBUY` unset) — plan only")
+        st.caption(f"Entry plan **{_ep.get('date')}** · morning submit {_armed_state}. "
+                   "At most ONE still-armed row buys (walk order = list order); the "
+                   "exposure gate is re-checked fresh at execution.")
+        _EICON = {"armed": "🕘", "disarmed": "🚫", "submitted": "✅",
+                  "failed": "⚠️", "skipped": "—"}
+        for _r in _ep["rows"]:
+            _ca, _cb = st.columns([5, 1])
+            _lp = _r.get("limit_price")
+            _sp = _r.get("stop_price")
+            _lp_s = f"{_lp:.2f}" if _lp is not None else "?"
+            _sp_s = f"{_sp:.2f}" if _sp is not None else "?"
+            _ca.caption(f"{_EICON.get(_r.get('status'), '•')} **{_r['ticker']}** "
+                        f"×{_r.get('shares')} · limit {_lp_s} · stop {_sp_s} — "
+                        f"{_r.get('status')}"
+                        + (f" · {_r['detail']}" if _r.get("detail") else ""))
+            if _r.get("status") == entries.ROW_ARMED:
+                _cb.button("Disarm", key=f"disarm_{_r['ticker']}_{_ep.get('date')}",
+                           width="stretch", on_click=_do_disarm, args=(_r["ticker"],))
 
     # --- Cancel resting cockpit buys — THE control for a GTC limit whose setup broke
     # (a resting limit otherwise fills on any later pullback). Outside the watchlist

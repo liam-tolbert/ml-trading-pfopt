@@ -173,6 +173,23 @@ without cushion) sell, always the full position; P3 (market regime) and all
 warns are report-only; vetoed orders are never submitted; a stale plan
 (evaluation older than the last session) is refused.
 
+### Armed entries (buy-side automation)
+
+The buy-side mirror: at the evening ritual you build a **limit** trade plan in
+the app and click **"Arm for open"** instead of submitting; `cockpit-buyexec.timer`
+(09:26 ET weekdays, installed by `install-units.sh` like the rest) then submits
+**at most one** still-armed row — limit at the buy-zone top with the GTC OTO
+stop — after re-checking the progressive-exposure gate fresh (unknown state =
+no buys; the unattended path fails closed). Disarm any row in the app
+overnight; un-executed rows expire with the plan.
+
+Also **disarmed by default**: nothing submits until `AUTOBUY=1` is in `.env`.
+First test:
+
+```
+docker compose run --rm trigger python src/stock_screener/cockpit/entry_cli.py execute --dry-run
+```
+
 ## 8. CUTOVER (do this only after steps 5–7 succeed)
 
 On the **laptop**:

@@ -1,0 +1,12 @@
+[Unit]
+Description=Morning armed-entry execution, 09:26 ET weekdays (orders queue for the open)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:26:00 America/New_York
+# A missed morning fire must NOT buy later in the session — the plan was judged at
+# yesterday's close and the doctrine is next-OPEN execution only.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
