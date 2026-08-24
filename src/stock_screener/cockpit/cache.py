@@ -15,7 +15,8 @@ PRICES_DIR = CACHE_DIR / "prices"
 FUNDAMENTALS_DIR = CACHE_DIR / "fundamentals"
 EDGAR_DIR = CACHE_DIR / "edgar"                 # SEC XBRL backfill cache (per-ticker JSON)
 WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (entry dicts, across sessions)
-TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports + run log (half-hourly)
+TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports (half-hourly) + entry/sell plans
+LOGS_DIR = CACHE_DIR / "logs"                   # dated run logs, pruned by runlog.RETENTION_DAYS
 TICKERS_TXT = ROOT / "data" / "tickers.txt"
 
 
@@ -24,6 +25,7 @@ def ensure_dirs() -> None:
     FUNDAMENTALS_DIR.mkdir(parents=True, exist_ok=True)
     EDGAR_DIR.mkdir(parents=True, exist_ok=True)
     TRIGGERS_DIR.mkdir(parents=True, exist_ok=True)
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def age_days(path: Path) -> float:

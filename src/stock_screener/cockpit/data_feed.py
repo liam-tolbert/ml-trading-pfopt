@@ -27,6 +27,14 @@ import pandas as pd
 
 from .cache import (CACHE_DIR, EDGAR_DIR, FUNDAMENTALS_DIR, PRICES_DIR, TICKERS_TXT,
                     age_days, ensure_dirs)
+from .runlog import get_logger
+
+# One summary line per get_many_prices call — never per ticker. A full-US sweep touches
+# ~4,200 names and data/cockpit/ lives on the Pi's SD card; per-name records would cost
+# more writes than the price cache they describe. Failures name their symbols (capped),
+# because that is the part worth acting on.
+_LOG = get_logger("prices")
+_FAILED_SAMPLE = 12
 
 # A stable, maintained constituents CSV (no API key); Wikipedia is the fallback.
 SP500_CSV_URL = (
@@ -420,6 +428,23 @@ def _atomic_to_parquet(df: pd.DataFrame, path: Path) -> None:
                 pass
 
 
+def _log_fetch(kind: str, requested: int, cached: int, topup: int, full: int,
+               wrote: int, failed: List[str], t0: float) -> None:
+    """One compact ASCII line per sweep — journald-safe, greppable, no unicode.
+
+    ``cached`` names never touched the network, so an all-cached line is the positive
+    record that the box deliberately did NOT download. That is precisely what parquet
+    mtimes cannot tell you: an unchanged mtime is indistinguishable from a sweep that
+    never ran."""
+    _LOG.info("%s: %d requested  cached %d  topup %d  full %d  wrote %d  failed %d  %.1fs",
+              kind, requested, cached, topup, full, wrote, len(failed), time.time() - t0)
+    if failed:
+        more = (f" (+{len(failed) - _FAILED_SAMPLE} more)"
+                if len(failed) > _FAILED_SAMPLE else "")
+        _LOG.warning("%s: no data for %d name(s): %s%s", kind, len(failed),
+                     ", ".join(failed[:_FAILED_SAMPLE]), more)
+
+
 def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = False,
                     max_age_days: float = 1.0,
                     chunk: int = 100,
@@ -460,6 +485,11 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     today = pd.Timestamp.today().normalize()
     total = len(syms)
     done = 0
+
+    _t0 = time.time()
+    _wrote = 0                                 # parquets actually rewritten this sweep
+    _rebaselined = 0                           # top-ups that fell back to a full refetch
+    _failed: List[str] = []                    # names the provider returned nothing for
 
     _emit_lock = threading.Lock()
 
@@ -536,6 +566,8 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             else:
                 full_fetch.append(sym)
 
+    _served0, _incr0, _full0 = len(out), len(incr), len(full_fetch)
+
     if not allow_network and (full_fetch or incr):
         # CACHE-ONLY mode: serve whatever the disk has AS-IS instead of fetching.
         # Incremental names already hold their cached frames from the pre-pass;
@@ -553,6 +585,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 _emit(sym, "cached (network busy)")
             except Exception:
                 _emit(sym, "no cache (network busy)")
+        _log_fetch("cache-only", total, len(out), 0, 0, 0, [], _t0)
         return out
 
     if full_fetch or incr:
@@ -577,6 +610,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     merged, needs_full = _merge_incremental(cached, new, lookback)
                     if needs_full:
                         full_fetch.append(sym)        # re-baseline in the full pass below
+                        _rebaselined += 1
                         continue
                     out[sym] = merged
                     # Persist ONLY when the fetch reached the cache's newest bar: an
@@ -590,6 +624,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                             and pd.Timestamp(new.index.max()).normalize() >= _last):
                         try:
                             _atomic_to_parquet(merged, PRICES_DIR / f"{sym}.parquet")
+                            _wrote += 1
                         except Exception:
                             pass
                     _emit(sym, _incr_detail(_last, today))
@@ -631,10 +666,13 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                         out[sym] = df
                         try:
                             _atomic_to_parquet(df, PRICES_DIR / f"{sym}.parquet")
+                            _wrote += 1
                         except Exception:
                             pass
                         _emit(sym, f"full history ({lookback})")
                         continue
+                    _failed.append(sym)       # counted once; a stale-cache serve below
+                                              # still means the provider gave us nothing
                     # Failed fetch: serve the stale parquet when one exists (gap>max_gap and
                     # re-baseline names HAVE one) instead of silently dropping the name —
                     # the same fallback get_prices uses. NOT re-persisted: don't bump the
@@ -651,6 +689,8 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     _emit(sym, f"full history ({lookback}) FAILED (no data)")
                 if i + chunk < len(full_fetch):
                     time.sleep(pause)
+    _log_fetch("sweep", total, _served0, _incr0 - _rebaselined, _full0 + _rebaselined,
+               _wrote, _failed, _t0)
     return out
 
 
