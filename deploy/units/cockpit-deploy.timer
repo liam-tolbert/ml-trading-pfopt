@@ -2,10 +2,11 @@
 Description=EOD pull-based deploy for the SEPA cockpit (off-hours only)
 
 [Timer]
-# Both fires sit outside 09:00-16:30 ET by construction: a mid-session pull
-# would change trading behavior mid-day. Push at noon -> lands that evening.
-OnCalendar=Mon..Fri *-*-* 17:30:00 America/New_York
-OnCalendar=Sat *-*-* 10:00:00 America/New_York
+# Weekdays: start right at market close (16:30 ET) and repeat every 30 min for the rest of the day.
+OnCalendar=Mon..Fri *-*-* 16:30:00
+OnCalendar=Mon..Fri *-*-* 17..23:0/30:00
+# Weekends: no trading session at all, so run every 30 min around the clock.
+OnCalendar=Sat,Sun *-*-* *:0/30:00
 # Catch up after a power cut — deploys are always off-hours anyway.
 Persistent=true
 

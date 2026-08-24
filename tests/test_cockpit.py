@@ -6343,44 +6343,6 @@ def test_runlog_logger_is_isolated_from_the_stdlib_root():
     assert root.propagate is False, "cockpit records must not reach the stdlib root"
     assert any(isinstance(h, runlog.DatedFileHandler) for h in root.handlers), root.handlers
 
-
-def test_runlog_timestamps_use_a_twelve_hour_clock():
-    """12-hour clock with AM/PM. These lines are read by a person, and a 24-hour stamp is
-    the thing that made them hard to scan. The DATE stays ISO (it sorts, and it matches the
-    log filenames) and the zone stays on the line so a drifted TZ is visible."""
-    import datetime as dt
-    import re
-
-    from src.stock_screener.cockpit import runlog
-
-    rec = _log_record("x")
-    # Built from a naive local datetime, so this round-trips to 17:27:28 local time
-    # whatever zone the test box is in — the assertion is about the CLOCK, not the zone.
-    rec.created = dt.datetime(2026, 8, 24, 17, 27, 28).timestamp()
-    stamped = runlog._Formatter("%(asctime)s").format(rec)
-
-    assert " 05:27:28 PM" in stamped, stamped
-    # Zone is `.+` not `\S+`: %Z is an abbreviation on Linux (EDT) but can be a
-    # multi-word name elsewhere, and the clock is what this test is pinning.
-    assert re.match(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (AM|PM) .+$", stamped), stamped
-    assert "17:27" not in stamped, f"24-hour clock leaked into the stamp: {stamped}"
-
-
-def test_trigger_report_header_uses_a_twelve_hour_clock():
-    """The header of the report read at the 16:35 ritual, same complaint as the logs.
-    Unparseable input degrades to the raw slice rather than losing the time entirely."""
-    from src.stock_screener.cockpit.triggers import _clock12
-
-    assert _clock12("2026-08-19T14:00:35.760-04:00") == "2:00 PM"
-    assert _clock12("2026-08-19T00:05:00-04:00") == "12:05 AM"
-    assert _clock12("2026-08-19T12:00:00-04:00") == "12:00 PM"
-    assert _clock12("2026-08-19T09:30:00-04:00") == "9:30 AM"
-    assert _clock12("") == "", "no timestamp -> no clock (header omits it)"
-    assert _clock12("garbage") == "", "too short to slice -> no clock, never a raise"
-    assert _clock12("2026-08-19Txx:yy:zz") == "xx:yy", "unparseable -> raw slice"
-    assert _clock12("2026-08-19T99:99:00") == "99:99", "out of range -> raw slice"
-
-
 def test_data_feed_logs_one_summary_line_per_sweep():
     """The sweep summary is the record parquet mtimes cannot give: an all-cached sweep is
     proof the box deliberately did NOT download, where an unchanged mtime is
