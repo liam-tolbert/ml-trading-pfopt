@@ -14,10 +14,12 @@ REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$REPO/deploy/units"
 DST=/etc/systemd/system
 
-# Units ship with user pi / /home/pi; rewrite for whoever owns the deployment.
+# Units ship with user pi / /home/pi/ml-trading-pfopt; rewrite for whoever owns the
+# deployment. The path is rewritten to $REPO in full, not just its /home/pi prefix:
+# the checkout need not sit directly in $HOME, and a path that misses it fails only
+# at the next timer fire (203/EXEC on deploy, 200/CHDIR on every other unit).
 RUN_USER="${SUDO_USER:-$(stat -c %U "$REPO")}"
-RUN_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
-[ -n "$RUN_HOME" ] || { echo "cannot resolve home dir for $RUN_USER" >&2; exit 1; }
+getent passwd "$RUN_USER" >/dev/null || { echo "no such user: $RUN_USER" >&2; exit 1; }
 
 # Remove installed cockpit-* units the repo no longer ships (timers disabled first).
 for f in "$DST"/cockpit-*.service "$DST"/cockpit-*.timer; do
@@ -33,7 +35,7 @@ for f in "$DST"/cockpit-*.service "$DST"/cockpit-*.timer; do
 done
 
 install -m 644 "$SRC"/cockpit-*.service "$SRC"/cockpit-*.timer "$DST"/
-sed -i "s|/home/pi|$RUN_HOME|g; s|^User=pi$|User=$RUN_USER|" "$DST"/cockpit-*.service
+sed -i "s|/home/pi/ml-trading-pfopt|$REPO|g; s|^User=pi$|User=$RUN_USER|" "$DST"/cockpit-*.service
 
 systemctl daemon-reload
 for t in "$SRC"/cockpit-*.timer; do

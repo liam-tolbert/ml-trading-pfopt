@@ -66,11 +66,12 @@ permission denied:
 git clone https://github.com/liam-tolbert/ml-trading-pfopt.git ~/ml-trading-pfopt
 ```
 
-`deploy.sh` locates the repo from its own path, so any home directory works.
-The systemd unit files contain a literal username/path — step 7 rewrites them
-for your user as they're installed. Never edit tracked files inside the
-checkout itself: a modified tracked file trips the deploy's dirty-checkout
-halt forever after.
+`deploy.sh` locates the repo from its own path, and the shipped units carry a
+literal `pi` user and `/home/pi/ml-trading-pfopt` path that step 7 rewrites to
+the invoking user and the checkout's real location — so the clone can live
+anywhere, under any directory name, not just directly in `$HOME`. Never edit
+tracked files inside the checkout itself: a modified tracked file trips the
+deploy's dirty-checkout halt forever after.
 
 ## 3. Secrets
 
