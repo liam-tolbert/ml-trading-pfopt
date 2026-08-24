@@ -34,11 +34,17 @@ docker build --label "cockpit.sha=$SHA" -t "cockpit:sha-$SHORT" .
 
 # Test gate: fresh container, NO volumes (live state physically unmountable by
 # the suite) and NO network (proves the suite is truly offline). Never promote
-# an image whose tests are red.
-if ! docker run --rm --network none "cockpit:sha-$SHORT" python tests/test_cockpit.py; then
-    echo "DEPLOY BLOCKED: tests failed at $SHA — still serving $DEPLOYED" >&2
-    exit 1
-fi
+# an image whose tests are red. Both suites gate — test_hunt.py pins the weekend
+# hunt's rule boundaries (buy zone, RS floor, earnings block), which are exactly
+# the numbers that got mis-remembered when that review was done by hand. A suite
+# added here must also be un-ignored in .dockerignore or it is absent from the
+# image and the run fails as "can't open file".
+for suite in tests/test_cockpit.py tests/test_hunt.py; do
+    if ! docker run --rm --network none "cockpit:sha-$SHORT" python "$suite"; then
+        echo "DEPLOY BLOCKED: $suite failed at $SHA — still serving $DEPLOYED" >&2
+        exit 1
+    fi
+done
 
 docker image inspect cockpit:live >/dev/null 2>&1 && docker tag cockpit:live cockpit:prev
 docker tag "cockpit:sha-$SHORT" cockpit:live

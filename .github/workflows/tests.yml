@@ -1,6 +1,7 @@
-# Early warning on push: the same offline suite the Pi's deploy gate runs
+# Early warning on push: the same offline suites the Pi's deploy gate runs
 # in-image. The Pi's local gate remains the backstop — this just surfaces red
-# before the Pi ever pulls.
+# before the Pi ever pulls. Keep this list in step with the loop in
+# deploy/deploy.sh, or CI stops being an early warning for the gate.
 name: offline-tests
 on:
   push:
@@ -17,3 +18,4 @@ jobs:
           python-version: "3.12"
       - run: pip install -r deploy/requirements.txt
       - run: python tests/test_cockpit.py
+      - run: python tests/test_hunt.py

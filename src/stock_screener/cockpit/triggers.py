@@ -464,14 +464,30 @@ def load_latest_trigger_report(dir_path=None) -> Optional[dict]:
     return None
 
 
+def _clock12(iso) -> str:
+    """ISO timestamp -> a 12-hour ``2:00 PM`` clock for the report header.
+
+    Best-effort by design: a value that will not parse falls back to the raw ``HH:MM``
+    slice, because a slightly-wrong clock in a header beats dropping the time from a
+    report someone reads at the close."""
+    raw = str(iso or "")[11:16]
+    try:
+        h, m = int(raw[:2]), int(raw[3:5])
+    except (ValueError, IndexError):
+        return raw
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        return raw
+    return f"{h % 12 or 12}:{m:02d} {'AM' if h < 12 else 'PM'}"
+
+
 def format_report(report: dict) -> str:
-    """ASCII-only console rendering (the .bat wrapper appends stdout to a cp1252 log —
-    no emoji here; icons live in the Streamlit surface)."""
+    """ASCII-only console rendering — trigger stdout lands in journald on the Pi, so no
+    emoji here; icons live in the Streamlit surface."""
     lines: List[str] = []
     spy = report.get("spy") or {}
     spy_s = (f"SPY: {spy.get('trend', '?')} (phase {spy.get('phase', '?')})"
              if spy else "SPY: n/a")
-    hm = str(report.get("generated_at", ""))[11:16]      # ISO -> HH:MM (crude, best-effort)
+    hm = _clock12(report.get("generated_at", ""))
     lines.append(f"TRIGGER CHECK  {report.get('date', '?')}"
                  + (f" {hm}" if hm else "") + f"   {spy_s}")
     names = report.get("names", [])

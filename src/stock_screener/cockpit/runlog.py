@@ -85,15 +85,21 @@ def prune_logs(retention_days: int = RETENTION_DAYS, today: Optional[_dt.date] =
 
 
 class _Formatter(logging.Formatter):
-    """ISO-8601 local timestamps carrying their UTC offset.
+    """ISO date + a 12-hour clock, stamped with the zone: ``2026-08-24 05:27:28 PM EDT``.
 
-    The containers set ``TZ=America/New_York`` (compose + Dockerfile) so local time IS
-    market time, but stamping the offset means a box whose TZ drifts shows it in the log
-    rather than quietly writing ambiguous times."""
+    These lines get read by a person, so the clock is 12-hour rather than 24-hour. The
+    DATE stays ISO — it sorts, it matches the log filenames, and it is the half nobody
+    has trouble reading. The zone stays on the line because the containers set
+    ``TZ=America/New_York`` (compose + Dockerfile) so local time IS market time: a box
+    whose TZ has drifted then shows it here instead of silently writing times that
+    cannot be placed."""
 
     def formatTime(self, record, datefmt=None):        # noqa: N802  (stdlib spelling)
-        return (_dt.datetime.fromtimestamp(record.created).astimezone()
-                .isoformat(timespec="seconds"))
+        t = _dt.datetime.fromtimestamp(record.created).astimezone()
+        # %Z is the readable abbreviation (EDT); it comes back empty on a box with no
+        # tz database, so fall back to the numeric offset rather than stamping nothing.
+        zone = t.strftime("%Z") or t.strftime("%z")
+        return f"{t:%Y-%m-%d %I:%M:%S %p} {zone}".rstrip()
 
 
 class DatedFileHandler(logging.Handler):
