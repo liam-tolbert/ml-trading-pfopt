@@ -117,16 +117,27 @@ class DatedFileHandler(logging.Handler):
         self._stream = None
         self._key = None                # (day, resolved dir) the open stream belongs to
 
+    def release(self) -> None:
+        """Drop the open file handle WITHOUT tearing the handler down — it re-opens
+        lazily on the next record, so this is safe to call at any time.
+
+        Exists because Windows refuses to unlink a file that is still open: a test whose
+        ``TemporaryDirectory`` holds today's log fails its cleanup with ``WinError 32``.
+        POSIX allows the unlink, which is why the Pi's gate and CI never see it."""
+        try:
+            if self._stream is not None:
+                self._stream.close()
+        except OSError:
+            pass
+        finally:
+            self._stream = None
+            self._key = None
+
     def _ensure_stream(self) -> None:
         key = (_today(), _logs_dir())
         if self._stream is not None and key == self._key:
             return
-        if self._stream is not None:
-            try:
-                self._stream.close()
-            except OSError:
-                pass
-            self._stream = None
+        self.release()
         day, directory = key
         directory.mkdir(parents=True, exist_ok=True)
         self._stream = open(log_path(day), "a", encoding="utf-8")
@@ -142,15 +153,8 @@ class DatedFileHandler(logging.Handler):
             self.handleError(record)
 
     def close(self) -> None:
-        try:
-            if self._stream is not None:
-                self._stream.close()
-        except OSError:
-            pass
-        finally:
-            self._stream = None
-            self._key = None
-            super().close()
+        self.release()
+        super().close()
 
 
 _configured = False
@@ -181,3 +185,14 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
     """The ``cockpit`` logger, or a ``cockpit.<name>`` child. Configured once per process."""
     _configure()
     return logging.getLogger(_ROOT_NAME if not name else f"{_ROOT_NAME}.{name}")
+
+
+def release_files() -> None:
+    """Release every open dated-log handle; they re-open lazily on the next record.
+
+    Call this before deleting a directory that holds a log — on Windows an open file
+    cannot be unlinked, so a test's ``TemporaryDirectory`` cleanup raises ``WinError 32``
+    and aborts the run mid-suite. Harmless everywhere else."""
+    for h in logging.getLogger(_ROOT_NAME).handlers:
+        if isinstance(h, DatedFileHandler):
+            h.release()

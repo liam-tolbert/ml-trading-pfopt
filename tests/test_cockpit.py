@@ -6361,6 +6361,11 @@ def test_data_feed_logs_one_summary_line_per_sweep():
             data_feed._log_fetch("sweep", 4213, 342, 3870, 1, 3871, ["FBYDP"],
                                  _time.time() - 12.0)
             text = runlog.log_path(dir_path=d).read_text(encoding="utf-8")
+            # Must happen INSIDE the tempdir: the module-level handler still holds
+            # today's log open, and Windows refuses to unlink an open file, so the
+            # cleanup below raises WinError 32 and aborts the whole suite. POSIX does
+            # not care, which is why the Pi gate and CI stayed green through this.
+            runlog.release_files()
     assert "4213 requested" in text and "cached 342" in text, text
     assert "failed 1" in text, text
     assert "FBYDP" in text, "a failed name must be identified, not just counted"

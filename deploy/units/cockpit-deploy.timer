@@ -1,13 +1,21 @@
 [Unit]
-Description=EOD pull-based deploy for the SEPA cockpit (off-hours only)
+Description=Hourly pull-based deploy for the SEPA cockpit (off-hours window only)
 
 [Timer]
-# Weekdays: start right at market close (16:30 ET) and repeat every 30 min for the rest of the day.
-OnCalendar=Mon..Fri *-*-* 16:30:00
-OnCalendar=Mon..Fri *-*-* 17..23:0/30:00
-# Weekends: no trading session at all, so run every 30 min around the clock.
-OnCalendar=Sat,Sun *-*-* *:0/30:00
-# Catch up after a power cut — deploys are always off-hours anyway.
+# Hourly across the off-hours window, spanning midnight: 17:00-23:00, then 00:00-09:00.
+# The 09:30-16:00 session is deliberately NOT covered: a deploy rebuilds the image and
+# recreates the app container, and trading behavior must not change mid-session.
+#
+# No queue is needed for a push made during the day. deploy.sh compares origin/main
+# against the DEPLOYED IMAGE LABEL rather than the checkout, so it holds no memory of
+# when a push happened — a commit pushed at noon simply lands on the 17:00 fire, and a
+# fire with nothing new exits early after one `git fetch`.
+#
+# Times carry an explicit zone so the window stays correct across DST and does not
+# silently shift 4-5 hours if the host ever comes back on UTC.
+OnCalendar=*-*-* 17..23:00:00 America/New_York
+OnCalendar=*-*-* 00..09:00:00 America/New_York
+# Catch up after a power cut — the whole window is off-hours anyway.
 Persistent=true
 
 [Install]
