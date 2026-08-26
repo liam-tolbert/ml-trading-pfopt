@@ -63,14 +63,34 @@ if [ -z "$ok" ]; then
     exit 1
 fi
 
-# Prune sha- tags not referenced by live/prev; cap builder cache (32 GB card).
+# Steady state is exactly TWO tags: cockpit:live and cockpit:prev. The sha- tag is only
+# scaffolding between build and promote — the commit is recorded in the image's
+# cockpit.sha LABEL (what DEPLOYED below reads), so the tag carries no information once
+# live points at that image. Dropping it here removes a TAG, never the image.
+docker rmi "cockpit:sha-$SHORT" >/dev/null 2>&1 || true
+
+# Any other sha- tag is a leftover from an older deploy (or from one that rolled back
+# before reaching this point). NOTHING in this cleanup may be fatal: a tag is
+# undeletable while any stopped container still references its image — one stray
+# `docker run` without --rm pins an image forever — and on 2026-08-25 exactly that
+# aborted a deploy AFTER it had promoted, so `DEPLOYED` and the units-changed reminder
+# below never printed and systemd logged a good deploy as failed. Report and continue.
 KEEP=$(docker image inspect cockpit:live cockpit:prev --format '{{.Id}}' 2>/dev/null | sort -u)
 for tag in $(docker images cockpit --format '{{.Tag}}' | grep '^sha-' || true); do
-    id=$(docker image inspect "cockpit:$tag" --format '{{.Id}}')
-    echo "$KEEP" | grep -q "$id" || docker rmi "cockpit:$tag" >/dev/null
+    id=$(docker image inspect "cockpit:$tag" --format '{{.Id}}' 2>/dev/null) || continue
+    echo "$KEEP" | grep -q "$id" && continue
+    docker rmi "cockpit:$tag" >/dev/null 2>&1 || {
+        holder=$(docker ps -aq --filter "ancestor=cockpit:$tag" | tr '\n' ' ')
+        echo "NOTE: kept cockpit:$tag — still referenced by container(s): ${holder:-unknown}"
+        echo "      remove it with: docker rm ${holder:-<id>}"
+    }
 done
-docker image prune -f >/dev/null
-docker builder prune -f --keep-storage=2GB >/dev/null 2>&1 || true
+docker image prune -f >/dev/null 2>&1 || true
+# --reserved-space is the current spelling; --keep-storage is its deprecated alias and is
+# accepted for now. Try the new one first so this keeps capping the cache when the alias
+# is finally dropped, instead of silently going uncapped behind the `|| true`.
+docker builder prune -f --reserved-space=2GB >/dev/null 2>&1 \
+    || docker builder prune -f --keep-storage=2GB >/dev/null 2>&1 || true
 
 # systemd units can't be applied from here (needs root; deliberately not passwordless
 # sudo for repo-sourced code) — detect a change and tell the human exactly what to run.
