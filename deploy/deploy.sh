@@ -11,7 +11,20 @@ set -euo pipefail
 REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
 
-exec 9>/tmp/cockpit-deploy.lock
+# One lock for BOTH callers — the timer and a hand-run must contend, or a manual deploy
+# can land on top of a scheduled one mid-promotion. Opening it is the first thing that
+# can fail for a reason the raw bash error ("Permission denied") does not explain, so
+# say what is actually wrong: the usual cause is a lock left behind root-owned by a
+# `sudo ./deploy/deploy.sh`, after which every later run as the repo owner is locked out.
+LOCK=/tmp/cockpit-deploy.lock
+if ! exec 9>"$LOCK"; then
+    echo "DEPLOY HALT: cannot open $LOCK for writing (running as $(id -un))." >&2
+    ls -l "$LOCK" >&2 2>/dev/null || true
+    echo "  If it is owned by another user: sudo rm -f $LOCK" >&2
+    echo "  Then re-run as the repo owner — never with sudo: a root deploy leaves" >&2
+    echo "  root-owned files in data/, which the container (uid 1000) cannot write." >&2
+    exit 1
+fi
 flock -n 9 || { echo "deploy already running"; exit 0; }
 
 # -uno: stray untracked files must not block deploys; a real incoming-file
