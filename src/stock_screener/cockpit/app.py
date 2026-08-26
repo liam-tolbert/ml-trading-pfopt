@@ -566,17 +566,49 @@ st.session_state["_res_as_of"] = _res_as_of
 _frag_iv = "2s" if _snap0["status"] == "running" else "30s"
 
 
+def _clock(ts) -> str:
+    """12-hour clock, with the DATE prepended once it is no longer today — a bare '2:22 PM'
+    on a table screened yesterday reads as fresh at a glance."""
+    now = datetime.datetime.now()
+    return (ts.strftime("%I:%M %p").lstrip("0") if ts.date() == now.date()
+            else ts.strftime("%b %d %I:%M %p").replace(" 0", " "))
+
+
+def _price_asof():
+    """When prices were last topped up, from the newest trigger report's ``generated_at``.
+
+    cockpit-refresh stamps that every run, so it is the freshness of the PRICE cache —
+    a different thing from the scan's ``as_of``, which is when the last SCREEN finished.
+    Those two used to move together (one scheduled scan did both); since the refresh job
+    took over prices and screening became Re-scan-only, a single "data as of" was
+    reporting the older of the two as if it were both. Best-effort: no report, an
+    unparseable stamp, or any read error simply omits the half it cannot vouch for."""
+    try:
+        rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
+        raw = str((rep or {}).get("generated_at") or "")
+        if not raw:
+            return None
+        return _clock(datetime.datetime.fromisoformat(raw).replace(tzinfo=None))
+    except Exception:
+        return None
+
+
 @st.fragment(run_every=_frag_iv)
 def _scan_status_line() -> None:
     s = _worker.snapshot()
-    _ts = (datetime.datetime.fromtimestamp(s["as_of"]).strftime("%H:%M")
+    _ts = (_clock(datetime.datetime.fromtimestamp(s["as_of"]))
            if s.get("as_of") else None)
+    _px = _price_asof()
+    # "scan", not "data": the table below is the last SCREEN, which only Re-scan advances.
+    # Prices are refreshed on their own schedule and are usually far newer, so showing one
+    # timestamp for both made a minutes-old cache look days stale.
+    _tail = f" · prices {_px}" if _px else ""
     if s["status"] == "running":
-        st.caption((f"data as of {_ts} · " if _ts else "")
+        st.caption((f"scan {_ts}{_tail} · " if _ts else "")
                    + f"⏳ {s['phase_label']} {s['done']}/{s['total']} — refreshing in "
                      "the background")
     elif s["status"] == "error" and _ts:
-        st.caption(f":orange[⚠ background refresh failed — showing data as of {_ts}]")
+        st.caption(f":orange[⚠ background refresh failed — showing scan {_ts}]{_tail}")
         if st.button("🔁 Retry refresh", key="bg_retry"):
             _worker.request_rescan()
             try:                                  # fragment → escalate to app scope
@@ -593,7 +625,7 @@ def _scan_status_line() -> None:
             except StreamlitAPIException:
                 st.rerun()
     elif _ts:
-        st.caption(f"data as of {_ts}")
+        st.caption(f"scan {_ts}{_tail}")
 
 
 _scan_status_line()

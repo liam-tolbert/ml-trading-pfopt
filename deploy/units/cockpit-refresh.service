@@ -1,5 +1,5 @@
 [Unit]
-Description=SEPA cockpit data refresh (universe price top-up + watchlist trigger check)
+Description=SEPA cockpit intraday refresh (watchlist + held names, then trigger check)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -9,9 +9,9 @@ Type=oneshot
 User=pi
 WorkingDirectory=/home/pi/ml-trading-pfopt
 ExecStart=/usr/bin/docker compose run --rm oneshot
-# The universe top-up is thousands of names, so this is far longer than the old
-# trigger-only 900s — but still SHORTER than the 30-minute timer interval, so a wedged
-# run is killed before the next one is due rather than stacking. A killed run is not
-# lost work: every ticker's parquet is written as it completes, so the next fire resumes
+# The watchlist scope is tens of names — seconds per run. The universe sweep lives in
+# cockpit-refresh-eod.timer instead. Still shorter than the 30-minute interval so a wedged
+# run is killed before the next is due rather than stacking; a killed run is not lost
+# work, since every ticker's parquet is written as it completes, so the next fire resumes
 # from wherever the cache got to.
-TimeoutStartSec=1500
+TimeoutStartSec=900

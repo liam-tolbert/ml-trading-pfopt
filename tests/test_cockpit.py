@@ -4316,7 +4316,8 @@ def test_refresh_job_offline():
     spy = _trigger_frame(TODAY, [300 + i * 0.5 for i in range(260)])
 
     def fake_prices(tickers, **kw):
-        assert kw.get("max_age_days") == 0.0, "nightly run must use the top-up path"
+        assert kw.get("max_age_days") == refresh_job.REFRESH_MAX_AGE_DAYS, \
+            "scheduled runs must pass the freshness floor, not 0.0"
         return {t: (spy if t == "SPY" else up) for t in tickers}
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -4325,6 +4326,7 @@ def test_refresh_job_offline():
         save_watchlist(wl, ["UPUP"])                       # one legacy, unfrozen name
         with patch.object(cache, "WATCHLIST_JSON", wl), \
                 patch.object(cache, "TRIGGERS_DIR", trg), \
+                patch.object(refresh_job.trade, "position_symbols", lambda: []), \
                 patch.object(refresh_job.data_feed, "get_universe",
                              lambda *a, **kw: ["UPUP", "OTHER"]), \
                 patch.object(refresh_job.data_feed, "get_many_prices", fake_prices), \
@@ -4376,13 +4378,14 @@ def test_refresh_job_merges_concurrent_watchlist_edit():
 
         with patch.object(cache, "WATCHLIST_JSON", wl), \
                 patch.object(cache, "TRIGGERS_DIR", trg), \
+                patch.object(refresh_job, "refresh_targets", lambda scope: []), \
                 patch.object(refresh_job.data_feed, "get_many_prices", fake_prices), \
                 patch.object(refresh_job.data_feed, "get_fundamentals", lambda t, **kw: None):
-            # --no-universe on purpose: the race under test is "the app saves WHILE the
-            # trigger's own price fetch is in flight, after it loaded the list". With the
-            # universe pre-pass running first, fake_prices would fire its simulated write
-            # BEFORE build_report ever reads watchlist.json and the race would evaporate.
-            assert refresh_job.main(["--date", TODAY, "--no-universe"]) == 0
+            # Empty targets on purpose: the race under test is "the app saves WHILE the
+            # trigger's own price fetch is in flight, after it loaded the list". With a
+            # pre-pass running first, fake_prices would fire its simulated write BEFORE
+            # build_report ever reads watchlist.json and the race would evaporate.
+            assert refresh_job.main(["--date", TODAY]) == 0
 
         by = {e["ticker"]: e for e in load_watchlist(wl)}
         assert set(by) == {"UPUP", "KEEP", "NEWB"}, "app's membership must win"
@@ -5076,10 +5079,15 @@ def test_zigzag_fast_parity():
     assert checked >= 1000, checked
 
 
-def test_app_status_line_renders_data_as_of():
-    """The stale-while-refresh status fragment renders a 'data as of HH:MM' caption once
-    a result exists, and the latest()-first flow still runs the scan exactly once per
-    session (the store is inert under AppTest — per-session isolation intact)."""
+def test_app_status_line_renders_scan_and_price_asof():
+    """The stale-while-refresh status fragment labels the SCAN timestamp as such once a
+    result exists, and the latest()-first flow still runs the scan exactly once per session
+    (the store is inert under AppTest — per-session isolation intact).
+
+    It says "scan", never "data as of": the table is the last SCREEN, which only Re-scan
+    advances, while prices move on cockpit-refresh's schedule. One timestamp for both
+    reported the older of the two as if it were both, which made a minutes-old price cache
+    look days stale."""
     try:
         from streamlit.testing.v1 import AppTest
     except Exception as e:
@@ -5107,7 +5115,9 @@ def test_app_status_line_renders_data_as_of():
             at.run()
             assert not at.exception, f"app raised: {at.exception}"
             caps = "".join(str(getattr(c, "value", "")) for c in at.caption)
-            assert "data as of" in caps, f"status line must show the timestamp: {caps[:200]}"
+            assert "scan " in caps, f"status line must label the scan time: {caps[:200]}"
+            assert "data as of" not in caps, \
+                f"the ambiguous one-timestamp caption is gone: {caps[:200]}"
             at.run()                                     # rerun -> same result, no rescan
             assert not at.exception, f"app raised on rerun: {at.exception}"
     assert calls["n"] == 1, f"scan must run once per session, ran {calls['n']}x"
@@ -6210,6 +6220,59 @@ def test_positions_page_free_roll():
 def _log_record(msg: str):
     import logging
     return logging.LogRecord("cockpit.t", logging.INFO, __file__, 1, msg, None, None)
+
+
+def test_refresh_scope_watchlist_unions_held_names():
+    """The intraday scope is the watchlist UNION open positions, because those two drift:
+    a held name can fall off the watchlist, and the Positions page + sell pillars go blind
+    on a position they cannot price. Held names ALREADY watchlisted are not duplicated.
+    An unreachable broker degrades to watchlist-only — never an empty refresh."""
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import cache as cachemod
+    from src.stock_screener.cockpit import refresh_job
+    from src.stock_screener.cockpit.export import save_watchlist
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wl = Path(tmp) / "watchlist.json"
+        save_watchlist(wl, ["AAA", "BBB"])
+        with patch.object(cachemod, "WATCHLIST_JSON", wl):
+            with patch.object(refresh_job.trade, "position_symbols",
+                              lambda: ["BBB", "ZZZ"]):
+                got = refresh_job.refresh_targets(refresh_job.SCOPE_WATCHLIST)
+            assert sorted(got) == ["AAA", "BBB", "ZZZ"], got
+            assert got.count("BBB") == 1, f"held+watchlisted must not duplicate: {got}"
+
+            def boom():
+                raise RuntimeError("no credentials")
+
+            with patch.object(refresh_job.trade, "position_symbols", boom):
+                degraded = refresh_job.refresh_targets(refresh_job.SCOPE_WATCHLIST)
+            assert sorted(degraded) == ["AAA", "BBB"], \
+                f"broker failure must degrade to watchlist-only, got {degraded}"
+
+            with patch.object(refresh_job.data_feed, "get_universe",
+                              lambda *a, **kw: ["U1", "U2", "U3"]):
+                uni = refresh_job.refresh_targets(refresh_job.SCOPE_UNIVERSE)
+            assert uni == ["U1", "U2", "U3"], uni
+
+
+def test_refresh_max_age_floor_leaves_margin_under_the_cadence():
+    """The floor must be strictly positive — 0.0 (the old value) makes _classify_cached's
+    freshness branch unreachable, since no existing file is ever <= 0 days old, which is
+    why every intraday sweep on 2026-08-26 reported `cached 0` and re-downloaded ~4,100
+    names.
+
+    It must also stay under HALF the 30-minute cadence. Age is measured from a file's
+    WRITE time, so the gap to the next fire is the interval minus the run's duration minus
+    AccuracySec; a floor near the full interval leaves a sub-minute margin, and one slow
+    run would make the next scheduled fire serve its own last sweep and skip refreshing."""
+    from src.stock_screener.cockpit import refresh_job
+
+    cadence_days = 30.0 / (24.0 * 60.0)
+    assert 0.0 < refresh_job.REFRESH_MAX_AGE_DAYS <= cadence_days / 2.0, \
+        refresh_job.REFRESH_MAX_AGE_DAYS
 
 
 def test_runlog_prune_expires_at_fourteen_days():

@@ -155,6 +155,20 @@ def _pos_float(p, name) -> Optional[float]:
         return None
 
 
+def position_symbols() -> List[str]:
+    """Just the symbols currently held on the paper account — no price history, no journal.
+
+    Deliberately lighter than :func:`fetch_positions` and :func:`fetch_gate_inputs`: the
+    refresh job calls this to decide WHICH prices to download, and ``fetch_positions``
+    downloads price history itself, which would make that circular. A held name that has
+    fallen off the watchlist still needs fresh bars — the Positions page and the sell
+    pillars go blind on a position they cannot price. Raises :class:`TradeUnavailable`
+    when credentials are absent; the caller degrades to watchlist-only."""
+    client, _ = _connect_paper()
+    return sorted({s for s in (getattr(p, "symbol", None)
+                               for p in client.get_all_positions()) if s})
+
+
 def fetch_gate_inputs() -> dict:
     """Light inputs for :func:`gate_status`: Alpaca positions only (NO price-history
     fetch — the unrealized figures come from the broker) plus the journal's open/closed
