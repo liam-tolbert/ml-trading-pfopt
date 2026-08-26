@@ -1,8 +1,8 @@
 # SEPA Cockpit on the Raspberry Pi — one-time setup
 
-The Pi becomes the cockpit's **only** home: Streamlit app + half-hourly trigger
-checks + all state live here; the laptop (or phone) is just a browser on
-`http://<pi>:8501`. Never run the app or trigger on two machines — two
+The Pi becomes the cockpit's **only** home: Streamlit app + half-hourly data
+refreshes + all state live here; the laptop (or phone) is just a browser on
+`http://<pi>:8501`. Never run the app or the refresh on two machines — two
 diverging watchlists/caches is a lost-update race across hosts.
 
 Architecture at a glance:
@@ -10,8 +10,11 @@ Architecture at a glance:
 - One Docker image (`cockpit`), built **on the Pi** by `deploy/deploy.sh`.
 - The app runs as a compose service (`restart: unless-stopped` — survives
   reboots with no systemd unit of its own).
-- The trigger check runs as a fresh one-shot container every 30 min,
-  09:30–16:30 ET weekdays, fired by a systemd timer.
+- The data refresh runs as a fresh one-shot container every 30 min,
+  09:30–16:30 ET weekdays, fired by `cockpit-refresh.timer`. Each run tops up
+  daily bars for the whole universe and then evaluates the watchlist triggers.
+  It does **not** screen: the scan table is rebuilt only by the app's explicit
+  Re-scan button, so screening never runs on a schedule.
 - An EOD systemd timer (17:30 ET weekdays + Sat 10:00 ET) runs `deploy.sh`:
   `git pull --ff-only` → build image → run the full offline test suite inside
   the new image (no volumes, no network) → promote to `cockpit:live` only on
@@ -43,7 +46,7 @@ Architecture at a glance:
   Pi-hole, and would break entirely if the router blocks outside DNS. Fix:
   uncomment the `dns:` lines in `docker-compose.yml` with the Pi's **LAN IP**
   (e.g. `192.168.1.2`, never `127.0.0.1`). Verify after first start:
-  `docker compose run --rm trigger python -c "import socket; print(socket.gethostbyname('query1.finance.yahoo.com'))"`
+  `docker compose run --rm oneshot python -c "import socket; print(socket.gethostbyname('query1.finance.yahoo.com'))"`
   should succeed, and the query should appear in the Pi-hole query log.
 
 ## 1. Install Docker
@@ -114,13 +117,13 @@ the 125-test offline suite inside the image (several minutes on a Pi 4), then
 `DEPLOYED <sha>`. Browse `http://<pi>:8501` — the scan table should render
 from the seeded cache and the SEPA Guide page should show content.
 
-## 6. Trigger smoke test
+## 6. Refresh smoke test
 
 `docker compose run` treats extra args as a **replacement** for the service
 command, so the manual invocation needs the full command line:
 
 ```
-docker compose run --rm trigger python src/stock_screener/cockpit/eod_trigger.py --no-write
+docker compose run --rm oneshot python src/stock_screener/cockpit/refresh_job.py --no-write
 ```
 
 The report should print; `--no-write` guarantees nothing is persisted.
@@ -149,7 +152,7 @@ systemd-analyze calendar 'Mon..Fri *-*-* 10..16:00,30:00 America/New_York'
 systemd-analyze calendar 'Mon..Fri *-*-* 17:30:00 America/New_York'
 ```
 
-Trigger fires: 09:30, then every 30 min through 16:30 ET (the 16:30 run is the
+Refresh fires: 09:30, then every 30 min through 16:30 ET (the 16:30 run is the
 settled-close report the daily 16:35 ritual reads). Deploy fires: 17:30 ET
 weekdays + Sat 10:00 ET — always outside market hours, so a mid-day push never
 changes trading behavior mid-session.
@@ -167,7 +170,7 @@ rest — that's safe, because the morning executor is **disarmed by default**:
 it does nothing until you add
 `AUTOSELL=1` to `.env`. Run order of a first test: let one evening plan
 generate, check it on the Positions page, then
-`docker compose run --rm trigger python src/stock_screener/cockpit/sell_cli.py execute --dry-run`
+`docker compose run --rm oneshot python src/stock_screener/cockpit/sell_job.py execute --dry-run`
 before arming. What it will and won't do: only name-specific hard fails
 (P1 breakout broken / P2 template broken two closes running / P4 earnings
 without cushion) sell, always the full position; P3 (market regime) and all
@@ -188,7 +191,7 @@ Also **disarmed by default**: nothing submits until `AUTOBUY=1` is in `.env`.
 First test:
 
 ```
-docker compose run --rm trigger python src/stock_screener/cockpit/entry_cli.py execute --dry-run
+docker compose run --rm oneshot python src/stock_screener/cockpit/entry_job.py execute --dry-run
 ```
 
 ## 8. CUTOVER (do this only after steps 5–7 succeed)
@@ -196,7 +199,7 @@ docker compose run --rm trigger python src/stock_screener/cockpit/entry_cli.py e
 On the **laptop**:
 
 1. Disable the Windows Task Scheduler job **"SEPA Intraday Trigger"**.
-2. Never run `streamlit run ...` or `eod_trigger.py` on the laptop again.
+2. Never run `streamlit run ...` or `refresh_job.py` on the laptop again.
 
 The Pi is now the cockpit's only home; the laptop is a browser.
 
@@ -212,7 +215,7 @@ The Pi is now the cockpit's only home; the laptop is a browser.
 
 ## 10. Operations
 
-- Logs: `journalctl -u cockpit-trigger -u cockpit-deploy` (trigger stdout goes
+- Logs: `journalctl -u cockpit-refresh -u cockpit-deploy` (refresh stdout goes
   to journald; the dated JSON reports in `data/cockpit/triggers/` are
   unchanged and feed the app sidebar).
 - What's deployed:

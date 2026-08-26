@@ -3,7 +3,7 @@
 Two-phase, matching the operating rules (decision at the settled close, order at the
 next open):
 
-* **Evening** (``sell_cli.py plan``, after the ~16:30 settled trigger run):
+* **Evening** (``sell_job.py plan``, after the ~16:30 settled trigger run):
   :func:`build_sell_plan` turns each held position's pillars into a *plan* —
   full-exit orders for name-specific hard fails (P1, P2, P4). P3 (the tape) and every
   warn are recorded but never traded automatically. P2 must fail on TWO consecutive
@@ -11,7 +11,7 @@ next open):
   day on knife-edge SMA noise); the streak is read from the prior day's plan snapshot.
 * **Overnight veto**: the plan is a JSON file the Positions page renders with per-order
   Veto buttons; a vetoed order is kept in the file (audit trail) but never submitted.
-* **Morning** (``sell_cli.py execute``, ~09:25 ET): :func:`execute_sell_plan` submits a
+* **Morning** (``sell_job.py execute``, ~09:25 ET): :func:`execute_sell_plan` submits a
   market SELL for every still-planned order via the stop-aware sell flow (cancel the
   covering GTC stop, sell, re-arm any remainder); placed pre-open, the order queues for
   the opening print. Refuses stale plans and requires the ``AUTOSELL`` env var — the

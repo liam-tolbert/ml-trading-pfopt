@@ -764,7 +764,7 @@ def freshen_prices(tickers: Sequence[str], payloads: Dict[str, dict]) -> Dict[st
     frozen in the scan memo (the scan result lives in session_state with no time-based
     invalidation and the trigger fragment keeps the tab alive for days).
 
-    Uses the cheap incremental top-up (``max_age_days=0`` — the same path the EOD trigger
+    Uses the cheap incremental top-up (``max_age_days=0`` — the same path refresh_job
     uses to fetch the finalized close without a full 2y refetch); only the handful of
     watchlist names are fetched, never the universe. Any name the refresh can't reach keeps
     its existing frame — :func:`build_buy_plan`'s ``max_bar_age_days`` guard then skips a

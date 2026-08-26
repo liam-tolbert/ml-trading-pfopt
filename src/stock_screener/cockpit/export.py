@@ -87,7 +87,7 @@ def save_watchlist(path, entries: Sequence) -> None:
     unfrozen entries). The write is ATOMIC: serialized to a pid-suffixed sibling temp
     file, then ``os.replace``'d over the target — a crash mid-write can never leave a
     truncated file for :func:`load_watchlist` to silently read back as ``[]``, and the
-    app/eod_trigger writers can't see each other's half-written bytes. Best-effort: a
+    app/refresh_job writers can't see each other's half-written bytes. Best-effort: a
     failure is swallowed (the in-session list stays authoritative) and the existing
     file is left intact."""
     tmp = None
@@ -127,7 +127,7 @@ def merge_frozen_pivots(primary: Sequence, donor: Sequence) -> List[dict]:
     (``judged_pivot``/``date_added``/``pivot_source``) for a primary entry that is
     still unfrozen. Both sides go through the usual entry coercion.
 
-    Both directions of the app <-> eod_trigger race use it just before saving:
+    Both directions of the app <-> refresh_job race use it just before saving:
     the app persists ``merge(session, disk)`` so its stale session copy can't clobber
     pivots the half-hourly trigger job froze meanwhile; the trigger persists
     ``merge(disk_now, frozen_copies)`` so entries the user removed or 📌-re-froze

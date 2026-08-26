@@ -1,7 +1,7 @@
 """Auto-sell CLI — the two scheduled halves of the P1-P4 sell automation.
 
-    python src/stock_screener/cockpit/sell_cli.py plan    [--date YYYY-MM-DD] [--no-write]
-    python src/stock_screener/cockpit/sell_cli.py execute [--date YYYY-MM-DD] [--dry-run]
+    python src/stock_screener/cockpit/sell_job.py plan    [--date YYYY-MM-DD] [--no-write]
+    python src/stock_screener/cockpit/sell_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
 ``plan`` runs after the settled close (~16:40 ET): reads the paper account, evaluates
 the sell pillars per holding exactly as the Positions page does (journal entry dates,

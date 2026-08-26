@@ -5,7 +5,7 @@ hours) answers ONE question per name: **is it above its frozen pivot on ≥1.5×
 volume?** Intraday runs read the live provisional bar (flagged ``intraday``; ``volume_pace``
 says whether volume is running hot for the time of day); the last run of the day (~16:30)
 sees the settled close. :func:`check_triggers` answers from already-fetched frames; the CLI
-wrapper (``eod_trigger.py``) does the fetching, report persistence, and scheduling glue.
+wrapper (``refresh_job.py``) does the fetching, report persistence, and scheduling glue.
 
 Pivots are FROZEN on the watchlist entry (``judged_pivot`` — see ``export.py``): the
 detected pivot drifts with every scan, so a trigger against a recomputed level would move

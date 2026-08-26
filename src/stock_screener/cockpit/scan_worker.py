@@ -13,10 +13,12 @@ AppTest sessions stay isolated and a browser refresh starts clean. The actual ``
 call is serialized process-wide (``_SCAN_SERIAL``) so two sessions of the LAN app (laptop +
 phone) can't race yfinance or the CSV price caches with duplicate concurrent downloads.
 
-Background refreshes are driven by a process-wide SCHEDULER (``REFRESH_SCHEDULE_ET``),
-never by page interaction: entering or clicking a page serves the stored result and
-downloads nothing. The only network paths are the true cold start, the explicit
-Re-scan/full-re-download buttons, and the scheduled refresh itself.
+This process schedules nothing, and page interaction never refreshes: entering or clicking
+a page serves the stored result and downloads nothing. Price freshness belongs to
+``cockpit-refresh.timer`` (half-hourly, 09:30-16:30 ET), which tops up the whole universe
+from a one-shot container — so it is visible in ``systemctl list-timers`` and cannot die
+with this container. The only network paths left in-process are the true cold start and
+the explicit Re-scan / full-re-download buttons, which are the only things that SCREEN.
 
 ``scan.run_scan`` is resolved at call time inside the thread, so a test's
 ``patch.object(scan, "run_scan", ...)`` is honored exactly like the old inline call.
@@ -41,12 +43,12 @@ DEFAULT_MIN_CRITERIA = 8
 
 _SCAN_SERIAL = threading.Lock()    # process-wide: one real scan at a time, ever
 
-# Background refreshes are SCHEDULED, never interaction-driven: on the always-on
-# server every page visit after a quiet half hour was kicking a multi-minute universe
-# sweep. (weekday-set, hour, minute) in America/New_York — Mon-Fri 16:05 gives the
-# 16:10 close-of-day ritual a near-settled read; Sat 10:30 feeds the weekend hunt.
-# Explicit Re-scan / full-re-download always run immediately regardless.
-REFRESH_SCHEDULE_ET = (({0, 1, 2, 3, 4}, 16, 5), ({5}, 10, 30))
+# This process schedules NOTHING. Price freshness is owned by cockpit-refresh.timer
+# (half-hourly, 09:30-16:30 ET) which tops up the whole universe from a one-shot
+# container; SCREENING happens only when the user presses Re-scan. The old in-app
+# scheduler thread was invisible to `systemctl list-timers` and died with the container
+# — a deploy landing after its slot silently cost that day's scan — so refreshes now
+# live where every other scheduled job in this project lives.
 
 # The last completed ScanResult, pickled so a SERVER RESTART serves it instantly (the
 # store itself is process memory). Loaded lazily on the first miss; any load failure
@@ -156,84 +158,6 @@ class ResultStore:
 _STORE = ResultStore(persist_path=_LAST_SCAN_PKL)
 
 
-# ---- Scheduled background refreshes ---------------------------------------------- #
-_SCHED_LOCK = threading.Lock()
-_SCHED_STARTED = False
-
-
-def _next_fire(now):
-    """Next REFRESH_SCHEDULE_ET slot strictly after ``now`` (a tz-aware ET Timestamp).
-    Pure. The scheduled wall times never fall inside a DST transition window, so
-    ``replace`` on a tz-aware timestamp is safe."""
-    import pandas as pd
-    best = None
-    for days, hh, mm in REFRESH_SCHEDULE_ET:
-        for ahead in range(8):
-            cand = (now + pd.Timedelta(days=ahead)).replace(
-                hour=hh, minute=mm, second=0, microsecond=0)
-            if cand.dayofweek in days and cand > now:
-                if best is None or cand < best:
-                    best = cand
-                break
-    return best
-
-
-def _scheduled_refresh(store=None, runner=None) -> bool:
-    """One scheduled scan: run under the process-wide serial lock and publish through
-    the store. It deliberately never consults the adopt check — a refresh exists to
-    ADVANCE the data, and adopting its own entry would make it a no-op forever.
-    Sessions pick the result up on their next script run (``ensure_started`` adopts
-    newer store entries). Injectable for tests; True on success, and a raising runner
-    leaves the store's previous entry intact."""
-    if store is None:
-        store = None if _testing() else _STORE
-    if store is None:
-        return False
-    try:
-        with _SCAN_SERIAL:
-            if runner is None:
-                from . import scan
-                res = scan.run_scan(universe=DEFAULT_UNIVERSE,
-                                    cfg=scan.ScanConfig(min_criteria=DEFAULT_MIN_CRITERIA))
-            else:
-                res = runner()
-            store.put((DEFAULT_UNIVERSE, DEFAULT_MIN_CRITERIA), res)
-        return True
-    except Exception:
-        traceback.print_exc()
-        return False
-
-
-def _scheduler_loop() -> None:
-    """Sleep-until-next-slot loop (daemon thread). Chunked sleeps so a suspended or
-    clock-stepped host converges instead of oversleeping by the drift."""
-    import pandas as pd
-    while True:
-        now = pd.Timestamp.now(tz="America/New_York")
-        nxt = _next_fire(now)
-        if nxt is None:
-            time.sleep(3600.0)
-            continue
-        wait_s = (nxt - now).total_seconds()
-        while wait_s > 0:
-            time.sleep(min(wait_s, 300.0))
-            wait_s = (nxt - pd.Timestamp.now(tz="America/New_York")).total_seconds()
-        _scheduled_refresh()
-
-
-def start_scheduler() -> None:
-    """Start the refresh scheduler once per process. Inert under the AppTest tell —
-    a real scheduled scan inside a test process would hit the network."""
-    global _SCHED_STARTED
-    if _testing():
-        return
-    with _SCHED_LOCK:
-        if _SCHED_STARTED:
-            return
-        _SCHED_STARTED = True
-    threading.Thread(target=_scheduler_loop, name="sepa-scan-sched",
-                     daemon=True).start()
-
 _PRICE_PREFIX = "Prices · "        # run_scan's fetch-phase progress label prefix
 
 # What the progress bar calls each phase. "cache" is a price label whose detail says
@@ -287,9 +211,8 @@ class ScanWorker:
         sticks to the key — an auto-retry would hammer yfinance in a rerun loop); the
         page's Retry button goes through ``request_rescan`` for a fresh key. Page
         interaction NEVER starts a background refresh — the only network paths are the
-        true cold start (no result anywhere), an explicit Re-scan, and the process
-        scheduler's ``_scheduled_refresh`` (whose result lands in the store and is
-        adopted here on the next script run)."""
+        true cold start (no result anywhere) and an explicit Re-scan. Price freshness is
+        cockpit-refresh.timer's job and happens outside this process entirely."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
@@ -435,11 +358,8 @@ class ScanWorker:
 
 
 def get_worker() -> ScanWorker:
-    """The session's worker, created on first touch (any page). Also the process-wide
-    hook that arms the refresh scheduler — every cockpit entry point passes through
-    here, and the scheduler self-guards to one thread per process."""
+    """The session's worker, created on first touch (any page)."""
     import streamlit as st
-    start_scheduler()
     w = st.session_state.get("_scan_worker")
     if not isinstance(w, ScanWorker):
         w = ScanWorker()

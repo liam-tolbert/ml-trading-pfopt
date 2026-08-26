@@ -30,7 +30,7 @@ from .cache import (CACHE_DIR, EDGAR_DIR, FUNDAMENTALS_DIR, PRICES_DIR, TICKERS_
 from .runlog import get_logger
 
 # One summary line per get_many_prices call — never per ticker. A full-US sweep touches
-# ~4,200 names and data/cockpit/ lives on the Pi's SD card; per-name records would cost
+# ~4,200 names and data/cockpit/ is the box's hot write path; per-name records would cost
 # more writes than the price cache they describe. Failures name their symbols (capped),
 # because that is the part worth acting on.
 _LOG = get_logger("prices")
@@ -64,7 +64,7 @@ _CACHE_READ_WORKERS = 16
 # SAME process as the background scan thread and must share this lock. Held per ATTEMPT
 # (inside _download_batch, released during retry backoff) so a waiting fetch is blocked
 # for ~one attempt, not a whole retry cycle. Cross-PROCESS overlap (the scheduled
-# eod_trigger task) is inherently out of an in-process lock's reach — yfinance globals
+# refresh job) is inherently out of an in-process lock's reach — yfinance globals
 # are per-process, and cache-file contention is handled by _atomic_to_parquet.
 _YF_LOCK = threading.Lock()
 
@@ -412,7 +412,7 @@ def _frame_settled_current(last_bar_date) -> bool:
 
 def _atomic_to_parquet(df: pd.DataFrame, path: Path) -> None:
     """Write-then-``os.replace`` so a concurrent reader never sees a torn file. The app
-    and the half-hourly eod_trigger job run in SEPARATE processes but share these cache
+    and the half-hourly refresh job run in SEPARATE processes but share these cache
     files, and a torn parquet reads as corruption — which the pre-pass silently converts
     into a full network refetch. On Windows, replacing a file another process holds open
     can raise PermissionError; callers swallow it, leaving the OLD intact cache."""

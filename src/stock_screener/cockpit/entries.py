@@ -3,7 +3,7 @@
 The judgment stays human and happens at the evening ritual: the user builds a LIMIT
 trade plan in the panel exactly as always, then "arms" it instead of (or after)
 submitting. That writes tonight's ``entry_plan_YYYY-MM-DD.json`` beside the trigger
-reports. A pre-open CLI (``entry_cli.py execute``, ~09:26 ET) then submits AT MOST ONE
+reports. A pre-open CLI (``entry_job.py execute``, ~09:26 ET) then submits AT MOST ONE
 still-armed row — limit at the buy-zone top (no-chase, self-enforcing) with the GTC
 OTO stop leg — after clearing, in order: the ``AUTOBUY`` env gate (the feature ships
 dark), plan freshness (next-trading-day-only), and the progressive-exposure gate,

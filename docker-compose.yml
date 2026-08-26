@@ -1,4 +1,4 @@
-# Both services resolve cockpit:live and share ./data — the trigger writes
+# Both services resolve cockpit:live and share ./data — the refresh job writes
 # watchlist.json under the same merge-before-save protocol as the app, so they
 # must never point at different volumes. deploy/deploy.sh is the ONLY thing
 # that builds and retags cockpit:live (no build: key here — keeps the test
@@ -28,10 +28,12 @@ services:
       timeout: 10s
       retries: 3
 
-  # One-shot: fired by cockpit-trigger.timer as `docker compose run --rm
-  # trigger` (fresh container per fire, mirroring the old fresh-process-per-run
-  # semantics). The manual profile keeps `up -d` from ever starting it.
-  trigger:
+  # The generic short-lived container behind EVERY scheduled CLI job — not just the
+  # refresh: cockpit-refresh runs it bare (the command below), while sellplan/sellexec/
+  # buyexec override the command with their own CLI. A fresh container per fire mirrors
+  # the old fresh-process-per-run semantics. The manual profile keeps `up -d` from ever
+  # starting it.
+  oneshot:
     image: cockpit:live
     profiles: ["manual"]
     user: "1000:1000"
@@ -42,4 +44,4 @@ services:
     volumes:
       - ./data:/app/data
     # dns: ["192.168.1.2"]   # keep in sync with the app service's dns note
-    command: ["python", "src/stock_screener/cockpit/eod_trigger.py"]
+    command: ["python", "src/stock_screener/cockpit/refresh_job.py"]

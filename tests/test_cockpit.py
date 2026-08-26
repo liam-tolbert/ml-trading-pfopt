@@ -760,7 +760,7 @@ def test_trigger_sidebar_chart_button():
 
 
 def test_trigger_check_now_button():
-    """The 🔔 Check-triggers-now button runs the eod_trigger pipeline in-process, writes
+    """The 🔔 Check-triggers-now button runs the refresh_job pipeline in-process, writes
     the report to cache.TRIGGERS_DIR, and renders it in the SAME pass (the check runs
     before the report load). A failing check degrades to a warning, never a crash."""
     try:
@@ -771,7 +771,7 @@ def test_trigger_check_now_button():
     import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import scan as scanmod, cache, eod_trigger
+    from src.stock_screener.cockpit import scan as scanmod, cache, refresh_job
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
@@ -790,7 +790,7 @@ def test_trigger_check_now_button():
         with patch.object(scanmod, "run_scan", return_value=result), \
                 patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
                 patch.object(cache, "TRIGGERS_DIR", trg), \
-                patch.object(eod_trigger, "build_report", return_value=rep) as _br:
+                patch.object(refresh_job, "build_report", return_value=rep) as _br:
             at = AppTest.from_file(app_path, default_timeout=60)
             at.run()
             assert not at.exception, f"app raised: {at.exception}"
@@ -4300,7 +4300,7 @@ def test_trigger_report_roundtrip():
         assert "TRIGGER CHECK" in format_report(r2)
 
 
-def test_eod_trigger_cli_offline():
+def test_refresh_job_offline():
     """The CLI end-to-end, in-process and offline: patched data feed + temp watchlist/
     report paths. main() returns 0, writes the dated report, and AUTO-FREEZES the
     unfrozen entry's pivot back into watchlist.json; --no-write leaves both untouched."""
@@ -4308,7 +4308,7 @@ def test_eod_trigger_cli_offline():
     import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import cache, eod_trigger
+    from src.stock_screener.cockpit import cache, refresh_job
     from src.stock_screener.cockpit.export import load_watchlist, save_watchlist
 
     TODAY = "2026-07-10"
@@ -4325,16 +4325,18 @@ def test_eod_trigger_cli_offline():
         save_watchlist(wl, ["UPUP"])                       # one legacy, unfrozen name
         with patch.object(cache, "WATCHLIST_JSON", wl), \
                 patch.object(cache, "TRIGGERS_DIR", trg), \
-                patch.object(eod_trigger.data_feed, "get_many_prices", fake_prices), \
-                patch.object(eod_trigger.data_feed, "get_fundamentals",
+                patch.object(refresh_job.data_feed, "get_universe",
+                             lambda *a, **kw: ["UPUP", "OTHER"]), \
+                patch.object(refresh_job.data_feed, "get_many_prices", fake_prices), \
+                patch.object(refresh_job.data_feed, "get_fundamentals",
                              lambda t, **kw: {"next_earnings": "2026-07-20"}):
             # --no-write: report printed only, nothing lands on disk
-            assert eod_trigger.main(["--date", TODAY, "--no-write"]) == 0
+            assert refresh_job.main(["--date", TODAY, "--no-write"]) == 0
             assert not trg.exists() or not list(trg.glob("*.json"))
             assert load_watchlist(wl)[0]["judged_pivot"] is None
 
             # real run: report written, pivot auto-frozen into the watchlist file
-            assert eod_trigger.main(["--date", TODAY]) == 0
+            assert refresh_job.main(["--date", TODAY]) == 0
             rep = _json.loads((trg / f"triggers_{TODAY}.json").read_text(encoding="utf-8"))
             assert rep["date"] == TODAY and rep["summary"]["n"] == 1
             assert rep["summary"]["auto_frozen"] == ["UPUP"]
@@ -4344,7 +4346,7 @@ def test_eod_trigger_cli_offline():
             assert rep["names"][0]["judged_pivot"] == ent["judged_pivot"]
 
 
-def test_eod_trigger_merges_concurrent_watchlist_edit():
+def test_refresh_job_merges_concurrent_watchlist_edit():
     """Item-11 race, trigger side: an app save landing DURING the trigger's price fetch
     (remove GONE, 📌-freeze UPUP, add NEWB) must survive the auto-freeze write-back —
     disk membership and the user's judged pivot win; the trigger's auto pivot lands only
@@ -4352,7 +4354,7 @@ def test_eod_trigger_merges_concurrent_watchlist_edit():
     import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import cache, eod_trigger
+    from src.stock_screener.cockpit import cache, refresh_job
     from src.stock_screener.cockpit.export import load_watchlist, make_entry, save_watchlist
 
     TODAY = "2026-07-10"
@@ -4374,9 +4376,13 @@ def test_eod_trigger_merges_concurrent_watchlist_edit():
 
         with patch.object(cache, "WATCHLIST_JSON", wl), \
                 patch.object(cache, "TRIGGERS_DIR", trg), \
-                patch.object(eod_trigger.data_feed, "get_many_prices", fake_prices), \
-                patch.object(eod_trigger.data_feed, "get_fundamentals", lambda t, **kw: None):
-            assert eod_trigger.main(["--date", TODAY]) == 0
+                patch.object(refresh_job.data_feed, "get_many_prices", fake_prices), \
+                patch.object(refresh_job.data_feed, "get_fundamentals", lambda t, **kw: None):
+            # --no-universe on purpose: the race under test is "the app saves WHILE the
+            # trigger's own price fetch is in flight, after it loaded the list". With the
+            # universe pre-pass running first, fake_prices would fire its simulated write
+            # BEFORE build_report ever reads watchlist.json and the race would evaporate.
+            assert refresh_job.main(["--date", TODAY, "--no-universe"]) == 0
 
         by = {e["ticker"]: e for e in load_watchlist(wl)}
         assert set(by) == {"UPUP", "KEEP", "NEWB"}, "app's membership must win"
@@ -5216,42 +5222,12 @@ def test_worker_serves_stale_while_refreshing():
         assert store.get(w._key2()).result == {"scan": 2}
 
 
-def test_scan_refresh_schedule():
-    """Background refreshes are SCHEDULED (Mon-Fri 16:05 ET + Sat 10:30 ET), never
-    interaction-driven: _next_fire picks the next slot STRICTLY after now, and
-    _scheduled_refresh publishes through the store under the serial lock — a raising
-    runner returns False and leaves the previous entry intact."""
-    import pandas as pd
-    from src.stock_screener.cockpit import scan_worker as sw
-
-    def at(s):
-        return pd.Timestamp(s, tz="America/New_York")
-
-    assert sw._next_fire(at("2026-08-19 12:00")) == at("2026-08-19 16:05")  # Wed noon
-    assert sw._next_fire(at("2026-08-19 16:05")) == at("2026-08-20 16:05")  # strict >
-    assert sw._next_fire(at("2026-08-21 17:00")) == at("2026-08-22 10:30")  # Fri -> Sat
-    assert sw._next_fire(at("2026-08-22 11:00")) == at("2026-08-24 16:05")  # Sat -> Mon
-    assert sw._next_fire(at("2026-08-23 09:00")) == at("2026-08-24 16:05")  # Sun -> Mon
-
-    store = sw.ResultStore()
-    key = (sw.DEFAULT_UNIVERSE, sw.DEFAULT_MIN_CRITERIA)
-    assert sw._scheduled_refresh(store=store, runner=lambda: {"scan": "sched"}) is True
-    assert store.get(key).result == {"scan": "sched"}
-
-    def boom():
-        raise RuntimeError("boom")
-
-    assert sw._scheduled_refresh(store=store, runner=boom) is False
-    assert store.get(key).result == {"scan": "sched"}, \
-        "a failed scheduled refresh must not clobber the served result"
-
-
 def test_rescan_always_runs_and_no_interaction_refresh():
     """A manual rescan always re-scans (never satisfied by the store's fresh entry); a
     FAILED rescan keeps serving the stale result; and ensure_started NEVER starts a
     background refresh on interaction — not on a fresh entry, not on an old one, not
-    after an error. Recovery paths are the Retry button and the process scheduler
-    only."""
+    after an error. Recovery paths are the Retry button and the half-hourly
+    cockpit-refresh job, which tops prices up in a separate process entirely."""
     from unittest.mock import patch
 
     from src.stock_screener.cockpit import scan as scanmod
@@ -5322,7 +5298,7 @@ def test_scan_store_persists_and_reloads():
     serves it on the first get: same result, ORIGINAL completed_wall (the 'data as of'
     display), and completed_mono = -inf so an in-flight run's adopt check can never be
     satisfied by it. ensure_started serves the loaded entry WITHOUT starting any
-    network refresh (the process scheduler owns refreshes now — restarts must not
+    network refresh (cockpit-refresh.timer owns price freshness now — a restart must not
     trigger a download per §6.56). Corrupt / wrong-version / wrong-key pickles fail
     open to a cold start."""
     import pickle as _pickle
@@ -5349,7 +5325,7 @@ def test_scan_store_persists_and_reloads():
 
         # the worker end-to-end: a fresh session adopts the loaded entry instantly and
         # starts NOTHING (run_scan is deliberately unpatched — a network refresh here
-        # would be the exact page-entry download the scheduler change removed).
+        # would be the exact page-entry download that §6.56 removed).
         s3 = ResultStore(persist_path=pkl)
         w = ScanWorker(store=s3)
         assert w.latest() is None                             # nothing adopted yet
@@ -5429,21 +5405,6 @@ def test_pending_force_survives_adoption():
     assert w.result_if_ready() == {"scan": 2, "force": True}, \
         "a forced run is never satisfied by someone else's result"
     assert w._pending_force is False
-
-
-def test_scheduled_refresh_always_rescans():
-    """The scheduled refresh must RE-SCAN even when the store already holds an entry —
-    it exists to advance the data, and adopting its own entry would make it a no-op
-    forever. (Replaces the old R2-8 direction-1 TTL test: with scheduling, the refresh
-    path never consults the adopt check at all, so the mixed-clock hazard can't reach
-    it; direction 2 — queued-worker adoption — still pins the store-clock coherence.)"""
-    from src.stock_screener.cockpit import scan_worker as sw
-
-    store = sw.ResultStore(clock=lambda: 1e9)         # extreme clock: must not matter
-    key = (sw.DEFAULT_UNIVERSE, sw.DEFAULT_MIN_CRITERIA)
-    store.put(key, {"scan": 1})
-    assert sw._scheduled_refresh(store=store, runner=lambda: {"scan": 2}) is True
-    assert store.get(key).result == {"scan": 2}, "refresh must replace, never adopt"
 
 
 def test_worker_clock_coherence_queued_adopts():

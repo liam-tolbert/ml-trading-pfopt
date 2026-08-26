@@ -1,6 +1,6 @@
 """Armed-entries CLI — the morning half of the buy automation.
 
-    python src/stock_screener/cockpit/entry_cli.py execute [--date YYYY-MM-DD] [--dry-run]
+    python src/stock_screener/cockpit/entry_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
 Runs pre-open (~09:26 ET): loads the latest armed entry plan (written by the app's
 "Arm for next open" button at the evening ritual) and submits AT MOST ONE still-armed

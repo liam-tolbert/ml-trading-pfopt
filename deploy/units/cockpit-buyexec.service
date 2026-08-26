@@ -8,5 +8,5 @@ Wants=network-online.target
 Type=oneshot
 User=pi
 WorkingDirectory=/home/pi/ml-trading-pfopt
-ExecStart=/usr/bin/docker compose run --rm trigger python src/stock_screener/cockpit/entry_cli.py execute
+ExecStart=/usr/bin/docker compose run --rm oneshot python src/stock_screener/cockpit/entry_job.py execute
 TimeoutStartSec=600

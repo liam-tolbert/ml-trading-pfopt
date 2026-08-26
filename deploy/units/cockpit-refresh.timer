@@ -1,0 +1,14 @@
+[Unit]
+Description=Half-hourly SEPA data refresh, 09:30-16:30 ET weekdays
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 10..16:00,30:00 America/New_York
+# A missed refresh is skipped, never replayed late: both halves of this job are reads of
+# the CURRENT tape, so a catch-up run at 02:00 would just redo what the next 09:30 fire
+# does anyway.
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

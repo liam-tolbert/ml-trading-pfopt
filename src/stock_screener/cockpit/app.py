@@ -312,7 +312,7 @@ def filter_table(df, key_prefix: str = "flt"):
 # freezes the pivot you're looking at ("judged"); picker/.txt adds are unfrozen until the
 # 📌 button or the nightly EOD check ("auto") freezes one. Persisted to
 # `data/cockpit/watchlist.json`: `_wl()` loads it once per session; every mutation merges
-# with the on-disk copy (the eod_trigger job writes the same file) and saves back.
+# with the on-disk copy (the cockpit-refresh job writes the same file) and saves back.
 # --------------------------------------------------------------------------- #
 def _wl() -> list:
     if "watchlist" not in st.session_state:              # first access this session -> load from disk
@@ -330,7 +330,7 @@ def _wl_entry(ticker: str):
 
 def _wl_persist() -> None:
     # Merge with the file's CURRENT state before rewriting it: the half-hourly
-    # eod_trigger job auto-freezes pivots into watchlist.json while this session holds
+    # cockpit-refresh job auto-freezes pivots into watchlist.json while this session holds
     # a copy loaded at session start — a blind rewrite would clobber them. Disk pivots
     # win for entries this session left unfrozen; the session wins membership, order,
     # and its own freezes. The merged result becomes the session copy so the UI shows
@@ -1094,7 +1094,7 @@ with st.sidebar:
         except TradeUnavailable as _e:
             st.warning(str(_e))
 
-    # --- Latest watchlist trigger check (written by scripts/eod_trigger.bat) ---------- #
+    # --- Latest watchlist trigger check (written by cockpit-refresh.timer) ------------ #
     # A SELF-REFRESHING fragment: re-reads the report file once a minute and repaints only
     # ITSELF (fragment reruns are isolated — the memoized scan/table/chart never re-run; the
     # timer only ticks while a browser session is connected). Read-only: every field via .get()
@@ -1103,7 +1103,7 @@ with st.sidebar:
     def _trigger_report_panel() -> None:
         st.markdown("---")
         # Manual escape hatch for the scheduled job (laptop asleep / task missed a run):
-        # the SAME pipeline as scripts/eod_trigger.bat, in-process. It runs BEFORE the
+        # the SAME pipeline as cockpit-refresh.timer, in-process. It runs BEFORE the
         # report load below, so the fresh report renders in this same pass — no rerun.
         if st.button("🔔 Check triggers now", key="trigger_check_now",
                      help="Run the watchlist trigger check immediately — tops up the "
@@ -1111,14 +1111,14 @@ with st.sidebar:
                           "writes today's report (same as the scheduled half-hourly run)."):
             with st.spinner("Checking watchlist triggers…"):
                 try:
-                    from src.stock_screener.cockpit.eod_trigger import build_report
+                    from src.stock_screener.cockpit.refresh_job import build_report
                     save_trigger_report(build_report())
                 except Exception as _e:      # network/data failure — panel stays alive
                     st.warning(f"Trigger check failed: {_e}")
         _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
         if not _rep:
             st.caption("No trigger report yet — click 🔔 Check triggers now, or schedule "
-                       "scripts/eod_trigger.bat (HANDOFF §6.18) for half-hourly "
+                       "cockpit-refresh.timer (HANDOFF §6.18) for half-hourly "
                        "watchlist trigger checks.")
             return
         _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, best-effort

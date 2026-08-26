@@ -2304,7 +2304,7 @@ push is the human gate in front of the Pi's auto-deploy).
   `execute_sell_plan` (AUTOSELL env gate → freshness → per-order submit; qty clamped
   to CURRENT holdings; not-held skipped never shorted; FAILED stays failed — an
   ambiguous broker failure may have partially acted, blind retry could double-sell).
-- `cockpit/sell_cli.py` — `plan` (16:40 ET: fetch_positions + journal entry dates +
+- `cockpit/sell_job.py` — `plan` (16:40 ET: fetch_positions + journal entry dates +
   watchlist pivots + trigger-report SPY note = the Positions page's pillar wiring,
   headless; prior plan via `load_latest_sell_plan(before=today)`) and `execute`
   (09:25 ET: pre-open DAY market sells via the stop-aware `submit_position_sell` —
@@ -2415,7 +2415,7 @@ flagged inline below.
 - **Fail direction is asymmetric by design:** unknown → manual path OPEN (human
   judges), unattended executor CLOSED.
 
-**#24 armed entries (`entries.py` + `entry_cli.py` + panel Arm/disarm + buyexec unit):**
+**#24 armed entries (`entries.py` + `entry_job.py` + panel Arm/disarm + buyexec unit):**
 - Arm = a 3rd button beside Submit, LIMIT+attach-stop plans only (a market row would
   buy the open blind); writes checked buy rows (session-edited limits/stops, held
   rows excluded, numpy coerced) to `entry_plan_YYYY-MM-DD.json` in TRIGGERS_DIR.
@@ -2424,7 +2424,7 @@ flagged inline below.
 - Freshness is NOT sells': exactly one business day inside ``(plan_date, today]`` —
   a Sat/Sun-armed plan (the weekend hunt) executes Monday; sells' formula returns 0
   there and would never fire. Same-day + 2-session-old still refuse.
-- Executor (`entry_cli.py execute`, cockpit-buyexec.timer Mon..Fri 09:26 ET,
+- Executor (`entry_job.py execute`, cockpit-buyexec.timer Mon..Fri 09:26 ET,
   Persistent=false): AUTOBUY env gate (dark) → freshness → gate fresh (fails closed)
   → walk rows in panel order: held → skip to next; `skipped` result (pending buy /
   not tradable / cap) → next; only `submitted` consumes the ONE-PER-DAY bullet;
@@ -2571,7 +2571,7 @@ whenever a deploy touches `deploy/units/`.
 ### 6.63 Open items (2026-08-24)
 
 - **Auto-arming entries — discussed, not built.** `triggers.py` already computes
-  `triggered` (above the frozen pivot on ≥1.5× 50-day volume) and `entry_cli.py` already
+  `triggered` (above the frozen pivot on ≥1.5× 50-day volume) and `entry_job.py` already
   submits at most one capped, stopped limit order at 09:26. The missing link is the
   buy-side equivalent of `cockpit-sellplan`: turn settled-close `triggered` names into
   armed rows, leaving the overnight disarm window intact. **Never drive it from INTRADAY
