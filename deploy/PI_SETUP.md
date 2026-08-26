@@ -31,8 +31,10 @@ Architecture at a glance:
 
 ## 0. Prerequisites
 
-- Raspberry Pi 4 (4 GB), ethernet, ~32 GB storage. Steady-state footprint is
-  roughly 3–4 GB of Docker images/cache plus ~120 MB of state.
+- Raspberry Pi 4 Model B, ethernet. The deployed box has **1.8 GB usable RAM**
+  (a 2 GB board) and boots from a **57 GB USB disk**, not an SD card — steady
+  state is ~2.2 GB of Docker images plus ~2 GB of builder cache and ~120 MB of
+  state, so storage is not the constraint; memory is.
 - **64-bit OS is a hard requirement** (aarch64 wheels for pyarrow/numpy/pandas):
 
   ```
@@ -230,9 +232,13 @@ The Pi is now the cockpit's only home; the laptop is a browser.
   (the git checkout may legitimately sit ahead after a blocked deploy).
 - Manual rollback: `docker tag cockpit:prev cockpit:live && docker compose up -d app`.
 - Backup: rsync `data/cockpit/` off-box weekly — at minimum `watchlist.json`.
-- SD wear: `data/cockpit/prices/` is the hot write path (~94 MB rewritten per
-  full scan). Fine on a decent card at daily cadence; if a USB SSD is handy,
-  move `data/` there and change the one `volumes:` line in
-  `docker-compose.yml` (e.g. `/mnt/ssd/data:/app/data`).
-- Memory: 4 GB is enough including full-US scans. Optional headroom:
-  `sudo apt install zram-tools`.
+- Write wear: `data/cockpit/prices/` is the hot path (~94 MB rewritten per full
+  universe sweep). The box already runs off USB rather than an SD card, so the
+  once-daily `cockpit-refresh-eod` cadence is comfortable — this was a real
+  concern only while the sweep ran every 30 minutes.
+- **Memory is the binding constraint: 1.8 GB usable**, with 1.8 GB of zram swap
+  already active. Steady state is ~880 MB used, and a full-US sweep is the
+  hungriest thing that runs (~400 MB RSS on top of Streamlit's ~190 MB). A
+  `deploy.sh` image build is hungrier still and competes with the running app —
+  expect 15+ minutes, not the 5–10 a 4 GB board would take, and avoid kicking a
+  build off by hand while a universe sweep is in flight.
