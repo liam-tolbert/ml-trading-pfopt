@@ -275,5 +275,37 @@ def test_run_scan_uses_topup_fetch():
 
 
 
+def test_screen_job_publishes_under_the_key_the_app_reads():
+    """cockpit-screen-eod rebuilds the scan table. It MUST publish under the same
+    ``(universe, min_criteria)`` key the app reads, or the result lands in the store and the
+    app never sees it — and the failure would be silent, since the job exits 0 either way."""
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import screen_job
+    from src.stock_screener.cockpit.scan_worker import (
+        DEFAULT_MIN_CRITERIA, DEFAULT_UNIVERSE, ResultStore)
+
+    class _Res:
+        n_scanned, n_passed, errors = 4120, 610, []
+        candidates = [1, 2, 3]
+
+    seen = {}
+
+    def _fake_run_scan(universe=None, cfg=None, **kw):
+        seen["universe"] = universe
+        seen["min_criteria"] = getattr(cfg, "min_criteria", None)
+        return _Res()
+
+    store = ResultStore()                      # persist_path=None -> no disk I/O
+    with patch.object(screen_job.scan, "run_scan", _fake_run_scan):
+        out = screen_job.run_screen(store=store)
+
+    assert seen["universe"] == DEFAULT_UNIVERSE, seen
+    assert seen["min_criteria"] == DEFAULT_MIN_CRITERIA, seen
+    ent = store.get((DEFAULT_UNIVERSE, DEFAULT_MIN_CRITERIA))
+    assert ent is not None, "published under a key the app does not read"
+    assert ent.result is not None and out["passed"] == 610, out
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "scan"))

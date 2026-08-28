@@ -334,5 +334,57 @@ def test_scan_worker_progress_classification():
 
 
 
+def test_scan_store_adopts_a_newer_pickle_written_by_another_process():
+    """cockpit-screen-eod writes last_scan.pkl from a ONE-SHOT container while the Streamlit
+    process runs for days. The store must therefore re-read the file whenever its mtime
+    advances — the previous load-once-per-process guard made every scheduled screen invisible
+    until a deploy happened to restart the app, so the job would run nightly and the table
+    would never move.
+
+    Also pins the other direction: re-reading the store's OWN put must NOT clobber the
+    in-memory entry, whose completed_mono is real where the disk copy's is -inf."""
+    import os
+    import pickle
+    import tempfile
+
+    from src.stock_screener.cockpit.scan_worker import (
+        _PERSIST_VERSION, ResultStore, StoreEntry)
+
+    key = ("full_us", 8)
+    with tempfile.TemporaryDirectory() as tmp:
+        pkl = Path(tmp) / "last_scan.pkl"
+
+        def write(result, wall):
+            with open(pkl, "wb") as f:
+                pickle.dump({"version": _PERSIST_VERSION, "key": key,
+                             "result": result, "completed_wall": wall}, f)
+
+        write({"scan": "old"}, 1000.0)
+        store = ResultStore(persist_path=pkl)
+        assert store.get(key).result == {"scan": "old"}, "cold load must work"
+
+        # Another process publishes a NEWER scan. os.utime forces a distinct mtime so the
+        # test is not at the mercy of filesystem timestamp granularity.
+        write({"scan": "new"}, 2000.0)
+        os.utime(pkl, (pkl.stat().st_atime, pkl.stat().st_mtime + 10))
+        ent = store.get(key)
+        assert ent.result == {"scan": "new"}, \
+            "a newer pickle from another process must be adopted, not ignored"
+        assert ent.completed_wall == 2000.0, ent.completed_wall
+
+        # An OLDER pickle must never win, even though its mtime is newer.
+        write({"scan": "stale"}, 500.0)
+        os.utime(pkl, (pkl.stat().st_atime, pkl.stat().st_mtime + 20))
+        assert store.get(key).result == {"scan": "new"}, \
+            "completed_wall decides, not mtime — an older scan must not overwrite a newer one"
+
+        # Our own put stays authoritative: re-reading it must not swap in the -inf copy.
+        store.put(key, {"scan": "mine"})
+        got = store.get(key)
+        assert got.result == {"scan": "mine"}, got.result
+        assert got.completed_mono != float("-inf"), \
+            "the store's own entry must keep its real completed_mono, not the disk -inf"
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "scan_worker"))

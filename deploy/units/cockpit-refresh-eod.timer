@@ -7,7 +7,7 @@ Description=EOD universe price top-up, 17:00 ET weekdays
 # is what produced the "database is locked" failures on 2026-08-26. By 17:00 the settled
 # close is in and the evening ritual is done, and because this run WRITES post-settle it
 # arms data_feed._cache_settled: every read after it costs zero network until the open.
-OnCalendar=Mon..Fri *-*-* 17:00:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 16:20:00 America/New_York
 # A missed EOD sweep is not replayed at 02:00 — the next weekday's run covers it, and the
 # stale cache is still served correctly (just older) in the meantime.
 Persistent=false

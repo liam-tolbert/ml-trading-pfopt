@@ -84,33 +84,56 @@ class ResultStore:
         self._entries: Dict[tuple, StoreEntry] = {}
         self._clock = clock
         self._persist_path = persist_path       # None (unit tests) = no disk I/O at all
-        self._load_attempted = False            # one lazy load per process, success or not
+        self._seen_mtime = 0.0                  # newest last_scan.pkl mtime already adopted
 
     def get(self, key) -> Optional[StoreEntry]:
         with self._lock:
-            ent = self._entries.get(key)
-            if ent is None and self._persist_path is not None and not self._load_attempted:
-                self._load_attempted = True
-                ent = self._load_locked(key)
-            return ent
+            self._sync_locked(key)
+            return self._entries.get(key)
 
-    def _load_locked(self, key) -> Optional[StoreEntry]:
-        """Adopt the pickled last scan for ``key`` (caller holds ``_lock``). The entry's
-        completed_wall is the ORIGINAL scan time ("data as of yesterday 18:30");
-        completed_mono is -inf — monotonic clocks don't survive a restart, and -inf makes
-        the entry never adoptable by an in-flight run's adopt-while-queued check (a run
-        that already started should really scan). It is served as-is until the next
-        SCHEDULED refresh or a manual Re-scan. Any failure → None (cold scan)."""
+    def _sync_locked(self, key) -> None:
+        """Adopt the persisted scan whenever the FILE is newer than anything we hold.
+
+        This store is process memory, but ``last_scan.pkl`` is shared state:
+        ``cockpit-screen-eod`` rewrites it from a one-shot container while the Streamlit
+        process runs for days. A load-once-per-process guard (what this was) made every
+        scheduled screen invisible until the next deploy happened to restart the app — the
+        job would run nightly and the table would never move. So freshness is decided by
+        mtime, not by whether we have ever loaded.
+
+        Re-reading our OWN ``put`` is harmless and explicitly tolerated: the disk copy is
+        only adopted when its ``completed_wall`` is strictly newer, so an in-memory entry
+        (which carries a real ``completed_mono``) is never replaced by its own -inf copy."""
+        if self._persist_path is None:
+            return
+        try:
+            mtime = self._persist_path.stat().st_mtime
+        except OSError:
+            return
+        if mtime <= self._seen_mtime:
+            return
+        self._seen_mtime = mtime                # even on failure: don't re-read a bad file
+        loaded = self._read_locked(key)
+        cur = self._entries.get(key)
+        if loaded is not None and (cur is None
+                                   or loaded.completed_wall > cur.completed_wall):
+            self._entries[key] = loaded
+
+    def _read_locked(self, key) -> Optional[StoreEntry]:
+        """Read the pickled scan for ``key`` (caller holds ``_lock``); no mutation.
+
+        ``completed_wall`` is the ORIGINAL scan time ("data as of yesterday 18:30");
+        ``completed_mono`` is -inf — monotonic clocks don't survive a restart, and -inf
+        makes the entry never adoptable by an in-flight run's adopt-while-queued check (a
+        run that already started should really scan). Any failure → None (cold scan)."""
         try:
             with open(self._persist_path, "rb") as f:
                 d = pickle.load(f)
             if (isinstance(d, dict) and d.get("version") == _PERSIST_VERSION
                     and tuple(d.get("key") or ()) == tuple(key)
                     and d.get("result") is not None):
-                ent = StoreEntry(d["result"], float(d.get("completed_wall") or 0.0),
-                                 float("-inf"))
-                self._entries[key] = ent
-                return ent
+                return StoreEntry(d["result"], float(d.get("completed_wall") or 0.0),
+                                  float("-inf"))
         except Exception:
             pass
         return None
