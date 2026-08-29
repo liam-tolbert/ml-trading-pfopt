@@ -95,7 +95,7 @@ class ResultStore:
         """Adopt the persisted scan whenever the FILE is newer than anything we hold.
 
         This store is process memory, but ``last_scan.pkl`` is shared state:
-        ``cockpit-screen-eod`` rewrites it from a one-shot container while the Streamlit
+        ``cockpit-eod`` (step 2) rewrites it from a one-shot container while the Streamlit
         process runs for days. A load-once-per-process guard (what this was) made every
         scheduled screen invisible until the next deploy happened to restart the app — the
         job would run nightly and the table would never move. So freshness is decided by

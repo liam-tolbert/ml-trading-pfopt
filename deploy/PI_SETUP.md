@@ -12,17 +12,18 @@ Architecture at a glance:
   reboots with no systemd unit of its own).
 - The data refresh runs as a fresh one-shot container on two schedules, because
   its two scopes cost three orders of magnitude apart:
-  - `cockpit-refresh.timer` — every 30 min, 09:30–16:30 ET weekdays. Tops up the
-    watchlist **plus any held name not on it** (a position you cannot price
-    blinds the Positions page and the sell pillars), then evaluates the triggers.
-    Tens of names, seconds per run.
-  - `cockpit-refresh-eod.timer` — 17:00 ET weekdays. Tops up all ~4,100
-    scan-universe tickers once, after the settled close. Because it writes
-    post-settle it arms the settled-close cache serve, so every read until the
-    next open costs zero network.
-  Neither **screens**: the scan table is rebuilt only by the app's explicit
-  Re-scan button, so screening never runs on a schedule.
-- An EOD systemd timer (17:30 ET weekdays + Sat 10:00 ET) runs `deploy.sh`:
+  - `cockpit-refresh.timer` — 09:30, then every :00/:30 through 15:30, plus
+    16:10 ET weekdays. Tops up the watchlist **plus any held name not on it** (a
+    position you cannot price blinds the Positions page and the sell pillars),
+    then evaluates the triggers. Tens of names, seconds per run.
+  - `cockpit-eod.timer` — 16:20 ET weekdays. **One unit, two sequential steps.**
+    Step 1 tops up all ~4,100 scan-universe tickers after the settled close;
+    because it writes post-settle it arms the settled-close cache serve, so every
+    read until the next open costs zero network. Step 2 screens those bars into
+    `last_scan.pkl`. `Type=oneshot` runs the two `ExecStart=` lines in order and
+    skips step 2 if step 1 failed, so the screen can never read a half-updated
+    cache and the two can never contend for yfinance.
+- An hourly off-hours systemd timer (17:00–09:00 ET daily) runs `deploy.sh`:
   `git pull --ff-only` → build image → run the full offline test suite inside
   the new image (no volumes, no network) → promote to `cockpit:live` only on
   green, with automatic rollback if the new app fails its health check.
@@ -234,7 +235,7 @@ The Pi is now the cockpit's only home; the laptop is a browser.
 - Backup: rsync `data/cockpit/` off-box weekly — at minimum `watchlist.json`.
 - Write wear: `data/cockpit/prices/` is the hot path (~94 MB rewritten per full
   universe sweep). The box already runs off USB rather than an SD card, so the
-  once-daily `cockpit-refresh-eod` cadence is comfortable — this was a real
+  once-daily `cockpit-eod` cadence is comfortable — this was a real
   concern only while the sweep ran every 30 minutes.
 - **Memory is the binding constraint: 1.8 GB usable**, with 1.8 GB of zram swap
   already active. Steady state is ~880 MB used, and a full-US sweep is the

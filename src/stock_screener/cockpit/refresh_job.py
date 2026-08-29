@@ -1,4 +1,4 @@
-"""Scheduled data refresh — CLI wrapper for the two refresh timers.
+"""Scheduled data refresh — CLI wrapper for both refresh scopes.
 
     python src/stock_screener/cockpit/refresh_job.py [--scope watchlist|universe]
                                                      [--max-age-days N]
@@ -10,7 +10,8 @@ Two scopes, two schedules, because they cost three orders of magnitude apart:
   Tops up the watchlist PLUS any symbol held on the paper account that is not already
   on it (a position that fell off the watchlist still has to be priceable, or the
   Positions page and the sell pillars go blind on it). Tens of names; seconds per run.
-* ``universe`` — ``cockpit-refresh-eod.timer``, 17:00 ET weekdays. Tops up all ~4,100
+* ``universe`` — step 1 of ``cockpit-eod.timer``, 16:20 ET weekdays; the screen is step 2
+  of the same unit, so it cannot start until this exits 0. Tops up all ~4,100
   scan-universe tickers ONCE, after the settled close. That run is the one that matters:
   it writes post-settle, which arms ``data_feed._cache_settled`` so every later read —
   evening, overnight, pre-open — is served from cache with zero network.

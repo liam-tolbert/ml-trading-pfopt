@@ -335,7 +335,7 @@ def test_scan_worker_progress_classification():
 
 
 def test_scan_store_adopts_a_newer_pickle_written_by_another_process():
-    """cockpit-screen-eod writes last_scan.pkl from a ONE-SHOT container while the Streamlit
+    """cockpit-eod step 2 writes last_scan.pkl from a ONE-SHOT container while the Streamlit
     process runs for days. The store must therefore re-read the file whenever its mtime
     advances — the previous load-once-per-process guard made every scheduled screen invisible
     until a deploy happened to restart the app, so the job would run nightly and the table

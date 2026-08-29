@@ -237,9 +237,9 @@ diverging watchlists is a lost-update race across hosts.
 
 | Unit | When | Runs |
 |---|---|---|
-| `cockpit-refresh` | every 30 min, 09:30–16:30 | watchlist + held-name price top-up, then trigger check |
-| `cockpit-refresh-eod` | 17:00 weekdays | full-universe price top-up (arms the settled-close serve) |
-| `cockpit-sellplan` | 16:40 weekdays | evening sell plan (overnight veto window) |
+| `cockpit-refresh` | 09:30, :00/:30 to 15:30, 16:10 | watchlist + held-name price top-up, then trigger check |
+| `cockpit-sellplan` | 16:15 weekdays | evening sell plan (overnight veto window) |
+| `cockpit-eod` | 16:20 weekdays | **two sequential steps in one unit**: full-universe price top-up (arms the settled-close serve), then the universe screen that rebuilds `last_scan.pkl` |
 | `cockpit-sellexec` | 09:25 weekdays | submit still-planned sells for the open |
 | `cockpit-buyexec` | 09:26 weekdays | submit at most ONE armed entry |
 | `cockpit-deploy` | hourly, 17:00–09:00 daily | `deploy.sh` |
@@ -428,6 +428,8 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.66** **Deploy hardening.** A six-day-old stopped container (`docker run` without `--rm`) pinned an image, `docker rmi` failed, and under `set -e` that **aborted a deploy that had already promoted** — so `DEPLOYED` and the units-changed reminder never printed and systemd logged a good deploy as failed. Prune is now non-fatal and names the holding container; steady state is exactly two tags (`live`, `prev`); `--reserved-space` replaces the deprecated `--keep-storage`.
 - **§6.67** **`sudo bash deploy.sh` left root-owned `/tmp/cockpit-deploy.lock`, `.git/HEAD`, `.git/index`, `.git/ORIG_HEAD`** — locking out every later run *and* the scheduled deploy. The lock open now fails with a diagnostic instead of a bare "Permission denied". `docker ps` hides the containers that cause this class of problem; use `docker ps -a`.
 - **§6.68** **Test suite split.** 6,411 lines / 144 tests → a 70-line runner plus 12 category suites under `tests/cockpit/`. Split by an AST script that aborts unless every test is assigned exactly once. `_common.py` holds the 12 shared fixtures and must re-export them via `__all__` (`import *` skips underscore names). Two path traps: `ROOT` moved to `parents[2]`, and `vcp_labels` is imported *bare*, which only resolved while the suite ran as a script from `tests/`.
+- **§6.69** **The two EOD units became one.** The first-ever `cockpit-screen-eod` run (2026-08-28) exposed both halves of the problem at once. (a) It crashed at the last line with `ValueError: The truth value of a DataFrame is ambiguous` — `screen_job.py` did `getattr(res, "candidates", []) or []`, and `candidates` is a DataFrame. The crash landed *after* `store.put`, so the scan table was correct and only the exit code lied; **never `or []` a DataFrame**. (b) The sweep ran 16:20:20→16:35:43 (15m23s) while the screen fired at 16:25, so the two contended for yfinance and the screen re-fetched what the sweep had not reached — 30 minutes against the ~5 a warm cache costs. A clock gap cannot enforce ordering against a job whose runtime varies 11–18 min, so `cockpit-refresh-eod` + `cockpit-screen-eod` collapsed into `cockpit-eod`: `Type=oneshot` with two `ExecStart=` lines, which systemd runs serially and abandons if the first fails. `TimeoutStartSec` is **per-unit, not per-ExecStart** — hence 6000, the sum of the old two. `install-units.sh` removes installed `cockpit-*` units the repo no longer ships, so the old pair disappears on the next `sudo deploy/install-units.sh` with no manual cleanup.
+
 
 ## 12. Open items
 
@@ -437,11 +439,14 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   leaving the overnight disarm window intact. **Never drive it from INTRADAY triggers** — the volume
   ratio is provisional and only clears 1.5× late in the session, so it would systematically buy near
   the close.
-- **Nothing advances the scan automatically any more.** Since §6.63 removed the in-app scheduler, the
-  Tier-A list is as old as your last manual Re-scan. The caption now shows this, but nothing fixes it.
-  The consistent option is a `cockpit-screen-eod` unit beside `cockpit-refresh-eod`.
-- **§6.62 follow-up:** the 16:30 collision is resolved (EOD moved to 17:00); confirm no other unit
-  overlaps the evening ritual.
+- ~~Nothing advances the scan automatically~~ — **resolved (§6.69).** The screen is step 2 of
+  `cockpit-eod`. The caption's `scan <t>` stamp should now move every weekday evening; if it stops,
+  check `systemctl status cockpit-eod` before suspecting the app.
+- ~~§6.62 follow-up: confirm no unit overlaps the evening ritual~~ — **resolved (§6.69)** by
+  collapsing the sweep and the screen into one unit. The remaining adjacency is `cockpit-deploy` at
+  17:00, which can fire while a slow `cockpit-eod` is still screening; that is benign (the deploy
+  touches no market data, and `store.put` is tmp + `os.replace`), but it is the next thing to look at
+  if the evening ever misbehaves.
 - **~95 orphan parquets** (~2.2 MB) for names that left the universe. **Do not prune by universe
   membership** — `SPY` is filtered out of `full_us` as an ETF and is the benchmark behind every RS
   rating and the regime banner. No orphan is older than 90 days, so a staleness rule catches nothing

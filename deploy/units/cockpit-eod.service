@@ -1,0 +1,36 @@
+[Unit]
+Description=SEPA cockpit EOD sweep + screen (universe prices, then the scan table)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ml-trading-pfopt
+
+# ONE unit, two steps, because the ordering is load-bearing and a clock gap cannot enforce
+# it. Type=oneshot runs ExecStart lines SEQUENTIALLY and abandons the rest if one fails, so
+# the screen starts when the sweep FINISHES — 15 minutes or 25, it does not matter — and
+# does not run at all if the sweep failed. Screening a half-updated cache is worse than not
+# screening. These were two timers on a guessed offset until 2026-08-28, when the sweep
+# (15m23s) was still running as the screen fired 5 minutes in: two containers on yfinance
+# at once, the condition behind the 2026-08-26 "database is locked" and YFRateLimitError
+# failures, and the screen re-fetched what the sweep had not yet reached (30 min, against
+# the ~5 a warm cache costs).
+
+# Step 1 — top up every scan-universe ticker post-settle. Because this WRITES after the
+# close it arms data_feed._cache_settled: no session has elapsed, so no new bar can exist
+# and every read until the next open is served from cache at zero network cost.
+ExecStart=/usr/bin/docker compose run --rm oneshot python src/stock_screener/cockpit/refresh_job.py --scope universe
+
+# Step 2 — screen those bars into last_scan.pkl. Every price read here is now a cache hit,
+# so this is CPU-bound rather than network-bound. Still the hungriest thing on the box
+# (~4,100 names, 2 GB RAM, and the Streamlit app holds ~190 MB of it).
+ExecStart=/usr/bin/docker compose run --rm oneshot python src/stock_screener/cockpit/screen_job.py
+
+# Covers BOTH steps: TimeoutStartSec is per-unit, not per-ExecStart. 2400 for the sweep
+# (11-13 min measured on a Pi 4, longer when yfinance throttles) + 3600 for the screen (a
+# swapping Pi is slow, not broken). Generous because this runs ONCE a day and the only
+# thing behind it is cockpit-deploy at 17:00, which touches no market data.
+TimeoutStartSec=6000

@@ -1,4 +1,4 @@
-"""Scheduled universe screen — CLI wrapper (``cockpit-screen-eod.timer``, 17:30 ET weekdays).
+"""Scheduled universe screen — step 2 of ``cockpit-eod.timer`` (16:20 ET weekdays).
 
     python src/stock_screener/cockpit/screen_job.py [--universe full_us] [--min-criteria 8]
 
@@ -13,10 +13,14 @@ the container, so a deploy landing after its slot silently cost that day's scree
 removed when price refreshing moved to systemd; this job is the other half — the piece that
 advances the CANDIDATE LIST rather than the price cache.
 
-**Ordering matters.** This must run AFTER ``cockpit-refresh-eod`` (17:00), which tops up the
-whole universe post-settle. With that done, every read here is served from cache
+**Ordering matters, and is now structural.** This is the second ``ExecStart`` of the
+``cockpit-eod`` oneshot unit: systemd starts it only once step 1
+(``refresh_job.py --scope universe``) has exited 0, however long that took, and skips it
+entirely if the sweep failed. With the sweep done every read here is served from cache
 (``_cache_settled``: no session has elapsed, so no new bar can exist) and the run costs CPU
-only — no network. Run it BEFORE the price sweep and it screens yesterday's bars.
+only — no network. Run it BEFORE the sweep and it screens yesterday's bars; run it DURING
+one and it re-fetches what the sweep has not reached yet while both containers hit
+yfinance — which is exactly what a 5-minute timer gap produced on 2026-08-28.
 
 Screening only: this places no orders and touches no watchlist state.
 """
@@ -54,10 +58,15 @@ def run_screen(universe: str = DEFAULT_UNIVERSE,
     t0 = time.time()
     res = scan.run_scan(universe=universe, cfg=scan.ScanConfig(min_criteria=min_criteria))
     store.put((universe, min_criteria), res)
+    # NB: `candidates` is a DataFrame -- never `or []` it. A DataFrame has no truth value,
+    # so `df or []` raises ValueError and (as on 2026-08-28) killed the job AFTER store.put
+    # had already persisted a perfectly good scan: the table was fine, the unit reported
+    # failure. len() alone is safe on both a frame and None-guarded default.
+    cand = getattr(res, "candidates", None)
     out = {"scanned": getattr(res, "n_scanned", None),
            "passed": getattr(res, "n_passed", None),
-           "candidates": int(len(getattr(res, "candidates", []) or [])),
-           "errors": len(getattr(res, "errors", []) or []),
+           "candidates": 0 if cand is None else int(len(cand)),
+           "errors": len(getattr(res, "errors", None) or []),
            "elapsed": round(time.time() - t0, 1)}
     _LOG.info("screen done: %s scanned, %s passed 8/8, %d candidates, %d errors, %.1fs",
               out["scanned"], out["passed"], out["candidates"], out["errors"],

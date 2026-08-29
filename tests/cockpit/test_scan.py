@@ -276,7 +276,7 @@ def test_run_scan_uses_topup_fetch():
 
 
 def test_screen_job_publishes_under_the_key_the_app_reads():
-    """cockpit-screen-eod rebuilds the scan table. It MUST publish under the same
+    """cockpit-eod step 2 rebuilds the scan table. It MUST publish under the same
     ``(universe, min_criteria)`` key the app reads, or the result lands in the store and the
     app never sees it — and the failure would be silent, since the job exits 0 either way."""
     from unittest.mock import patch
