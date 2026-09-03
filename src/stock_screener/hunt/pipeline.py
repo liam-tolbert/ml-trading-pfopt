@@ -1,9 +1,9 @@
 """Deterministic core of the weekend hunt.
 
 Reads the cockpit's last completed scan (READ-ONLY — scan freshness is
-scan_worker's job; Sat 10:30 ET feeds this) and turns it into the reviewable
-state the /weekend-hunt skill works from: candidate diagnostics, verdict
-bookkeeping, and the mechanical gates.
+scan_worker's job; cockpit-eod rebuilds it every weekday evening) and turns it
+into the reviewable state the /weekend-hunt skill works from: candidate
+diagnostics, verdict bookkeeping, and the mechanical gates.
 
 The entry rules live here as named constants with their sources, because this
 is exactly what got fumbled when the process was ad hoc:
@@ -25,18 +25,21 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.stock_screener.cockpit.cache import CACHE_DIR, WATCHLIST_JSON
+from src.stock_screener.cockpit.cache import (CACHE_DIR, LAST_SCAN_PKL as _LAST_SCAN_PKL,
+                                              SCAN_PERSIST_VERSION as _PERSIST_VERSION,
+                                              WATCHLIST_JSON)
+from src.stock_screener.cockpit.doctrine import (EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
+                                                 VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
+from src.stock_screener.cockpit.indicators import prior_volume_average, volume_ratio
 
 # ---- rules (sources in the module docstring) ------------------------------ #
 MIN_RS = 70                    # Step-1 floor / app Min-RS default
 BUY_ZONE_MAX_PCT = 5.0         # pivot .. +5% = the entry range (scan.py buy_zone)
 APPROACH_MIN_PCT = -3.0        # within 3% below pivot = "approaching"
-VOL_CONFIRM_RATIO = 1.4        # close above pivot on >=40% above-average volume
-EARNINGS_BLOCK_DAYS = 21       # no entry with earnings inside ~3 weeks (doc Step-4)
 MAX_SCAN_AGE_DAYS = 3.0        # hunt must run off a weekend-fresh scan
-
-_LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"
-_PERSIST_VERSION = 1           # scan_worker._PERSIST_VERSION — bump together
+# VOL_CONFIRM_RATIO / VOL_AVG_DAYS / EARNINGS_BLOCK_DAYS are imported from cockpit.doctrine:
+# the hunt and the daily trigger job enforce the SAME entry rules, and while each kept its
+# own copy the hunt confirmed breakouts at a looser ratio over a shorter window.
 HUNT_DIR = CACHE_DIR / "hunt"
 
 VERDICTS = ("PASS", "PASS-", "FAIL")
@@ -59,7 +62,8 @@ def load_scan(path: Optional[Path] = None) -> ScanBundle:
     path = Path(path) if path else _LAST_SCAN_PKL
     if not path.exists():
         raise HuntError(f"{path} not found — run a scan from the cockpit first "
-                        "(the Sat 10:30 scheduled refresh normally provides it).")
+                        "(cockpit-eod writes it on weekday evenings — check "
+                        "`systemctl status cockpit-eod`).")
     with open(path, "rb") as f:
         d = pickle.load(f)
     if not isinstance(d, dict) or d.get("version") != _PERSIST_VERSION or d.get("result") is None:
@@ -122,7 +126,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         piv = float(lev["pivot"])
         vs_pivot = (float(close[-1]) / piv - 1.0) * 100.0
 
-        vs50 = pd.Series(vol).rolling(50).mean().to_numpy()
+        vs50 = prior_volume_average(pd.Series(vol), VOL_AVG_DAYS).to_numpy()
         with np.errstate(divide="ignore", invalid="ignore"):
             vr = vol[-25:] / np.where(vs50[-25:] > 0, vs50[-25:], np.nan)
         ret1 = np.diff(np.log(close))[-25:]
@@ -149,7 +153,10 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "n_legs": len(depths),
             "earnings_in": p.get("earnings_in"),
             "breakout_today": int(bool(lev.get("breakout_today"))),
-            "volume_ratio": round(float(lev.get("volume_ratio") or 0.0), 2),
+            # Computed here, NOT read from lev["volume_ratio"]: that field is the
+            # vendored detector's 20-day context read, so confirming against it applied a
+            # different rule than the daily trigger job to the same doctrine.
+            "volume_ratio": round(volume_ratio(df, VOL_AVG_DAYS) or 0.0, 2),
             # step-2 detail (booleans as 0/1 so the CSV round-trips cleanly)
             "f_rev": int(bool(checks.get("revenue_growth"))),
             "f_eps": int(bool(checks.get("eps_growth"))),
@@ -195,8 +202,13 @@ def gates(diag: pd.DataFrame, verdicts: Dict[str, dict], min_fund: int = 0) -> d
         if _earnings_blocked(r["earnings_in"]):
             out["earnings_blocked"].append({**row, "earnings_in": int(float(r["earnings_in"]))})
             continue                      # blocked names appear nowhere else
-        out[bucket(row["vs_pivot_pct"])].append(row)
-        if bool(r["breakout_today"]) and float(r["volume_ratio"]) >= VOL_CONFIRM_RATIO:
+        b = bucket(row["vs_pivot_pct"])
+        out[b].append(row)
+        # Confirmation is a BUY-ZONE verdict, not a price observation: a name that closed
+        # more than +5% past its pivot is chasing however heavy the volume was, and
+        # listing it as "confirmed" invites exactly the entry the doctrine forbids.
+        if (b == "buy_zone" and bool(r["breakout_today"])
+                and float(r["volume_ratio"]) >= VOL_CONFIRM_RATIO):
             out["volume_confirmed"].append({**row, "volume_ratio": float(r["volume_ratio"])})
     for k in ("buy_zone", "approaching", "below", "past_entry"):
         out[k].sort(key=lambda x: -x["q"])

@@ -1,6 +1,6 @@
 # Whitelist (BuildKit): ignore everything, re-include the cockpit closure.
-# Keeps data/, .git, notebooks, docs/, the legacy ML pipeline, and the
-# sqlalchemy-trapped screener modules out of the image by construction.
+# Keeps data/, .git, notebooks, docs/, the legacy ML pipeline and the parked
+# research tracks out of the image by construction.
 *
 
 !.streamlit/config.toml
@@ -10,8 +10,8 @@
 !src/stock_screener/cockpit/**
 !src/stock_screener/minervini_sepa_system.md
 
-# --- vendored pure rule modules + attribution (the data/ layer stays out:
-#     its __init__ eager-loads sqlalchemy) ---
+# --- vendored pure rule modules + attribution (these four are the whole of the
+#     vendored package now; the live-fetch layers were deleted, see PROVENANCE) ---
 !src/stock_screener/minervini_screener/__init__.py
 !src/stock_screener/minervini_screener/LICENSE
 !src/stock_screener/minervini_screener/PROVENANCE.md
@@ -24,11 +24,17 @@
 # --- trade panel dependency (lazy import in cockpit/trade.py) ---
 !src/portfolio_experimentation/alpaca_trader.py
 
-# --- test-gate closure: the suite imports backtest_daily.synthetic_provider,
-#     whose package __init__ eagerly pulls the engine chain ---
-!src/stock_screener/backtest_daily/**
-!src/stock_screener/momentum_lib.py
-!src/ml_stock_prediction/backtest_lib.py
+# --- test-gate closure: the cockpit suites build their offline price fixture from
+#     backtest_daily.synthetic_provider. Its FULL closure is these four files
+#     (synthetic_provider -> providers -> fundamentals_adapter; numpy/pandas only).
+#     Listed one by one, NOT as a glob: the package __init__ re-exports nothing so
+#     this import cannot reach engine -> metrics -> momentum_lib +
+#     ml_stock_prediction.backtest_lib, and a glob would silently re-admit two parked
+#     research tracks to the runtime image the moment that changed. ---
+!src/stock_screener/backtest_daily/__init__.py
+!src/stock_screener/backtest_daily/providers.py
+!src/stock_screener/backtest_daily/fundamentals_adapter.py
+!src/stock_screener/backtest_daily/synthetic_provider.py
 !tests/test_cockpit.py
 # A GLOB, not per-file entries: the cockpit suites are split by category under
 # tests/cockpit/, and a new one added to the gate must never need a second edit here.
@@ -46,9 +52,6 @@
 !tests/test_hunt.py
 
 # --- re-excludes (last match wins) ---
-src/stock_screener/backtest_daily/wrds_provider.py
-src/stock_screener/backtest_daily/ingest_wrds.py
-src/stock_screener/backtest_daily/run_backtest.py
 src/stock_screener/hunt/charts.py
 src/stock_screener/hunt/__main__.py
 **/__pycache__

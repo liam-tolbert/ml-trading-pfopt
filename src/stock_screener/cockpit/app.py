@@ -125,7 +125,8 @@ two axes flip from quiet to loud:
 These levels are advisory — place the order in your broker.
 """
 
-EARNINGS_SOON_DAYS = 21   # flag entries within ~3 weeks of a scheduled report
+from src.stock_screener.cockpit.doctrine import EARNINGS_SOON_DAYS
+
 
 
 # Raw candidate-frame column name -> human-readable label, for the table headers and the
@@ -187,8 +188,9 @@ COL_HELP = {
                    "+ near-high 20 + base length 10). Shown even when VCP is False.",
     "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
                       "confirmed' for the volume side).",
-    "vol_confirmed": "True when the latest-day volume is ≥ 1.5× its 20-day average — the "
-                     "breakout confirmation threshold. A price breakout without this is suspect.",
+    "vol_confirmed": "The scan's 20-day context read (latest volume ≥ 1.5× it). The trigger "
+                     "job confirms on the prior 50-day average instead — this column is a "
+                     "hint, the trigger report is the decision.",
     "pct_to_pivot": "Distance from price to the pivot. Positive = below pivot (needs to rise); "
                     "negative = already above/extended.",
     "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
@@ -480,8 +482,8 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
         "5. **Step 4:** if it breaks out on volume, use the advisory entry/stop/size.\n\n"
         "Each section has its own **ℹ️** button. Full details on the **SEPA Guide** page.")
 # The app scans the full US common-stock universe, period — the old sp500/tickers picker
-# was TESTING scaffolding hardwired to one option. The sp500/tickers fetchers remain in
-# data_feed as offline fallbacks and programmatic run_scan(universe=...) options.
+# was TESTING scaffolding hardwired to one option. The sp500 fetcher remains in data_feed
+# purely as an offline fallback when the full_us listing cannot be fetched or read.
 # The universe/gate constants live in scan_worker (DEFAULT_UNIVERSE/DEFAULT_MIN_CRITERIA)
 # so the non-scan pages' background warm-up starts the SAME scan this page consumes.
 min_criteria = scan_worker.DEFAULT_MIN_CRITERIA  # full trend template — all 8, no 7/8
@@ -1150,7 +1152,7 @@ with st.sidebar:
         _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
         if not _rep:
             st.caption("No trigger report yet — click 🔔 Check triggers now, or schedule "
-                       "cockpit-refresh.timer (HANDOFF §6.18) for half-hourly "
+                       "cockpit-refresh.timer (HANDOFF §8) for scheduled "
                        "watchlist trigger checks.")
             return
         _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, best-effort

@@ -15,7 +15,8 @@ re-derive rules ad hoc — two of them were fumbled when this was improvised:
 - **RS floor = 70** (Step-1). The raw scan holds sub-70 Tier A rows; the hunt
   excludes them.
 - "Buy now" exists only as a **volume-confirmed breakout**: close above pivot on
-  ≥1.4× average volume (`gates` reports this; do not infer it from price alone).
+  ≥1.5× the prior 50-day average volume, today's bar excluded (`gates` reports this;
+  do not infer it from price alone).
 
 Every command runs from the repo root:
 

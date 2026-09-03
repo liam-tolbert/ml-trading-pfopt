@@ -6,6 +6,64 @@ gate (`python tests/test_cockpit.py`).
 from tests.cockpit._common import *  # noqa: F401,F403
 
 
+def test_plan_store_atomic_write_leaves_no_tmp():
+    """A failed serialization must leave the trigger directory exactly as it was.
+
+    Both plan writers used to skip the cleanup, so an unserializable row left a stray
+    ``.tmp`` next to the trigger reports forever. The day-file itself must not appear
+    either: a half-written plan is worse than no plan, because the executor would act
+    on it."""
+    import tempfile
+    from pathlib import Path
+    from src.stock_screener.cockpit import entries
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        bad = {"date": "2026-08-21", "rows": [{"ticker": "AAA", "x": object()}]}
+        try:
+            entries.save_entry_plan(bad, d)
+            raise AssertionError("expected the unserializable row to raise")
+        except TypeError:
+            pass
+        assert not list(d.glob("*.tmp")), f"temp file left behind: {list(d.glob('*.tmp'))}"
+        assert not list(d.glob("entry_plan_*.json")), "a partial plan must not be readable"
+
+        ok = {"date": "2026-08-21", "rows": [], "notes": [], "executed_at": None}
+        path = entries.save_entry_plan(ok, d)
+        assert path.exists()
+        assert not list(d.glob("*.tmp"))
+        assert entries.load_latest_entry_plan(d)["date"] == "2026-08-21"
+
+
+def test_entry_job_execute_stale_exits_zero():
+    """A stale armed plan is a NORMAL morning outcome — a holiday, or a weekend plan the
+    Monday fire missed — so the CLI exits 0 and leaves the file untouched.
+
+    HANDOFF §9's exit-code contract reserves 1 for real failures; a unit that logs red on
+    an ordinary skip teaches you to ignore the one that matters. The gate lookup is forced
+    to fail so the unattended fail-closed path runs with no network."""
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import cache, entries, entry_job
+
+    stale = {"date": "2026-08-14",          # a Friday; executing on the 20th is stale
+             "rows": [{"ticker": "AAA", "shares": 10, "limit_price": 52.5,
+                       "stop_price": 46.0, "status": entries.ROW_ARMED, "detail": ""}],
+             "notes": [], "executed_at": None}
+    with tempfile.TemporaryDirectory() as tmp, \
+            patch.object(cache, "TRIGGERS_DIR", Path(tmp)), \
+            patch.object(entries, "autobuy_enabled", return_value=True), \
+            patch.object(entry_job.trade, "fetch_gate_inputs",
+                         side_effect=RuntimeError("offline")), \
+            patch.object(entries, "save_entry_plan") as saved, \
+            patch.object(entries, "load_latest_entry_plan", return_value=stale):
+        rc = entry_job.cmd_execute("2026-08-20", dry_run=False)
+    assert rc == 0, f"stale plan must exit 0, got {rc}"
+    assert not saved.called, "a stale plan must not be rewritten"
+    assert stale["rows"][0]["status"] == entries.ROW_ARMED, "a stale plan must not mutate"
+
+
 def test_build_entry_plan_filters_and_coercion():
     """#24 arming filters: only genuine limit buys arm (rearm_only/stop_only/zero-share
     rows silently drop; a missing limit or a stop at/above the limit refuses with a

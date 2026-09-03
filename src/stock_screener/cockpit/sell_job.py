@@ -3,7 +3,7 @@
     python src/stock_screener/cockpit/sell_job.py plan    [--date YYYY-MM-DD] [--no-write]
     python src/stock_screener/cockpit/sell_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
-``plan`` runs after the settled close (~16:40 ET): reads the paper account, evaluates
+``plan`` runs after the settled close (16:15 ET): reads the paper account, evaluates
 the sell pillars per holding exactly as the Positions page does (journal entry dates,
 watchlist frozen pivots, trigger-report SPY note), and writes the dated sell plan the
 page renders for overnight veto. ``execute`` runs pre-open (~09:25 ET): submits a
@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:                       # so `from src.X import ...` resolves
     sys.path.insert(0, str(ROOT))
 
-from src.stock_screener.cockpit import cache, export, sells, trade, triggers  # noqa: E402
+from src.stock_screener.cockpit import (cache, export, plan_store, sells,  # noqa: E402
+                                        trade, triggers)
 
 
 def _positions_and_pillars(today=None):
@@ -58,7 +59,7 @@ def _positions_and_pillars(today=None):
 
 def cmd_plan(date: Optional[str], write: bool) -> int:
     data, positions, pillars = _positions_and_pillars(today=date)
-    prior = sells.load_latest_sell_plan(before=sells._today_iso(date))
+    prior = sells.load_latest_sell_plan(before=plan_store.today_iso(date))
     plan = sells.build_sell_plan(positions, pillars, prior_plan=prior, today=date)
     acct = data["account"]
     print(f"account ...{str(acct.get('account_number'))[-4:]}  "
@@ -94,12 +95,24 @@ def cmd_execute(date: Optional[str], dry_run: bool) -> int:
           f"vetoed={summary['vetoed']}  skipped={summary['skipped']}  "
           f"failed={summary['failed']}")
     print(sells.format_plan(plan))
-    if not dry_run:
+    # A disabled or stale run returns before touching the plan, so saving would only
+    # rewrite identical bytes and move the file's mtime — matching entry_job.
+    if not dry_run and summary["status"] not in ("disabled", "stale"):
         sells.save_sell_plan(plan)
-    return 1 if summary["status"] in ("failed", "partial", "stale") else 0
+    # "stale" is a NORMAL outcome (a holiday, or a morning fire with no plan from the
+    # night before) and the exit-code contract reserves 1 for real failures — a red
+    # systemd unit on an ordinary skip trains you to ignore the one that matters.
+    return 1 if summary["status"] in ("failed", "partial") else 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # AUTOSELL lives in .env on the Pi; the compose service passes it, but a hand-run
+    # laptop invocation has to load it the same way entry_job does.
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="P1-P4 auto-sell: evening plan / morning "
                                              "execute (paper account).")
     sub = ap.add_subparsers(dest="cmd", required=True)

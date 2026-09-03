@@ -3,7 +3,7 @@
 The weekend hunt builds the watchlist; the scheduled job (every 30 minutes during market
 hours) answers ONE question per name: **is it above its frozen pivot on ≥1.5× average
 volume?** Intraday runs read the live provisional bar (flagged ``intraday``; ``volume_pace``
-says whether volume is running hot for the time of day); the last run of the day (~16:30)
+says whether volume is running hot for the time of day); the last run of the day (16:10)
 sees the settled close. :func:`check_triggers` answers from already-fetched frames; the CLI
 wrapper (``refresh_job.py``) does the fetching, report persistence, and scheduling glue.
 
@@ -30,20 +30,21 @@ import pandas as pd
 from src.stock_screener.minervini_screener.screening import (
     analyze_spy_trend, calculate_stop_loss, classify_phase)
 from . import cache
+from .doctrine import EARNINGS_SOON_DAYS, VOL_AVG_DAYS, VOL_CONFIRM_RATIO
 from .export import make_entry
+from .indicators import volume_ratio as _volume_ratio
 from .scan import (_days_to_earnings, _entry_levels, detect_breakout_prior_high,
                    template_chain)
 from .vcp import detect_vcp
 
-TRIGGER_VOL_RATIO = 1.5     # Minervini's breakout confirmation (mirrors trade.HEAVY_VOL_RATIO)
-VOL_AVG_DAYS = 50           # ...vs the 50-day average volume, EXCLUDING today's bar
+TRIGGER_VOL_RATIO = VOL_CONFIRM_RATIO   # breakout confirmation, vs the average of the
+                                        # prior VOL_AVG_DAYS bars (today's bar excluded)
 VOL_CONTEXT_DAYS = 20       # the scan's window — reported as context, never the gate
 EXTENDED_PCT = 0.05         # close > pivot * 1.05 = past the buy zone ("don't chase")
 PULLBACK_BAND = 0.02        # +/-2% of pivot = the low-risk secondary-entry zone; below
                             # -2% the base is failing, not pulling back
 DRY_VOL_RATIO = 0.8         # "dry" = clearly below the 50-day average volume -- the
                             # quiet-side mirror of the 1.5x confirmation gate
-EARNINGS_SOON_DAYS = 21     # mirror the app's ⚠ earnings window
 MIN_ROWS_FOR_PIVOT = 200    # classify_phase needs >= 200 rows to compute a pivot
 TEMPLATE_CRITERIA = 8       # mirror ScanConfig.min_criteria — the scan table's hard gate
 
@@ -165,18 +166,6 @@ def frame_settled_current(last_bar_date, now=None) -> bool:
     except Exception:
         return False
 
-
-def _volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
-    """Last bar's volume vs the mean of the PRIOR ``window`` bars (excluding the last).
-    None when there's no Volume column, too little history, or a non-positive mean."""
-    try:
-        v = df["Volume"]
-        if len(v) < window + 1:
-            return None
-        avg = float(v.iloc[-(window + 1):-1].mean())
-        return float(v.iloc[-1]) / avg if avg > 0 else None
-    except Exception:
-        return None
 
 
 def compute_scan_pivot(df: Optional[pd.DataFrame]) -> Optional[float]:
@@ -428,7 +417,7 @@ def save_trigger_report(report: dict, dir_path=None) -> Path:
     app's 🔔 button and the half-hourly scheduled job run in SEPARATE processes and can
     hit the same day-file; an in-place truncate-write could interleave into invalid
     JSON, which the loader silently skips, serving the PREVIOUS day all weekend if the
-    ~16:30 settled report was the casualty."""
+    16:10 settled report was the casualty."""
     d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"triggers_{report.get('date', 'undated')}.json"

@@ -16,6 +16,7 @@ src/data/
 !src/stock_screener/minervini_sepa_system.md
 !src/stock_screener/minervini_screener/PROVENANCE.md
 .vscode/
+.idea/
 # .claude/: editor/agent state stays local, but skills are shared workflow
 .claude/*
 !.claude/skills/

@@ -7,8 +7,7 @@ package does the mechanical work — scan a universe for Trend-Template passers
 interactive charts to judge the VCP (Step 3) and advisory entry levels (Step 4).
 
 Design rules:
-- Reuse ONLY the pure rule functions from ``minervini_screener.screening`` (they
-  import on numpy/pandas; the package's ``data/`` layer is NOT imported because its
-  ``__init__`` eager-loads SQLAlchemy, which is absent from the ``ml-trading`` env).
+- Reuse ONLY the pure rule functions from ``minervini_screener.screening`` — they
+  import on numpy/pandas alone, and they are all that is left of that package.
 - All live data comes from this package's own thin yfinance layer (``data_feed``).
 """

@@ -12,6 +12,33 @@ import numpy as np
 import pandas as pd
 
 
+def prior_volume_average(vol: pd.Series, window: int) -> pd.Series:
+    """Rolling mean of the ``window`` bars BEFORE each bar — the series form of the
+    breakout-confirmation denominator.
+
+    The ``shift(1)`` is the whole point: a breakout bar included in its own average
+    dilutes the spike it is being measured against, and the bigger the spike the more it
+    dilutes. NaN until a full window exists, so a short frame reads as "unknown" rather
+    than as a confident ratio off three bars."""
+    return vol.shift(1).rolling(window, min_periods=window).mean()
+
+
+def volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
+    """Last bar's volume vs the mean of the PRIOR ``window`` bars (excluding the last).
+    None when there's no Volume column, too little history, or a non-positive mean.
+
+    THE breakout-confirmation read: the trigger job, the Positions heavy-volume flag and
+    the weekend hunt all call this, because they all enforce one doctrine rule."""
+    try:
+        v = df["Volume"]
+        if len(v) < window + 1:
+            return None
+        avg = float(v.iloc[-(window + 1):-1].mean())
+        return float(v.iloc[-1]) / avg if avg > 0 else None
+    except Exception:
+        return None
+
+
 def _true_range(df: pd.DataFrame) -> pd.Series:
     """Raw true range per bar: max of (H-L, |H-prev C|, |L-prev C|). PRICE units — the
     Keltner ATR in :func:`ttm_squeeze` needs it unscaled; use :func:`true_range_pct` for

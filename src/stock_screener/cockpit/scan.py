@@ -30,6 +30,7 @@ from src.stock_screener.minervini_screener.screening import (
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
+from .doctrine import MAX_STOP_FROM_PIVOT
 from .indicators import (relative_measured_volatility,
                          bollinger_bandwidth_percentile_last, ttm_squeeze)
 # Cockpit VCP detector: the vendored detect_vcp_pattern starves strong uptrends
@@ -38,7 +39,6 @@ from .vcp import detect_vcp
 
 # Minervini's stop is measured from the pivot: 7-8% ideal, 10% hard max. Floors the advisory
 # stop this far below the pivot so a price-anchored engine stop can't breach max-loss.
-MAX_STOP_FROM_PIVOT = 0.10
 
 @dataclass
 class ScanConfig:
@@ -412,18 +412,22 @@ def _fmt(x) -> Optional[float]:
 
 
 # --------------------------------------------------------------------------- #
-def run_scan(universe: str = "sp500", cfg: Optional[ScanConfig] = None,
+def run_scan(universe: str, cfg: Optional[ScanConfig] = None,
              force: bool = False,
              progress: Optional[Callable[[int, int, str], None]] = None) -> ScanResult:
     """Live wrapper: fetch via data_feed, then screen. Fundamentals are fetched lazily
     inside the funnel (only for Step-1 passers).
+
+    ``universe`` is REQUIRED (every caller passes ``scan_worker.DEFAULT_UNIVERSE``): a
+    default would let a bare call quietly screen a narrower universe than the scheduled
+    jobs do, and the scan table gives no hint of which one produced it.
 
     Every scan ALWAYS tops up the latest bars (``max_age_days=0.0`` — the same semantics
     as refresh_job and freshen_prices): a cache with today's bar re-fetches just the
     latest bars, an older cache fetches only its missing days, and only cold names (or a
     genuine split/dividend re-baseline) pay the full 2y download. There is no freshness
     window here — scan RATE is governed entirely by the callers (the explicit Re-scan
-    buttons; the half-hourly universe top-up is cockpit-refresh's), so a scan that runs IS fresh
+    buttons; the evening universe sweep is cockpit-eod's), so a scan that runs IS fresh
     by construction. Zero network still happens when no market session has elapsed
     since the cache was written (``data_feed._cache_settled`` — evenings/weekends/
     pre-open: no new bar can exist). ``force=True`` is the explicit full-re-download

@@ -1,4 +1,4 @@
-"""Synthetic-data tests for src/momentum_lib.
+"""Synthetic-data tests for src/stock_screener/momentum_lib.
 
 Runs as a plain script (`python tests/test_momentum_lib.py`) or under pytest.
 No disk / network access — all data is generated. The single most important test
@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "stock_screener"))
 import momentum_lib as ml  # noqa: E402
 
 

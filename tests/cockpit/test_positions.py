@@ -6,6 +6,30 @@ gate (`python tests/test_cockpit.py`).
 from tests.cockpit._common import *  # noqa: F401,F403
 
 
+def test_sell_job_execute_stale_exits_zero():
+    """The sell mirror of the entry rule: a stale plan exits 0 and is left untouched.
+
+    This one was returning 1, so `cockpit-sellexec` logged a FAILED unit every time a
+    morning ran without a plan from the night before — a holiday, or a missed evening
+    fire. HANDOFF §9: 0 for anything normal, 1 only for a real failure."""
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import sell_job, sells
+
+    stale = {"date": "2026-08-14",          # executing on the 20th is two sessions late
+             "orders": [{"symbol": "AAA", "qty": 10, "reasons": ["P1 fail"],
+                         "status": sells.ORDER_PLANNED, "detail": ""}],
+             "snapshot": {}, "notes": [], "executed_at": None}
+    with patch.object(sells, "load_latest_sell_plan", return_value=stale), \
+            patch.object(sells, "autosell_enabled", return_value=True), \
+            patch.object(sell_job.trade, "fetch_positions",
+                         return_value={"positions": []}), \
+            patch.object(sells, "save_sell_plan") as saved:
+        rc = sell_job.cmd_execute("2026-08-20", dry_run=False)
+    assert rc == 0, f"stale plan must exit 0, got {rc}"
+    assert not saved.called, "a stale plan must not be rewritten"
+    assert stale["orders"][0]["status"] == sells.ORDER_PLANNED, "a stale plan must not mutate"
+
+
 def test_fetch_positions_offline():
     """fetch_positions enriches Alpaca holdings with P&L, the in-force stop, 50-day SMA and
     advisories — against a fake client + an offline price feed (no network)."""
@@ -55,7 +79,7 @@ def test_fetch_positions_offline():
     assert any("No protective stop" in a for a in by["BBB"]["advisories"])
     assert any("50-day SMA" in a for a in by["BBB"]["advisories"])
     # Issue 10: the ratio divides by the PRIOR 50 bars (all 1000), EXCLUDING today's 3000 spike,
-    # so it reads exactly 3.0 — matching triggers._volume_ratio, not 2.88 (today-in-average).
+    # so it reads exactly 3.0 — matching indicators.volume_ratio, not 2.88 (today-in-average).
     assert abs(by["BBB"]["volume_ratio"] - 3.0) < 1e-9
     # Earnings enrichment + stage: BBB is a LOSER 10 days from its report -> cushion advisory;
     # AAA (+30%) is cushioned, so the same imminent report stays silent.

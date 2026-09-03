@@ -8,7 +8,7 @@ process-wide store, which persists it to ``last_scan.pkl``. That file IS the sca
 app renders it and only ever rewrites it from an explicit Re-scan.
 
 **Why this exists.** Screening used to ride along on a thread inside the Streamlit container
-(``REFRESH_SCHEDULE_ET``). That thread was invisible to ``systemctl list-timers`` and died with
+(an in-app scheduler thread). That thread was invisible to ``systemctl list-timers`` and died with
 the container, so a deploy landing after its slot silently cost that day's screen. It was
 removed when price refreshing moved to systemd; this job is the other half — the piece that
 advances the CANDIDATE LIST rather than the price cache.

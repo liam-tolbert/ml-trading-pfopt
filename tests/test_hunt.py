@@ -3,7 +3,7 @@
 Runs as a plain script (`python tests/test_hunt.py`) or under pytest, repo style.
 No disk pickle, no network: a tiny fake ScanResult is built in memory. The most
 important assertions are the rule boundaries — buy zone at exactly 0% / +5%,
-approach at -3%, volume confirmation at 1.4x, earnings block at 21 days — since
+approach at -3%, volume confirmation at 1.5x, earnings block at 21 days — since
 mis-remembered boundaries are precisely why this pipeline exists.
 """
 from __future__ import annotations
@@ -33,17 +33,24 @@ def ok(name: str, cond: bool) -> None:
 
 
 # --------------------------------------------------------------------------- #
-def _payload(pivot: float, close: float, *, vol_ratio=0.8, breakout=False,
+def _payload(pivot: float, close: float, *, last_vol_mult=0.8, breakout=False,
              earnings_in=60, n_bars=260) -> dict:
-    """Minimal payload with a flat synthetic tape ending at `close`."""
+    """Minimal payload with a flat synthetic tape ending at `close`.
+
+    Volume is FLAT except for the final bar, scaled by ``last_vol_mult`` — so the
+    confirmation ratio the pipeline computes IS that multiplier, exactly. The payload
+    deliberately carries no ``levels["volume_ratio"]``: the gate must compute its own
+    from the frame, and reading a pre-baked field is what let the hunt drift onto a
+    different window than the trigger job."""
     idx = pd.bdate_range("2025-08-01", periods=n_bars)
     c = np.linspace(close * 0.7, close, n_bars)
+    vol = np.full(n_bars, 1e6)
+    vol[-1] = 1e6 * last_vol_mult
     df = pd.DataFrame({"Open": c * 0.999, "High": c * 1.01, "Low": c * 0.99,
-                       "Close": c, "Volume": np.full(n_bars, 1e6)}, index=idx)
+                       "Close": c, "Volume": vol}, index=idx)
     return {
         "df": df,
-        "levels": {"pivot": pivot, "stop": pivot * 0.97, "breakout_today": breakout,
-                   "volume_ratio": vol_ratio},
+        "levels": {"pivot": pivot, "stop": pivot * 0.97, "breakout_today": breakout},
         "vcp": {"contractions": [
             {"peak_date": idx[-40], "trough_date": idx[-35], "peak_price": close * 1.05,
              "trough_price": close * 0.95, "drawdown_pct": 9.5, "volume_ratio": 0.8,
@@ -63,7 +70,7 @@ def _bundle():
         "AAA": _payload(100.0, 102.0),
         "BBB": _payload(100.0, 98.0),
         "CCC": _payload(50.0, 50.0),
-        "DDD": _payload(20.0, 20.4, vol_ratio=1.40, breakout=True),
+        "DDD": _payload(20.0, 20.4, last_vol_mult=1.50, breakout=True),
         "EEE": _payload(10.0, 10.1, earnings_in=21),
     }
     cand = pd.DataFrame([
@@ -110,8 +117,18 @@ def test_diagnostics_and_gates():
     g = pl.gates(diag, verdicts, min_fund=0)
     ok("AAA in buy zone", any(r["ticker"] == "AAA" for r in g["buy_zone"]))
     ok("BBB approaching", any(r["ticker"] == "BBB" for r in g["approaching"]))
-    ok("DDD volume-confirmed at exactly 1.40x",
+    ok("DDD volume-confirmed at exactly 1.50x",
        [r["ticker"] for r in g["volume_confirmed"]] == ["DDD"])
+    ok("the ratio is the prior-50 average, today's bar excluded",
+       abs(float(diag[diag.ticker == "DDD"].iloc[0]["volume_ratio"]) - 1.50) < 1e-9)
+    ok("hunt confirms on the shared doctrine ratio, not its own",
+       pl.VOL_CONFIRM_RATIO == 1.5)
+    d2 = diag.copy()
+    d2.loc[d2.ticker == "DDD", "vs_pivot_pct"] = 6.0
+    g_ext = pl.gates(d2, verdicts, min_fund=0)
+    ok("a breakout past the buy zone is not a confirmation (no chasing)",
+       g_ext["volume_confirmed"] == []
+       and any(r["ticker"] == "DDD" for r in g_ext["past_entry"]))
     ok("EEE blocked at exactly 21 days",
        [r["ticker"] for r in g["earnings_blocked"]] == ["EEE"])
     ok("blocked name appears in no bucket",

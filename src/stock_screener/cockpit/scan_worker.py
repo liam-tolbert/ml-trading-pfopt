@@ -15,10 +15,11 @@ phone) can't race yfinance or the CSV price caches with duplicate concurrent dow
 
 This process schedules nothing, and page interaction never refreshes: entering or clicking
 a page serves the stored result and downloads nothing. Price freshness belongs to
-``cockpit-refresh.timer`` (half-hourly, 09:30-16:30 ET), which tops up the whole universe
-from a one-shot container — so it is visible in ``systemctl list-timers`` and cannot die
-with this container. The only network paths left in-process are the true cold start and
-the explicit Re-scan / full-re-download buttons, which are the only things that SCREEN.
+``cockpit-refresh.timer`` (09:30, :00/:30 to 15:30, 16:10 ET), which tops up the watchlist
+plus held names, and to ``cockpit-eod.timer`` (16:20 ET), which sweeps the whole universe
+and then screens it. Both run from one-shot containers, so they are visible in
+``systemctl list-timers`` and cannot die with this container. The only network paths left
+in-process are the true cold start and the explicit Re-scan / full-re-download buttons.
 
 ``scan.run_scan`` is resolved at call time inside the thread, so a test's
 ``patch.object(scan, "run_scan", ...)`` is honored exactly like the old inline call.
@@ -34,7 +35,8 @@ import traceback
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
-from .cache import CACHE_DIR
+from .cache import (LAST_SCAN_PKL as _LAST_SCAN_PKL,
+                    SCAN_PERSIST_VERSION as _PERSIST_VERSION)
 
 # The app scans the full US common-stock universe with the full 8/8 trend template —
 # app.py and the non-scan pages' warm-up must agree on these or they'd start two scans.
@@ -44,18 +46,16 @@ DEFAULT_MIN_CRITERIA = 8
 _SCAN_SERIAL = threading.Lock()    # process-wide: one real scan at a time, ever
 
 # This process schedules NOTHING. Price freshness is owned by cockpit-refresh.timer
-# (half-hourly, 09:30-16:30 ET) which tops up the whole universe from a one-shot
-# container; SCREENING happens only when the user presses Re-scan. The old in-app
+# (09:30, :00/:30 to 15:30, 16:10 ET; watchlist plus held names) and the universe sweep
+# by cockpit-eod.timer, whose second step also SCREENS nightly. The old in-app
 # scheduler thread was invisible to `systemctl list-timers` and died with the container
 # — a deploy landing after its slot silently cost that day's scan — so refreshes now
 # live where every other scheduled job in this project lives.
 
 # The last completed ScanResult, pickled so a SERVER RESTART serves it instantly (the
 # store itself is process memory). Loaded lazily on the first miss; any load failure
-# (missing / corrupt / old shape / different key) fails open to a cold scan. Version
-# bumps whenever the persisted dict shape changes.
-_LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"
-_PERSIST_VERSION = 1
+# (missing / corrupt / old shape / different key) fails open to a cold scan. The path
+# and version come from cache.py because the weekend hunt reads this same file.
 
 
 def _testing() -> bool:

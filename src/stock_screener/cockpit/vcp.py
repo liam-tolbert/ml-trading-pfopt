@@ -148,21 +148,20 @@ def _empty(reason: str) -> Dict[str, any]:
     return {
         'is_vcp': False, 'vcp_quality': 0.0, 'contractions': [], 'contraction_count': 0,
         'contraction_quality': 0.0, 'volume_quality': 0.0, 'base_length_weeks': 0.0,
-        'breakout_volume_ratio': 1.0, 'near_52w_high': False,
-        'distance_from_52w_high_pct': 100.0, 'rmv': 100.0, 'pattern_details': reason,
+        'rmv': 100.0, 'pattern_details': reason,
         'tier': 'C', 'zz_threshold': None,
     }
 
 
 def _detect_at(base: pd.DataFrame, current_price: float,
                phase_info: Dict, thr: float, min_contractions: int,
-               max_contractions: int, *, rmv_now: float, week_52_high: float,
-               breakout_volume_ratio: float) -> Dict[str, any]:
+               max_contractions: int, *, rmv_now: float,
+               week_52_high: float) -> Dict[str, any]:
     """One detection pass at a fixed ZigZag threshold; returns the full result dict.
 
-    ``rmv_now``/``week_52_high``/``breakout_volume_ratio`` are threshold-INDEPENDENT and
-    hoisted into :func:`detect_vcp` so the multi-threshold loop doesn't recompute them up
-    to 4x per ticker (they were this function's only uses of the full price frame)."""
+    ``rmv_now``/``week_52_high`` are threshold-INDEPENDENT and hoisted into
+    :func:`detect_vcp` so the multi-threshold loop doesn't recompute them up to 4x per
+    ticker (they were this function's only uses of the full price frame)."""
     high = base['High'].to_numpy(dtype=float)
     low = base['Low'].to_numpy(dtype=float)
     vol = (base['Volume'].to_numpy(dtype=float) if 'Volume' in base.columns
@@ -338,9 +337,6 @@ def _detect_at(base: pd.DataFrame, current_price: float,
         'contraction_quality': round(contraction_quality, 1),
         'volume_quality': round(volume_quality, 1),
         'base_length_weeks': round(base_length_weeks, 1),
-        'breakout_volume_ratio': round(breakout_volume_ratio, 2),
-        'near_52w_high': near_high,
-        'distance_from_52w_high_pct': round(dist_high, 1),
         'rmv': round(rmv_now, 1),
         'pattern_details': pattern_details,
         'tier': tier,
@@ -393,19 +389,12 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     # Threshold-INDEPENDENT reads, hoisted out of the per-threshold loop (they were
     # recomputed identically up to 4x per ticker in the scan's hot path).
     week_52_high = phase_info.get('week_52_high') or float(price_data['High'].tail(252).max())
-    v = price_data['Volume'] if 'Volume' in price_data.columns else pd.Series([], dtype=float)
-    if len(v) > 20:
-        avg20 = v.iloc[-21:-1].mean()
-        breakout_volume_ratio = float(v.iloc[-1] / avg20) if avg20 > 0 else 1.0
-    else:
-        breakout_volume_ratio = 1.0
     rmv_series = relative_measured_volatility(base).dropna()
     rmv_now = float(rmv_series.iloc[-1]) if len(rmv_series) else 100.0
 
     results = [_detect_at(base, current_price, phase_info, t,
                           min_contractions, max_contractions, rmv_now=rmv_now,
-                          week_52_high=week_52_high,
-                          breakout_volume_ratio=breakout_volume_ratio)
+                          week_52_high=week_52_high)
                for t in candidates]
     return min(results, key=lambda r: (0 if r['is_vcp'] else 1,
                                        _TIER_RANK[r['tier']], -r['vcp_quality']))

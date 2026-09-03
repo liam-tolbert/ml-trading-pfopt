@@ -1,9 +1,8 @@
 """Thin yfinance data layer for the cockpit.
 
-Deliberately does NOT import the vendored ``minervini_screener.data`` package — that
-package's ``__init__`` eager-loads SQLAlchemy (absent from the ``ml-trading`` env), so
-importing even its yfinance fetcher would crash. We re-implement the small amount of
-fetching we need on yfinance + requests directly.
+All fetching is re-implemented here on yfinance + requests directly. The vendored
+package shipped its own data layer, but it was SQLAlchemy-backed, unused, and has
+since been deleted (see PROVENANCE.md); only the pure rule modules remain.
 
 Public surface:
 - ``get_universe(name)``         -> list[str] of yfinance-normalized symbols
@@ -25,7 +24,7 @@ from typing import Callable, Dict, List, Optional
 
 import pandas as pd
 
-from .cache import (CACHE_DIR, EDGAR_DIR, FUNDAMENTALS_DIR, PRICES_DIR, TICKERS_TXT,
+from .cache import (CACHE_DIR, EDGAR_DIR, FUNDAMENTALS_DIR, PRICES_DIR,
                     age_days, ensure_dirs)
 from .runlog import get_logger
 
@@ -85,23 +84,16 @@ def normalize(ticker: str) -> str:
     return str(ticker).strip().upper().replace(".", "-")
 
 
-def get_universe(name: str = "sp500", force: bool = False,
+def get_universe(name: str, force: bool = False,
                  max_age_days: float = 7.0) -> List[str]:
-    if name == "tickers":
-        return _read_tickers_txt()
+    """``name`` is REQUIRED. full_us is the only universe the cockpit screens; sp500
+    survives as the offline fallback below. A default here would let a bare call screen
+    a different universe than every scheduled job does, silently."""
     if name == "sp500":
         return _get_sp500(force=force, max_age_days=max_age_days)
     if name == "full_us":
         return _get_us_common(force=force, max_age_days=max_age_days)
     raise ValueError(f"unknown universe: {name!r}")
-
-
-def _read_tickers_txt() -> List[str]:
-    if not TICKERS_TXT.exists():
-        return []
-    syms = [normalize(line) for line in TICKERS_TXT.read_text().splitlines()
-            if line.strip() and not line.startswith("#")]
-    return sorted(set(syms))
 
 
 def _get_sp500(force: bool, max_age_days: float) -> List[str]:
@@ -119,7 +111,8 @@ def _get_sp500(force: bool, max_age_days: float) -> List[str]:
         cached = _syms_from_csv(path)
         if cached:
             return cached
-    return _read_tickers_txt()              # last-ditch offline fallback
+    return []                               # empty is LOUD: callers report "no tickers"
+                                            # rather than screening a silent subset
 
 
 def _syms_from_csv(path) -> List[str]:
@@ -165,7 +158,7 @@ def _fetch_sp500_wikipedia() -> Optional[List[str]]:
 def _get_us_common(force: bool, max_age_days: float) -> List[str]:
     """Broad US common-stock universe (~3-4.5k), cached like sp500. Listings churn, so the
     cache is capped at 1 day (matching upstream). Fallbacks never trigger a hidden network
-    call: stale full_us cache -> the sp500 cache (offline read) -> tickers.txt."""
+    call: stale full_us cache -> the sp500 cache (offline read) -> empty."""
     path = CACHE_DIR / US_COMMON_CSV
     max_age_days = min(max_age_days, 1.0)
     if not force and path.exists() and age_days(path) <= max_age_days:
@@ -186,7 +179,7 @@ def _get_us_common(force: bool, max_age_days: float) -> List[str]:
         cached = _syms_from_csv(sp)
         if cached:
             return cached
-    return _read_tickers_txt()                      # last-ditch offline fallback
+    return []                                      # empty is LOUD; see _get_sp500
 
 
 def _fetch_us_common_nasdaqtrader() -> Optional[List[str]]:

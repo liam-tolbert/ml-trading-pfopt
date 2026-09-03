@@ -15,30 +15,19 @@ AppTests away from real state. Paper account only, like every trade path.
 """
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from src.stock_screener.cockpit import cache
+from src.stock_screener.cockpit import plan_store
 
 AUTOBUY_ENV = "AUTOBUY"
-_TRUTHY = {"1", "true", "yes", "on"}
+_PREFIX = "entry_plan"
 
 ROW_ARMED = "armed"
 ROW_DISARMED = "disarmed"
 ROW_SUBMITTED = "submitted"
 ROW_FAILED = "failed"
 ROW_SKIPPED = "skipped"
-
-
-def _today_iso(today=None) -> str:
-    import pandas as pd
-    if today is None:
-        t = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
-    else:
-        t = pd.Timestamp(today).normalize()
-    return t.date().isoformat()
 
 
 def _row(o: dict) -> dict:
@@ -81,56 +70,35 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
         rows.append(_row(o))
 
     import pandas as pd
-    return {"date": _today_iso(today),
+    return {"date": plan_store.today_iso(today),
             "generated_at": pd.Timestamp.now(tz="America/New_York").isoformat(),
             "rows": rows, "notes": skipped, "executed_at": None}
 
 
+# Storage is shared with sells.py (see plan_store); these keep the entry-side names the
+# app, the pages and the CLI already import.
 def entry_plan_path(date_iso: str, dir_path=None) -> Path:
-    d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
-    return d / f"entry_plan_{date_iso}.json"
+    return plan_store.plan_path(_PREFIX, date_iso, dir_path)
 
 
 def save_entry_plan(plan: dict, dir_path=None) -> Path:
-    """Atomic write (tmp + ``os.replace``) — the arming click, a disarm click, and the
-    morning executor run in separate processes against the same day-file."""
-    path = entry_plan_path(plan["date"], dir_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(plan, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    """Atomic write — the arming click, a disarm click and the morning executor run in
+    separate processes against the same day-file."""
+    return plan_store.save_plan(_PREFIX, plan, dir_path)
 
 
 def load_latest_entry_plan(dir_path=None, *, before: Optional[str] = None
                            ) -> Optional[dict]:
-    """Newest parseable ``entry_plan_*.json``, or None. ``before`` (ISO date) skips
-    plans dated >= it. Never raises."""
-    try:
-        d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
-        for path in sorted(d.glob("entry_plan_*.json"), reverse=True):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    continue
-                if before is not None and str(data.get("date", "")) >= before:
-                    continue
-                return data
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
+    """Newest parseable ``entry_plan_*.json``, or None. ``before`` is carried from the
+    shared loader; only the sell planner needs it in production. Never raises."""
+    return plan_store.load_latest_plan(_PREFIX, dir_path, before=before)
 
 
 def disarm_row(plan: dict, ticker: str) -> bool:
     """Mark ``ticker``'s armed row disarmed (in place). True if a row changed."""
-    changed = False
-    for r in plan.get("rows", []):
-        if r.get("ticker") == ticker and r.get("status") == ROW_ARMED:
-            r["status"] = ROW_DISARMED
-            changed = True
-    return changed
+    return plan_store.flip_status(plan, items_key="rows", id_key="ticker",
+                                  ident=ticker, from_status=ROW_ARMED,
+                                  to_status=ROW_DISARMED)
 
 
 def plan_is_current(plan: dict, today=None) -> bool:
@@ -154,8 +122,7 @@ def plan_is_current(plan: dict, today=None) -> bool:
 
 
 def autobuy_enabled(env: Optional[dict] = None) -> bool:
-    e = os.environ if env is None else env
-    return str(e.get(AUTOBUY_ENV, "")).strip().lower() in _TRUTHY
+    return plan_store.env_enabled(AUTOBUY_ENV, env)
 
 
 def execute_entry_plan(plan: dict, *, submit: Callable[[dict], dict],

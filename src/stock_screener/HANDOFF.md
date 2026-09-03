@@ -1,13 +1,13 @@
 # HANDOFF — Stock-Screener (Minervini) venture
 
 **Scope:** the *classical* stock-screening track. Separate from `docs/HANDOFF.md` (the parked ML
-cross-sectional track) and `docs/MOMENTUM.md` (the momentum-*factor* experiment, closed — essentials
-folded into §5).
+cross-sectional track). The momentum-*factor* experiment is closed; its essentials are folded
+into §5 and its standalone write-up was never committed.
 
 **Status (2026-08-26):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
 frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries, with sell
-automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). Suite **144 cockpit
-+ 30 hunt**, offline, both gating deploys.
+automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). Suite **151 cockpit
++ 33 hunt**, offline, both gating deploys.
 
 **Research verdict (2026-06-29) — no out-of-sample alpha.** A strong in-sample result (α t=2.49) was
 overfit; OOS collapsed it to t=0.47. Risk management is real; selection is not. The user trades this
@@ -29,10 +29,12 @@ The sibling `stock-screener` repo is a **complete, faithful Minervini system** �
 Template as a hard gate, Stage 1–4 phases, VCP, breakout+volume, the SEPA fundamental leg, stops,
 R:R≥2, sell signals, a market-regime cash gate. It emits hard buy/sell signals, but is **live-scan
 only — no backtest**. Vendored at `minervini_screener/` (MIT, © 2024 Ryan Hamby, upstream `397e555`;
-`LICENSE` + `PROVENANCE.md` kept). Only two documented edits, **no business logic changed**:
-`from src.` → relative imports, and an import guard so pure rules load without SQLAlchemy/yfinance.
+`LICENSE` + `PROVENANCE.md` kept). **No business logic was ever changed**: the edits are
+`from src.` → relative imports, a `calculate_sma` dedup, and the re-export list. The unreachable
+23 of its 27 modules (`data/`, `notifications/`, `analysis/`, both batch processors,
+`screener.py`, `quant_engine.py`) were deleted 2026-09-02 — see PROVENANCE.md.
 
-`backtest_daily/` (14 modules) replays history one day at a time through a single leak-safe slice
+`backtest_daily/` (16 modules) replays history one day at a time through a single leak-safe slice
 (`ohlcv_upto(t)`), with stops, sell signals, a regime cash gate, risk-based sizing, and CAGR/Sharpe/
 maxDD/CAPM α-β reporting. Data behind provider interfaces: a synthetic provider for tests, a WRDS
 provider for the real pull.
@@ -66,7 +68,8 @@ cash <2% of equity) made it tractable. Verified by `tests/test_backtest_daily.py
 - **The momentum Phase-0 "STOP" measured the wrong object** — an ungated, L/S, large-cap,
   survivorship-biased *factor*. It does not generalize to the real screener.
 - **Vendored package eager-loaded the live data layer** (`screening/__init__` → `data.storage` →
-  sqlalchemy). Fixed with an ImportError guard; pure rules import on numpy/pandas alone.
+  sqlalchemy). Fixed by dropping the import; the dead layer was later deleted outright. A
+  vendored tree is not free — unreachable modules still shape the image and every grep.
 - **Don't fight the import-sorter.** It enforces `from src.X` with the repo ROOT on `sys.path`.
 - **`pytest` isn't installed** — tests run as plain scripts, matching repo style.
 - **The engine was unusably slow** because capacity was checked by *position count* while risk-sizing
@@ -80,7 +83,8 @@ answered: no OOS alpha. What remains:
 - **★ Delisting-avoidance — the one genuinely open, orthogonal question.** Does the screen's *score*
   rank which names subsequently DELIST? Distress prediction is a different hypothesis that could be
   real even with no long-only alpha, and only this dataset (**4,823 delistings**) can test it. Start
-  from the saved `data/wrds/_bt_*.csv`.
+  from `data/wrds/_bt_*.csv` — NOT in this checkout (gitignored, never committed), so re-run
+  `ingest_wrds.py` then `run_backtest.py --wrds` to regenerate them first.
 - **Where alpha could actually be.** Selection AND timing on broad US equity are exhausted — ML,
   momentum factor, equal-weight, and the faithful screener all return no OOS alpha, and the residue
   every time is risk management. To find alpha, change the **signal or the arena** (a less-efficient
@@ -268,7 +272,7 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 ## 9. Conventions
 
 - **Source comments say WHY the code must be this way, never which bug/review/date produced it**
-  (§6.47). The incident ledger lives in test docstrings, `TESTS.md`, and this file.
+  (§6.47). The incident ledger lives in test docstrings and this file.
 - **Tests run as plain scripts**, no pytest. `python tests/test_cockpit.py` is the gate's entry point;
   the suites live in `tests/cockpit/test_<category>.py` and each runs standalone.
 - **Exit-code contract: 0 for anything normal — including "nothing to do" and "disabled" — and 1 only
@@ -307,9 +311,11 @@ Constants and API facts that are expensive to rediscover. Change these only with
   shrink 20% further but ARE tight).
 - **Tiers:** **A** = valid base within −10%..+10% of the *detected* pivot · **B** = forming or
   extended, never hidden · **C** = safe exclusions only (dead tape / no pullbacks / stale), reason
-  recorded. **Benchmark contract (`test_vcp_benchmark_200_charts`): A=79 (53 YES, precision 67%),
-  B=114 (19 YES), C=7 with ZERO YES**, and A-recall ≥ 45. **C containing zero YES is the never-miss
-  contract** — squeezing A below the true setup count reintroduces misses.
+  recorded. **Benchmark contract (`test_vcp_benchmark_200_charts`)** — what is ASSERTED: every YES
+  lands in A or B (**C contains zero YES**) and A-recall ≥ 45. The split it PRINTS for reference is
+  A=79 (53 YES, precision 67%), B=114 (19 YES), C=7; those numbers drift and are not enforced.
+  **C containing zero YES is the never-miss contract** — squeezing A below the true setup count
+  reintroduces misses.
 
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
@@ -378,7 +384,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.17** IBD-style RS + up/down volume bars; EDGAR shelved.
 - **§6.18** Half-hourly intraday trigger checks; nightly prewarm removed.
 - **§6.19** First-week operating notes: PECO case study, post-breakout freeze semantics, EDGAR precedence (EDGAR does **not** override yfinance).
-- **§6.20** Multi-agent code review — 34 verified findings (2 high, 13 med, 19 low), backlog in `cockpit/REVIEW_BACKLOG.md`. Both HIGHs fixed here.
+- **§6.20** Multi-agent code review — 34 verified findings (2 high, 13 med, 19 low), backlog tracked in a scratch file that was never committed. Both HIGHs fixed here.
 - **§6.21** Comment-trim pass to "moderate" density.
 - **§6.22–§6.23** Phase 1 (items 1–10). Includes the staleness guard (`max_bar_age_days`) and `freshen_prices`, so a plan sizes on current bars rather than the scan memo's possibly days-old closes.
 - **§6.24** Item 11 — watchlist lost-update race; saves are now atomic (tmp + `os.replace`) and merge into a fresh read of the file, so a concurrent app save is never clobbered by the refresh job's auto-freeze.
@@ -390,7 +396,8 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.30** Phase 2 (items 13–17). Item 15: `make_entry` applies the yfinance dash convention to dotted tickers.
 - **§6.31** Phase 3 (items 18–22). Filter tweaks became instant — the scan runs ONCE at the loosest gates and sliders apply via pure `scan.filter_candidates` over the memoized result (never mutated). Deleting the guarded vendored `.screener` import took **~1.7 s off every process start**. BBWP and the VCP hot loop were hoisted; the 200-chart benchmark line stayed byte-identical.
 - **§6.32** Phase 4 (items 23–32) — **review CLOSED**: 30 fixed with tests, 2 kept per PROVENANCE, 2 refuted.
-  - **24 (user decision): `full_us` is the ONLY universe** — the selectbox is gone; sp500/tickers remain as programmatic/offline fallbacks.
+  - **24 (user decision): `full_us` is the ONLY universe** — the selectbox is gone; sp500 remains as the offline fallback, and `run_scan`/`get_universe` now REQUIRE the
+    argument so a bare call cannot screen a different one.
   - **23 (the medium, A/B-gated):** `scan.detect_breakout_prior_high` makes the Base/Pivot Breakout branches reachable via prior-bar 60/20-day highs (vendored file untouched; the backtest keeps old behavior). A/B over the 200 fixtures: **12/200 pivots changed, all moved DOWN** (median −5.3%, max −15%) from the 52-wk-high fallback to real base highs. Already-frozen 📌 pivots untouched.
   - **29:** `STATUSES` is load-bearing — a new trigger status must be registered there or the report test fails.
 - **§6.33** Watchlist pills picker — and **the test that wiped the real `watchlist.json`**. Tests must never touch live state.
@@ -427,6 +434,14 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.65** **The caption was lying.** "data as of HH:MM" read `completed_wall` from the last *screen*, which only Re-scan advances now — so it sat a day stale while prices were minutes old. Now `scan <t> · prices <t>`, price freshness from the trigger report's `generated_at`, with the date shown once a stamp isn't from today.
 - **§6.66** **Deploy hardening.** A six-day-old stopped container (`docker run` without `--rm`) pinned an image, `docker rmi` failed, and under `set -e` that **aborted a deploy that had already promoted** — so `DEPLOYED` and the units-changed reminder never printed and systemd logged a good deploy as failed. Prune is now non-fatal and names the holding container; steady state is exactly two tags (`live`, `prev`); `--reserved-space` replaces the deprecated `--keep-storage`.
 - **§6.67** **`sudo bash deploy.sh` left root-owned `/tmp/cockpit-deploy.lock`, `.git/HEAD`, `.git/index`, `.git/ORIG_HEAD`** — locking out every later run *and* the scheduled deploy. The lock open now fails with a diagnostic instead of a bare "Permission denied". `docker ps` hides the containers that cause this class of problem; use `docker ps -a`.
+- **§6.70** **Debt/staleness sweep.** An audit of the whole venture, then nine staged fixes.
+  - **The test fixture was shipping two parked research tracks to the Pi.** `tests/cockpit/_common.py` imports `backtest_daily.synthetic_provider` for its offline prices; the package `__init__` re-exported the engine, so that import pulled `engine → metrics → momentum_lib + ml_stock_prediction/backtest_lib` and `.dockerignore` had to whitelist all of it. The `__init__` now re-exports NOTHING (no consumer used the package-level names) and the whitelist is four files. `test_synthetic_fixture_isolated_from_engine_chain` is the guard.
+  - **23 of the 27 vendored modules were unreachable and were deleted** (`data/`, `notifications/`, `analysis/`, both batch processors, `screener.py`, `quant_engine.py`) — recorded in PROVENANCE.md as MIT requires. `notifications/` had in fact been **import-broken since 2026-07-22**: `scheduler.py` imports `screen_candidates`, which stopped being re-exported when the `.screener` import was dropped. Nothing noticed, because nothing imported it.
+  - **★ One doctrine rule had two values.** The weekend hunt confirmed breakouts at **1.4×** over the vendored **20-day** window while `triggers.py` used **1.5×** over the prior **50**, so the same rule read differently depending on which surface you asked. Constants now live in `cockpit/doctrine.py` (imports nothing, so `trade.py` and `hunt/` can both read it) and the single `indicators.volume_ratio` is the only implementation. The lesson is the general one: **a duplicated constant is a fork with a delayed fuse** — `EARNINGS_SOON_DAYS` existed in four files, `MAX_STOP_FROM_PIVOT` in two.
+  - `gates()` now confirms only inside the **buy zone** — a heavy-volume close 6% past the pivot is chasing, not a confirmation, and `report.py` (which already scoped it that way) now calls `gates()` instead of re-deriving the buckets with a `min_fund` divergence.
+  - **`cockpit-sellexec` logged red on a normal skip:** `sell_job` returned exit 1 on `stale`, which is an ordinary morning outcome (a holiday, a missed evening fire). Fixed to the §9 contract, with `test_sell_job_execute_stale_exits_zero`. Storage for both plans merged into `plan_store.py`; the two copies had already drifted (only one cleaned up its temp file on a failed write).
+  - **Docs described a schedule that no longer existed** — 16:30/16:40 fire times in seven docstrings, a `REFRESH_SCHEDULE_ET` constant deleted in §6.63, "tops up the whole universe" (the §6.64 misconception, still asserted in source), and a **Sat 10:30 timer that never existed** named in an error message the user is told to act on. `PI_SETUP.md` was wrong in six places including the clone path — the §6.59 outage's root cause.
+  - Dead members removed: `FREE_ROLL_FRACTION`, `cache.TICKERS_TXT` (the file never existed, so the "offline fallback" was always `[]`), and the vcp payload's `breakout_volume_ratio`/`near_52w_high`/`distance_from_52w_high_pct` — the first computed per ticker on a ~4,100-name hot path for no reader. `run_scan`/`get_universe` no longer DEFAULT to `sp500`: the argument is required, so a bare call fails at the call site instead of silently screening a different universe.
 - **§6.68** **Test suite split.** 6,411 lines / 144 tests → a 70-line runner plus 12 category suites under `tests/cockpit/`. Split by an AST script that aborts unless every test is assigned exactly once. `_common.py` holds the 12 shared fixtures and must re-export them via `__all__` (`import *` skips underscore names). Two path traps: `ROOT` moved to `parents[2]`, and `vcp_labels` is imported *bare*, which only resolved while the suite ran as a script from `tests/`.
 - **§6.69** **The two EOD units became one.** The first-ever `cockpit-screen-eod` run (2026-08-28) exposed both halves of the problem at once. (a) It crashed at the last line with `ValueError: The truth value of a DataFrame is ambiguous` — `screen_job.py` did `getattr(res, "candidates", []) or []`, and `candidates` is a DataFrame. The crash landed *after* `store.put`, so the scan table was correct and only the exit code lied; **never `or []` a DataFrame**. (b) The sweep ran 16:20:20→16:35:43 (15m23s) while the screen fired at 16:25, so the two contended for yfinance and the screen re-fetched what the sweep had not reached — 30 minutes against the ~5 a warm cache costs. A clock gap cannot enforce ordering against a job whose runtime varies 11–18 min, so `cockpit-refresh-eod` + `cockpit-screen-eod` collapsed into `cockpit-eod`: `Type=oneshot` with two `ExecStart=` lines, which systemd runs serially and abandons if the first fails. `TimeoutStartSec` is **per-unit, not per-ExecStart** — hence 6000, the sum of the old two. `install-units.sh` removes installed `cockpit-*` units the repo no longer ships, so the old pair disappears on the next `sudo deploy/install-units.sh` with no manual cleanup.
 
@@ -456,9 +471,9 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 
 ## Files (this venture)
 
-- **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. (`data/`, `notifications/`, `analysis/`, batch processors, `quant_engine.py` = live-only, unused here.)
+- **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package: the live-only modules (`data/`, `notifications/`, `analysis/`, batch processors, `quant_engine.py`, `screener.py`) were deleted 2026-09-02.
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (12 suites, 144 tests) · `tests/test_hunt.py` (30) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts.
-- **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these. **Overview:** `docs/MINERVINI_BACKTEST.md`.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (12 suites, 151 tests) · `tests/test_hunt.py` (33 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
+- **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.

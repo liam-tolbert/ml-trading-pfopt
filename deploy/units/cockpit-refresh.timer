@@ -1,5 +1,5 @@
 [Unit]
-Description=Half-hourly SEPA intraday refresh, 09:30-16:30 ET weekdays
+Description=SEPA intraday refresh: 09:30, :00/:30 to 15:30, 16:10 ET weekdays
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 09:30:00 America/New_York

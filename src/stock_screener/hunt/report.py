@@ -70,19 +70,21 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
         if v["verdict"] in n:
             n[v["verdict"]] += 1
 
-    passing = [r for r in diag_rows if (verdicts.get(r["ticker"]) or {}).get("verdict") == "PASS"]
-    blocked = [r for r in passing if pl._earnings_blocked(r["earnings_in"])]
-    live = [r for r in passing if r not in blocked]
-    buckets = {"buy_zone": [], "approaching": [], "below": [], "past_entry": []}
-    for r in live:
-        buckets[pl.bucket(r["vs_pivot_pct"])].append(r)
-    for v in buckets.values():
-        v.sort(key=lambda r: -r["q"])
-    confirmed = [r for r in buckets["buy_zone"]
-                 if r["breakout_today"] and r["volume_ratio"] >= pl.VOL_CONFIRM_RATIO]
-
     import pandas as pd
-    audit = pl.watchlist_audit(pd.DataFrame(diag_rows), verdicts)
+    diag_df = pd.DataFrame(diag_rows)
+
+    # The buckets come from pipeline.gates so the HTML and the `gates` CLI can never
+    # disagree about the same run; min_fund=0 here because the report SHOWS every PASS
+    # name and applies the fundamental gate only to the summary line below.
+    passing = [r for r in diag_rows if (verdicts.get(r["ticker"]) or {}).get("verdict") == "PASS"]
+    g = pl.gates(diag_df, verdicts, min_fund=0)
+    by_ticker = {r["ticker"]: r for r in diag_rows}
+    buckets = {k: [by_ticker[x["ticker"]] for x in g[k]]
+               for k in ("buy_zone", "approaching", "below", "past_entry")}
+    blocked = [by_ticker[x["ticker"]] for x in g["earnings_blocked"]]
+    confirmed = [by_ticker[x["ticker"]] for x in g["volume_confirmed"]]
+
+    audit = pl.watchlist_audit(diag_df, verdicts)
 
     # ---- fragments -------------------------------------------------------- #
     def chk(b): return ('<td class="n chk-y">&#10003;</td>' if b
@@ -126,7 +128,7 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
 
     regime = meta.get("regime") or {}
     date_label = meta.get("scan_time", "")[:10]
-    gated = [r["ticker"] for r in buckets["buy_zone"] if r["fund"] >= min_fund]
+    gated = [x["ticker"] for x in pl.gates(diag_df, verdicts, min_fund=min_fund)["buy_zone"]]
 
     page = _TEMPLATE.format(
         date=_esc(date_label),

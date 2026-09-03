@@ -1,4 +1,4 @@
-"""Synthetic-data tests for src/backtest_lib.walk_forward_backtest.
+"""Synthetic-data tests for src/ml_stock_prediction/backtest_lib.walk_forward_backtest.
 
 Runs as a plain script (`python tests/test_backtest_lib.py`) or under pytest.
 Uses a deterministic stub model so portfolio returns are hand-checkable and the
@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "ml_stock_prediction"))
 import backtest_lib as bl  # noqa: E402
 
 

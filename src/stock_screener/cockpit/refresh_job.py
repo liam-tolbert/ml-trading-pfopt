@@ -6,7 +6,8 @@
 
 Two scopes, two schedules, because they cost three orders of magnitude apart:
 
-* ``watchlist`` (default) — ``cockpit-refresh.timer``, every 30 min 09:30-16:30 ET.
+* ``watchlist`` (default) — ``cockpit-refresh.timer``: 09:30, then :00/:30 through 15:30,
+  then 16:10 ET (the settled-close run).
   Tops up the watchlist PLUS any symbol held on the paper account that is not already
   on it (a position that fell off the watchlist still has to be priceable, or the
   Positions page and the sell pillars go blind on it). Tens of names; seconds per run.

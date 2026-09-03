@@ -76,7 +76,7 @@ root-owned and every later step (scp, deploys, container writes) fails with
 permission denied:
 
 ```
-git clone https://github.com/liam-tolbert/ml-trading-pfopt.git ~/ml-trading-pfopt
+git clone https://github.com/liam-tolbert/ml-trading-pfopt.git ~/Documents/ml-trading-pfopt
 ```
 
 `deploy.sh` locates the repo from its own path, and the shipped units carry a
@@ -92,8 +92,8 @@ Copy the laptop's `.env` into the repo root on the Pi (from Git Bash on the
 laptop, in the repo root):
 
 ```
-scp .env <user>@<pi>:ml-trading-pfopt/.env
-ssh <user>@<pi> chmod 600 ml-trading-pfopt/.env
+scp .env <user>@<pi>:Documents/ml-trading-pfopt/.env
+ssh <user>@<pi> chmod 600 Documents/ml-trading-pfopt/.env
 ```
 
 (Remote paths without a leading `/` are relative to your home on the Pi.)
@@ -108,8 +108,7 @@ Skipping this works but the first scan re-downloads ~2 years of history for
 ~4,200 tickers from the Pi's IP. From the laptop repo root:
 
 ```
-scp -r data/cockpit <user>@<pi>:ml-trading-pfopt/data/
-scp data/tickers.txt <user>@<pi>:ml-trading-pfopt/data/   # optional fallback universe
+scp -r data/cockpit <user>@<pi>:Documents/ml-trading-pfopt/data/
 ```
 
 ~120 MB. Afterwards the app restart is instant (`last_scan.pkl`) and scans are
@@ -118,14 +117,15 @@ incremental top-ups.
 ## 5. First deploy (by hand)
 
 ```
-cd ~/ml-trading-pfopt
+cd ~/Documents/ml-trading-pfopt
 ./deploy/deploy.sh
 ```
 
 Expect: image build (~5–10 min, pip downloads only — nothing compiles), then
-the 125-test offline suite inside the image (several minutes on a Pi 4), then
-`DEPLOYED <sha>`. Browse `http://<pi>:8501` — the scan table should render
-from the seeded cache and the SEPA Guide page should show content.
+both offline suites (`tests/test_cockpit.py`, `tests/test_hunt.py`) inside the
+image (several minutes on a Pi 4), then `DEPLOYED <sha>`. Browse
+`http://<pi>:8501` — the scan table should render from the seeded cache and the
+SEPA Guide page should show content.
 
 ## 6. Refresh smoke test
 
@@ -158,18 +158,21 @@ DST):
 
 ```
 systemd-analyze calendar 'Mon..Fri *-*-* 09:30:00 America/New_York'
-systemd-analyze calendar 'Mon..Fri *-*-* 10..16:00,30:00 America/New_York'
-systemd-analyze calendar 'Mon..Fri *-*-* 17:30:00 America/New_York'
+systemd-analyze calendar 'Mon..Fri *-*-* 10..15:00,30:00 America/New_York'
+systemd-analyze calendar 'Mon..Fri *-*-* 16:10:00 America/New_York'
+systemd-analyze calendar '*-*-* 17..23:00:00 America/New_York'
 ```
 
-Refresh fires: 09:30, then every 30 min through 16:30 ET (the 16:30 run is the
-settled-close report the daily 16:35 ritual reads). Deploy fires: 17:30 ET
-weekdays + Sat 10:00 ET — always outside market hours, so a mid-day push never
-changes trading behavior mid-session.
+Refresh fires: 09:30, then :00/:30 through 15:30, then 16:10 ET — the 16:10 run
+is the settled-close report the evening ritual reads. The rest of the day:
+sellplan 16:15, eod 16:20 (universe sweep, then the screen that rebuilds the
+scan table), sellexec 09:25, buyexec 09:26. Deploy fires hourly 17:00-09:00
+every day — always outside market hours, so a mid-day push never changes
+trading behavior mid-session, and it is the only Persistent timer.
 
 ### Auto-sell timers (optional — P1-P4 sell automation)
 
-Two more units automate the sell doctrine: `cockpit-sellplan.timer` (16:40 ET
+Two more units automate the sell doctrine: `cockpit-sellplan.timer` (16:15 ET
 weekdays) evaluates the sell pillars on every holding and writes a *plan*;
 `cockpit-sellexec.timer` (09:25 ET weekdays) submits any still-planned full
 exits so they fill at the open. Between the two, the Positions page shows the
@@ -221,11 +224,11 @@ The Pi is now the cockpit's only home; the laptop is a browser.
 - **Health rollback:** push a commit that breaks app startup — the deploy must
   print `DEPLOY ROLLBACK` and restore the previous image.
 - **Reboot:** `sudo reboot` — the app container returns on its own
-  (restart policy); `systemctl list-timers` shows both timers re-armed.
+  (restart policy); `systemctl list-timers` shows every `cockpit-*` timer re-armed.
 
 ## 10. Operations
 
-- Logs: `journalctl -u cockpit-refresh -u cockpit-deploy` (refresh stdout goes
+- Logs: `journalctl -u 'cockpit-*'` (scheduled-run stdout goes
   to journald; the dated JSON reports in `data/cockpit/triggers/` are
   unchanged and feed the app sidebar).
 - What's deployed:

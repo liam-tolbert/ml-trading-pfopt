@@ -3,7 +3,7 @@
 Two-phase, matching the operating rules (decision at the settled close, order at the
 next open):
 
-* **Evening** (``sell_job.py plan``, after the ~16:30 settled trigger run):
+* **Evening** (``sell_job.py plan`` at 16:15 ET, after the 16:10 settled trigger run):
   :func:`build_sell_plan` turns each held position's pillars into a *plan* —
   full-exit orders for name-specific hard fails (P1, P2, P4). P3 (the tape) and every
   warn are recorded but never traded automatically. P2 must fail on TWO consecutive
@@ -23,15 +23,13 @@ AppTests away from real state. Paper account only, like every trade path.
 """
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from src.stock_screener.cockpit import cache
+from src.stock_screener.cockpit import plan_store
 
 AUTOSELL_ENV = "AUTOSELL"
-_TRUTHY = {"1", "true", "yes", "on"}
+_PREFIX = "sell_plan"
 
 # Pillars whose hard fail plans an automatic full exit. P3 is market-wide (a regime
 # flip would liquidate the whole book) — deliberately excluded, report-only.
@@ -45,15 +43,6 @@ ORDER_VETOED = "vetoed"
 ORDER_SUBMITTED = "submitted"
 ORDER_FAILED = "failed"
 ORDER_SKIPPED = "skipped"
-
-
-def _today_iso(today=None) -> str:
-    import pandas as pd
-    if today is None:
-        t = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
-    else:
-        t = pd.Timestamp(today).normalize()
-    return t.date().isoformat()
 
 
 def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
@@ -112,58 +101,37 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                            "status": ORDER_PLANNED, "detail": ""})
 
     import pandas as pd
-    return {"date": _today_iso(today),
+    return {"date": plan_store.today_iso(today),
             "generated_at": pd.Timestamp.now(tz="America/New_York").isoformat(),
             "orders": orders, "snapshot": snapshot, "notes": notes,
             "executed_at": None}
 
 
+# Storage is shared with entries.py (see plan_store); these keep the sell-side names the
+# pages and the CLI already import.
 def sell_plan_path(date_iso: str, dir_path=None) -> Path:
-    d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
-    return d / f"sell_plan_{date_iso}.json"
+    return plan_store.plan_path(_PREFIX, date_iso, dir_path)
 
 
 def save_sell_plan(plan: dict, dir_path=None) -> Path:
-    """Atomic write (tmp + ``os.replace``) — the evening CLI, the morning executor, and
-    a page Veto click run in separate processes against the same day-file."""
-    path = sell_plan_path(plan["date"], dir_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(plan, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
-    return path
+    """Atomic write — the evening CLI, the morning executor and a page Veto click run in
+    separate processes against the same day-file."""
+    return plan_store.save_plan(_PREFIX, plan, dir_path)
 
 
 def load_latest_sell_plan(dir_path=None, *, before: Optional[str] = None
                           ) -> Optional[dict]:
     """Newest parseable ``sell_plan_*.json``, or None. ``before`` (ISO date) skips plans
-    dated >= it — the evening planner uses ``before=today`` so a same-day rerun reads
+    dated >= it — the evening planner passes ``before=today`` so a same-day rerun reads
     yesterday's snapshot for the P2 streak, not its own earlier output. Never raises."""
-    try:
-        d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
-        for path in sorted(d.glob("sell_plan_*.json"), reverse=True):
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    continue
-                if before is not None and str(data.get("date", "")) >= before:
-                    continue
-                return data
-            except Exception:
-                continue
-    except Exception:
-        pass
-    return None
+    return plan_store.load_latest_plan(_PREFIX, dir_path, before=before)
 
 
 def veto_order(plan: dict, symbol: str) -> bool:
     """Mark ``symbol``'s planned order vetoed (in place). True if an order changed."""
-    changed = False
-    for o in plan.get("orders", []):
-        if o.get("symbol") == symbol and o.get("status") == ORDER_PLANNED:
-            o["status"] = ORDER_VETOED
-            changed = True
-    return changed
+    return plan_store.flip_status(plan, items_key="orders", id_key="symbol",
+                                  ident=symbol, from_status=ORDER_PLANNED,
+                                  to_status=ORDER_VETOED)
 
 
 def plan_is_current(plan: dict, today=None) -> bool:
@@ -186,8 +154,7 @@ def plan_is_current(plan: dict, today=None) -> bool:
 
 
 def autosell_enabled(env: Optional[dict] = None) -> bool:
-    e = os.environ if env is None else env
-    return str(e.get(AUTOSELL_ENV, "")).strip().lower() in _TRUTHY
+    return plan_store.env_enabled(AUTOSELL_ENV, env)
 
 
 def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],

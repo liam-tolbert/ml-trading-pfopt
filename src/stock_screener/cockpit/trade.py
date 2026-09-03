@@ -19,6 +19,9 @@ import os
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
+# doctrine is constants-only and imports nothing, so this module stays import-light.
+from .doctrine import EARNINGS_SOON_DAYS, MAX_STOP_FROM_PIVOT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO
+
 MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so the pure
                             # plan builder needn't import alpaca-py)
 MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-order cap as a
@@ -27,18 +30,15 @@ STALE_PLAN_BARS = 2         # skip a plan name whose freshest daily bar is more 
                             # *trading* days old rather than size on stale data (the scan memo
                             # has no time-based invalidation). 2 absorbs a weekend + a holiday.
 # When a frozen judged_pivot drives the plan, mirror scan._entry_levels: default stop 7.5% below
-# the pivot, hard-floored at 10% below it (Minervini's 7-8% ideal / 10% max).
+# the pivot, hard-floored at MAX_STOP_FROM_PIVOT (Minervini's 7-8% ideal / 10% max).
 DEFAULT_STOP_FROM_PIVOT = 0.075
-MAX_STOP_FROM_PIVOT = 0.10
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
 BREAKEVEN_GAIN = 0.16       # gain past which the stop should be at least breakeven (~2x initial risk)
 TRAIL_GAIN = 0.20           # gain past which, "well in profit", trail the 50-day SMA
 SELL_STRENGTH_GAIN = 0.20   # gain past which to consider selling part into strength
-HEAVY_VOL_RATIO = 1.5       # latest volume vs its 50-day average = a heavy-volume day
-EARNINGS_SOON_DAYS = 21     # mirrors triggers.EARNINGS_SOON_DAYS (kept here so this module
-                            # needn't import the pandas-heavy triggers/scan stack at load time)
+HEAVY_VOL_RATIO = VOL_CONFIRM_RATIO   # a heavy-volume day IS the breakout-confirmation bar
 EARNINGS_CUSHION_MIN = 0.08  # min profit cushion to comfortably hold a position through a report
 # Suggested-stop bases for the re-arm action; "auto" picks per position by its gain.
 STOP_BASES = ("auto", "initial", "breakeven", "sma50")
@@ -59,7 +59,6 @@ DECISIVE_BELOW_PIVOT_PCT = 0.02  # a close >2% below the pivot is decisive, not 
 # --- Progressive-exposure gate + free-roll -------------------------------------------------- #
 GATE_HALF_SIZE_AFTER = 2    # consecutive losing closed trades -> advise half-size probes
 FREE_ROLL_R = 2.0           # R-multiple where selling part + breakeven stop is advised
-FREE_ROLL_FRACTION = 0.5    # fraction the free-roll action sells by default
 
 # The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which owns
 # the shared ALPACA_API_KEY/SECRET pair). Each paper account has its own key pair, so prefer
@@ -1320,12 +1319,10 @@ def fetch_positions() -> dict:
                 s = calculate_sma(df["Close"], 50)
                 if len(s) and pd.notna(s.iloc[-1]):
                     sma_50 = float(s.iloc[-1])
-            if "Volume" in df.columns and len(df) >= 51:
-                # Prior 50 bars, EXCLUDING today — matches triggers._volume_ratio so the shared
-                # 1.5× heavy-volume exit gate reads the same on both surfaces.
-                avg_vol = float(df["Volume"].iloc[-51:-1].mean())
-                if avg_vol > 0:
-                    volume_ratio = float(df["Volume"].iloc[-1]) / avg_vol
+            # The shared doctrine read, so the heavy-volume flag here and the trigger
+            # job's confirmation can never diverge.
+            from .indicators import volume_ratio as _vr
+            volume_ratio = _vr(df, VOL_AVG_DAYS)
 
         gain_pct = _attr_float(p, "unrealized_plpc")
         if gain_pct is None and avg_entry and price:

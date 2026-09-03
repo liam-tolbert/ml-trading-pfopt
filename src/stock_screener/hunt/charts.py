@@ -19,6 +19,8 @@ import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.ticker import NullFormatter, ScalarFormatter
 
+from src.stock_screener.cockpit.doctrine import VOL_AVG_DAYS
+from src.stock_screener.cockpit.indicators import prior_volume_average
 from .pipeline import BUY_ZONE_MAX_PCT, ScanBundle
 
 BARS = 185           # ~9 months of dailies: full base plus context
@@ -90,7 +92,9 @@ def _panel(fig, gs, j, bundle: ScanBundle, r: dict, bars: int) -> None:
     axp.set_xticks(mk)
     axp.set_xticklabels([idx[i].strftime("%b") for i in mk], fontsize=7)
 
-    vs50 = pd.Series(vol).rolling(50).mean().to_numpy()
+    # The gate's own denominator (prior N bars, today excluded), so the plotted line is
+    # the one a confirmation is actually measured against.
+    vs50 = prior_volume_average(pd.Series(vol), VOL_AVG_DAYS).to_numpy()
     axv.bar(x, vol, color=color, width=0.8, alpha=0.8)
     axv.plot(x, vs50, color="#1f78b4", lw=1.0)
     axv.set_yticks([])

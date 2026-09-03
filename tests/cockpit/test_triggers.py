@@ -6,6 +6,27 @@ gate (`python tests/test_cockpit.py`).
 from tests.cockpit._common import *  # noqa: F401,F403
 
 
+def test_volume_ratio_excludes_the_bar_it_measures():
+    """The shared confirmation read: last bar over the mean of the PRIOR window.
+
+    50 flat bars of 1000 then a 3000 spike is exactly 3.0. Including the spike in its own
+    average would give 2.96, and the error grows with the spike — precisely the bars a
+    breakout gate exists to judge. Too little history is None, never a confident ratio off
+    a partial window."""
+    from src.stock_screener.cockpit.indicators import prior_volume_average, volume_ratio
+    import pandas as pd
+
+    v = [1000.0] * 50 + [3000.0]
+    df = pd.DataFrame({"Volume": v})
+    assert abs(volume_ratio(df, 50) - 3.0) < 1e-9
+    assert volume_ratio(pd.DataFrame({"Volume": v[:50]}), 50) is None, "50 bars is not enough"
+    assert volume_ratio(pd.DataFrame({"Close": [1.0] * 60}), 50) is None, "no Volume column"
+
+    avg = prior_volume_average(pd.Series(v), 50)
+    assert abs(float(avg.iloc[-1]) - 1000.0) < 1e-9, "the spike must not be in its own average"
+    assert pd.isna(avg.iloc[49]), "NaN until a full window exists"
+
+
 def test_check_triggers_pure():
     """The nightly gate: close above the FROZEN pivot on >=1.5x 50-day volume, today's bar
     only. Flat volume blocks a trigger, extended (> pivot*1.05) files under don't-chase

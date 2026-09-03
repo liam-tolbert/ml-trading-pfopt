@@ -1,14 +1,19 @@
 """Stock screening package.
 
 Pure rule logic (numpy/pandas only) lives in ``phase_indicators``, ``signal_engine``,
-``benchmark`` and ``indicators`` and is re-exported below for convenience. The legacy
-DB-backed value screener (``.screener``) is NOT imported here at all: it needs the live
-data layer (SQLAlchemy, yfinance, ...), and with those extras installed a guarded import
-silently dragged the whole dead layer into every process (~1.7s + sys.modules pollution).
-Import ``.screener`` directly if it is ever needed.
+``benchmark`` and ``indicators``, and is re-exported below. These four modules are the
+whole of this package: the DB-backed value screener, the batch processors, the quant
+engine and the live ``data``/``notifications``/``analysis`` layers were deleted from
+this copy because nothing here could reach them and they needed extras (SQLAlchemy,
+yfinance, slack) that the runtime does not install. See PROVENANCE.md.
+
+Only names with a consumer in this repo are exported. An unexported helper is still
+importable from its own module — that is deliberate, so this list stays a map of what
+is actually used.
 
 NOTE (vendored — see PROVENANCE.md): modifications from the upstream MIT source are
 limited to (1) ``from src.`` -> relative imports and (2) this import/re-export shim.
+No function body was ever changed.
 """
 
 # --- Pure rule logic: numpy/pandas only, always importable ------------------
@@ -29,13 +34,7 @@ from .benchmark import (
     calculate_market_breadth,
     should_generate_signals,
 )
-from .indicators import (
-    calculate_rsi,
-    calculate_sma,
-    calculate_ema,
-    detect_volume_spike,
-    find_swing_lows,
-)
+from .indicators import calculate_sma
 
 __all__ = [
     # pure rule logic (Minervini screen)
@@ -51,9 +50,5 @@ __all__ = [
     "calculate_market_breadth",
     "should_generate_signals",
     # technical-indicator helpers
-    "calculate_rsi",
     "calculate_sma",
-    "calculate_ema",
-    "detect_volume_spike",
-    "find_swing_lows",
 ]

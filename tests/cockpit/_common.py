@@ -308,7 +308,6 @@ __all__ = [
     '_trigger_frame',
     'build_chart',
     'go',
-    'make_synthetic',
     'os',
     'run_suite',
     'scan_mod',

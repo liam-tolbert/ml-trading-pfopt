@@ -1,5 +1,5 @@
 [Unit]
-Description=Evening sell-plan build, 16:40 ET weekdays (after the settled trigger run)
+Description=Evening sell-plan build, 16:15 ET weekdays (after the 16:10 settled trigger run)
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 16:15:00 America/New_York

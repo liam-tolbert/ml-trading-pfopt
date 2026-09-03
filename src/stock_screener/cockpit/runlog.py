@@ -1,7 +1,7 @@
 """Run logging for the cockpit — dated files under ``data/cockpit/logs/``, pruned at 14 days.
 
-Three kinds of process write here: the long-lived Streamlit app, the half-hourly one-shot
-trigger container, and the morning buy/sell CLIs. ``TimedRotatingFileHandler`` is therefore
+Three kinds of process write here: the long-lived Streamlit app, the one-shot refresh and
+EOD containers, and the morning buy/sell CLIs. ``TimedRotatingFileHandler`` is therefore
 the wrong tool — its rename-on-rollover races between processes, and two containers rolling
 the same file silently lose records. A dated filename needs no rollover at all: every process
 appends to ``cockpit_<today>.log`` (``O_APPEND`` keeps interleaved line writes whole), and
