@@ -911,5 +911,72 @@ def test_submit_buy_plan_skips_gate_blocked():
 
 
 
+def test_connect_paper_installs_timeout():
+    """Every cockpit Alpaca request carries ALPACA_TIMEOUT_S unless its caller sets one.
+
+    alpaca-py sends no timeout. On 2026-09-23 the Pi's app (up 20 days) had one ESTABLISHED
+    socket to paper-api sitting idle, the Positions page spun on "Reading the paper account…"
+    forever, and every new visit queued behind that call on the same st.cache_data key —
+    while the identical read from a fresh process answered in 2.7 s. This also pins the
+    private ``_session`` hook against the image's alpaca-py pin: a version without it fails
+    HERE, at the deploy gate, instead of shipping without a timeout."""
+    import os
+    from unittest.mock import patch
+    import requests
+    from requests.adapters import HTTPAdapter
+    from src.stock_screener.cockpit import trade
+
+    env = {"ALPACA_API_KEY_MINERVINI": "PKTEST0000000000000000",
+           "ALPACA_API_KEY_SECRET_MINERVINI": "secret-test"}
+    with patch.dict(os.environ, env):
+        client, dedicated = trade._connect_paper()
+    assert dedicated is True
+    url = "https://paper-api.alpaca.markets/v2/account"
+    adapter = client._session.get_adapter(url)
+    seen = []
+    req = requests.Request("GET", url).prepare()
+    with patch.object(HTTPAdapter, "send",
+                      lambda self, request, **kw: seen.append(kw.get("timeout"))):
+        adapter.send(req, timeout=None)                 # what alpaca-py passes today
+        adapter.send(req, timeout=3)                    # an explicit caller value wins
+    assert seen == [trade.ALPACA_TIMEOUT_S, 3], f"timeouts reaching the transport: {seen}"
+
+
+def test_alpaca_timeout_ends_a_silent_connection():
+    """End to end on a real socket: a server that completes the handshake and never answers
+    must raise ReadTimeout, not block — the exact shape of a dropped connection. The request
+    runs on a worker thread with a join bound, so a regression FAILS this test rather than
+    hanging the deploy gate. Loopback only, so it runs under `--network none`."""
+    import socket
+    import threading
+    import types
+    import requests
+    from src.stock_screener.cockpit import trade
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)                        # the kernel accepts the handshake; nothing ever replies
+    port = srv.getsockname()[1]
+    client = trade._with_timeout(types.SimpleNamespace(_session=requests.Session()),
+                                 timeout=(1.0, 0.5))
+    out = {}
+
+    def _go():
+        try:
+            client._session.get(f"http://127.0.0.1:{port}/v2/account")
+            out["r"] = "answered"
+        except Exception as e:
+            out["r"] = type(e).__name__
+
+    th = threading.Thread(target=_go, daemon=True)
+    try:
+        th.start()
+        th.join(10)
+    finally:
+        srv.close()
+    assert not th.is_alive(), "request still blocked after 10 s — no timeout reached the socket"
+    assert out.get("r") == "ReadTimeout", f"expected ReadTimeout, got {out}"
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "trade"))

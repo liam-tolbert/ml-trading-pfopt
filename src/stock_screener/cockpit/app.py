@@ -363,13 +363,16 @@ def _do_disarm(ticker) -> None:
 
 
 def _risk_guidance():
-    """Recent-form sizing guidance for the risk mode, memoized per (session, jr_nonce):
-    a failed journal read is remembered as None so an Alpaca outage costs ONE fetch
-    attempt per session — the trade panel must never re-block on every rerun. Only the
-    cockpit's own tagged trades drive the cockpit's sizing."""
+    """Recent-form sizing guidance for the risk mode, memoized per (session, jr_nonce) for
+    the same FILLS_MAX_AGE_S as the fills under it — so a newly closed trade reaches the
+    sizing instead of the session's first read standing forever. A failed journal read is
+    remembered as None, so an Alpaca outage costs one fetch attempt per age window — the
+    trade panel must never re-block on every rerun. Only the cockpit's own tagged trades
+    drive the cockpit's sizing."""
     n = st.session_state.get("jr_nonce", 1)
     memo = st.session_state.get("risk_guide")
-    if memo is not None and memo.get("nonce") == n:
+    if (memo is not None and memo.get("nonce") == n
+            and time.monotonic() - memo.get("mono", 0.0) < journal_cache.FILLS_MAX_AGE_S):
         return memo["data"]
     try:
         fills = journal_cache.cached_fills(n)["fills"]
@@ -377,7 +380,7 @@ def _risk_guidance():
         data = trade.suggest_risk_pct(closed)
     except Exception:
         data = None
-    st.session_state["risk_guide"] = {"nonce": n, "data": data}
+    st.session_state["risk_guide"] = {"nonce": n, "mono": time.monotonic(), "data": data}
     return data
 
 

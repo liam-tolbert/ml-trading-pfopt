@@ -51,12 +51,31 @@ _BASIS_LABELS = {
 _ICONS = {"submitted": "✅", "stop_only": "🛑", "stop_kept": "🔒", "skipped": "—", "failed": "⚠️"}
 
 
-@st.cache_data(show_spinner="Reading the paper account…")
-def _cached_positions(nonce):
-    # Reference the MODULE attribute (trade.fetch_positions) so a test patch is honored; the
-    # nonce lets Refresh / re-arm bust the cache. TradeUnavailable isn't cached, so a
-    # credentials fix + Refresh recovers.
-    return trade.fetch_positions()
+POS_MAX_AGE_S = 60      # a memoized account read older than this is re-fetched on the next rerun
+
+
+def _session_positions(nonce):
+    """The account read, memoized per browser session in session_state — never st.cache_data.
+
+    st.cache_data is ONE process-wide cache, and every session starts at nonce 1, so every
+    new visitor got the first visitor's snapshot (no expiry: a buy from the scan page or the
+    09:26 job, or an overnight stop-out, stayed invisible until someone pressed Refresh here)
+    and queued behind any fetch still in flight. Here each session reads the account itself;
+    widget reruns reuse the read for POS_MAX_AGE_S (session_state outlives page switches, so
+    age is what catches "came back after trading elsewhere"); Refresh / sell / re-arm bump the
+    nonce. A TradeUnavailable is never memoized, so Refresh retries. Returns (data, read_at)."""
+    import time
+    memo = st.session_state.get("pos_memo")
+    if (memo is not None and memo["nonce"] == nonce
+            and time.monotonic() - memo["mono"] < POS_MAX_AGE_S):
+        return memo["data"], memo["read_at"]
+    with st.spinner("Reading the paper account…"):
+        data = trade.fetch_positions()          # MODULE attribute, so a test patch is honored
+    import pandas as pd
+    read_at = pd.Timestamp.now(tz="America/New_York")
+    st.session_state["pos_memo"] = {"nonce": nonce, "mono": time.monotonic(),
+                                    "data": data, "read_at": read_at}
+    return data, read_at
 
 
 def _do_rearm(positions, nonce, basis):
@@ -71,7 +90,6 @@ def _do_rearm(positions, nonce, basis):
     except trade.TradeUnavailable as e:
         st.session_state["rearm_result"] = {"error": str(e)}
     st.session_state["pos_nonce"] = st.session_state.get("pos_nonce", 1) + 1
-    _cached_positions.clear()
 
 
 def _set_sell_qty(sym, nonce, value):
@@ -95,7 +113,6 @@ def _do_sell(symbol, qty, remainder_stop=None):
         st.session_state["sell_result"] = {"error": str(e)}
     st.session_state.pop("sell_pending", None)
     st.session_state["pos_nonce"] = st.session_state.get("pos_nonce", 1) + 1
-    _cached_positions.clear()
 
 
 def _do_veto(symbol):
@@ -130,10 +147,9 @@ if "pos_nonce" not in st.session_state:
     st.session_state.pos_nonce = 1
 if st.button("🔄 Refresh"):
     st.session_state.pos_nonce += 1
-    _cached_positions.clear()
 
 try:
-    data = _cached_positions(st.session_state.pos_nonce)
+    data, read_at = _session_positions(st.session_state.pos_nonce)
 except trade.TradeUnavailable as e:
     st.warning(str(e))
     st.stop()
@@ -152,7 +168,8 @@ m[3].metric("Unrealized P&L", f"${_pl:,.0f}", border=True)
 _src = ("Minervini Trader keys" if acct.get("using_dedicated")
         else "shared ALPACA_* keys — set ALPACA_API_KEY_MINERVINI / "
              "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
-st.caption(f"Account **…{str(acct['account_number'])[-4:]}** ({_src})")
+st.caption(f"Account **…{str(acct['account_number'])[-4:]}** ({_src}) · "
+           f"as of {read_at:%H:%M:%S} ET")
 
 if not positions:
     st.info("No open positions in this account.")

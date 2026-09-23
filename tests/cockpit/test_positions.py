@@ -381,7 +381,7 @@ def test_positions_page_renders():
         return
     import tempfile
     from unittest.mock import patch
-    from src.stock_screener.cockpit import cache, journal_cache, trade
+    from src.stock_screener.cockpit import cache, trade
 
     offline = {
         "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
@@ -398,7 +398,6 @@ def test_positions_page_renders():
         }],
     }
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
-    journal_cache.cached_fills.clear()          # process-global cache; keep this run offline
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(trade, "fetch_positions", return_value=offline), \
             patch.object(trade, "fetch_order_fills",
@@ -425,7 +424,7 @@ def test_positions_page_sell_flow():
         return
     import tempfile
     from unittest.mock import patch
-    from src.stock_screener.cockpit import cache, journal_cache, trade
+    from src.stock_screener.cockpit import cache, trade
 
     offline = {
         "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
@@ -457,7 +456,6 @@ def test_positions_page_sell_flow():
         return hits[0]
 
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
-    journal_cache.cached_fills.clear()          # process-global cache; keep this run offline
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(trade, "fetch_positions", return_value=offline), \
             patch.object(trade, "fetch_order_fills",
@@ -504,7 +502,7 @@ def test_positions_page_sell_pillars():
     import tempfile
     from unittest.mock import patch
     import pandas as pd
-    from src.stock_screener.cockpit import cache, journal_cache, trade
+    from src.stock_screener.cockpit import cache, trade
     from src.stock_screener.cockpit.export import make_entry, save_watchlist
     from src.stock_screener.cockpit.triggers import save_trigger_report
 
@@ -523,7 +521,6 @@ def test_positions_page_sell_pillars():
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
 
     # 1) full composition: pivot from the watchlist, entry from the journal, SPY fallback
-    journal_cache.cached_fills.clear()
     with tempfile.TemporaryDirectory() as _tmp:
         wl = Path(_tmp) / "watchlist.json"
         trg = Path(_tmp) / "triggers"
@@ -543,7 +540,6 @@ def test_positions_page_sell_pillars():
         f"laggard P1 warn detail missing: {rendered[-500:]}"
 
     # 2) journal down: every journal-fed pillar unknown, page alive, no flagged captions
-    journal_cache.cached_fills.clear()
     with tempfile.TemporaryDirectory() as _tmp:
         with patch.object(trade, "fetch_positions", return_value=offline), \
                 patch.object(trade, "fetch_order_fills",
@@ -701,7 +697,7 @@ def test_positions_page_sell_plan_veto():
     import os
     import tempfile
     from unittest.mock import patch
-    from src.stock_screener.cockpit import cache, journal_cache, sells, trade
+    from src.stock_screener.cockpit import cache, sells, trade
 
     offline = _positions_offline()
     plan = {"date": "2026-08-18", "generated_at": "x",
@@ -711,7 +707,6 @@ def test_positions_page_sell_plan_veto():
             "snapshot": {}, "notes": [], "executed_at": None}
 
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
-    journal_cache.cached_fills.clear()
     with tempfile.TemporaryDirectory() as _tmp:
         wl = Path(_tmp) / "watchlist.json"
         trg = Path(_tmp) / "triggers"
@@ -808,7 +803,7 @@ def test_positions_page_free_roll():
         return
     import tempfile
     from unittest.mock import patch
-    from src.stock_screener.cockpit import cache, journal_cache, trade
+    from src.stock_screener.cockpit import cache, trade
     from src.stock_screener.cockpit.export import make_entry, save_watchlist
 
     offline = _positions_offline(current_price=116.0, market_value=1160.0,
@@ -825,7 +820,6 @@ def test_positions_page_free_roll():
                 "equity": 50000.0}
 
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
-    journal_cache.cached_fills.clear()
     with tempfile.TemporaryDirectory() as _tmp:
         wl = Path(_tmp) / "watchlist.json"
         save_watchlist(wl, [make_entry("AAA", 100.0, date_added="2026-07-01",
@@ -865,6 +859,120 @@ def test_positions_page_free_roll():
     assert calls.get("args") == ("AAA", 5, 100.0), \
         f"expected half-size sell with breakeven remainder_stop, got {calls.get('args')}"
 
+
+
+def test_fetch_positions_timeout_is_trade_unavailable():
+    """A timed-out Alpaca read surfaces as TradeUnavailable — the page's retry warning, which
+    st.cache_data never caches — instead of a traceback.
+
+    The stops lookup is the sharp edge: it returns {} on errors, and with timeouts in play a
+    slow answer would have read as "no stops" — rendering HALO's armed stop as "⚠ No
+    protective stop" and letting a re-arm stack a second stop on the same shares. A timeout
+    there raises too; any other lookup error still degrades to {} as before."""
+    from requests.exceptions import ReadTimeout
+    from alpaca.trading.requests import GetOrdersRequest
+    from alpaca.trading.enums import OrderSide, OrderType, QueryOrderStatus
+    from src.stock_screener.cockpit import trade
+    Client, _Pos, _Order = _pos_fakes()
+
+    class _HungAccount(Client):
+        def get_account(self):
+            raise ReadTimeout("read timed out")
+
+    class _SlowOrders(Client):
+        def get_orders(self, filter=None):
+            raise ReadTimeout("read timed out")
+
+    class _BrokenOrders(Client):
+        def get_orders(self, filter=None):
+            raise ValueError("unparseable order payload")
+
+    held = [_Pos("AAA", 10, avg_entry_price=100.0, current_price=101.0)]
+    orig = trade._connect_paper
+    try:
+        for client in (_HungAccount(held), _SlowOrders(held)):
+            trade._connect_paper = lambda c=client: (c, True)
+            try:
+                trade.fetch_positions()
+                raise AssertionError(f"{type(client).__name__}: expected TradeUnavailable")
+            except trade.TradeUnavailable as e:
+                assert "Refresh" in str(e), str(e)
+    finally:
+        trade._connect_paper = orig
+
+    kw = dict(GetOrdersRequest=GetOrdersRequest, QueryOrderStatus=QueryOrderStatus,
+              OrderSide=OrderSide, OrderType=OrderType)
+    assert trade._open_sell_stops_by_symbol(_BrokenOrders(held), **kw) == {}, \
+        "a non-timeout lookup error must keep degrading to {}"
+
+
+def _check_positions_read_per_session(page):
+    """The per-session account-read contract, against the page script at ``page`` (a path, so
+    the same check can be pointed at an older copy to prove it catches the regression)."""
+    from streamlit.testing.v1 import AppTest
+    import tempfile
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import cache, trade
+
+    calls = []
+
+    def _fake_fetch():
+        calls.append(1)
+        d = _positions_offline()
+        d["account"]["equity"] = 50000.0 + 1000.0 * len(calls)     # every read is distinct
+        return d
+
+    def _equity(at):
+        return [str(m.value) for m in at.metric if m.label == "Equity"]
+
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(trade, "fetch_positions", side_effect=_fake_fetch), \
+            patch.object(trade, "fetch_order_fills",
+                         side_effect=trade.TradeUnavailable("offline")), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+        a = AppTest.from_file(page, default_timeout=60)
+        a.run()
+        assert not a.exception, f"session A raised: {a.exception}"
+        assert len(calls) == 1 and _equity(a) == ["$51,000"], (len(calls), _equity(a))
+
+        b = AppTest.from_file(page, default_timeout=60)      # a second visitor, same server
+        b.run()
+        assert not b.exception, f"session B raised: {b.exception}"
+        assert len(calls) == 2, f"session B must read the account itself, not reuse A's " \
+                                f"snapshot (fetches={len(calls)}, B shows {_equity(b)})"
+        assert _equity(b) == ["$52,000"], _equity(b)
+
+        a.radio(key="pos_basis").set_value("breakeven").run()    # an ordinary widget rerun
+        assert len(calls) == 2, "a widget rerun inside POS_MAX_AGE_S must reuse the read"
+
+        [r for r in a.button if "Refresh" in str(r.label)][0].click().run()
+        assert len(calls) == 3 and _equity(a) == ["$53,000"], (len(calls), _equity(a))
+
+        memo = dict(a.session_state["pos_memo"])
+        memo["mono"] -= 3600                    # age the read past POS_MAX_AGE_S
+        a.session_state["pos_memo"] = memo
+        a.radio(key="pos_basis").set_value("initial").run()
+        assert len(calls) == 4, "a read older than POS_MAX_AGE_S must be re-fetched"
+        assert not a.exception, f"session A raised: {a.exception}"
+        assert "as of" in _rendered_text(a), "the read time must be shown"
+
+
+def test_positions_page_reads_account_per_session():
+    """Each browser session reads the account itself; reruns reuse it; age and Refresh expire it.
+
+    Under @st.cache_data every session started at pos_nonce 1 and shared ONE process-wide
+    entry with no expiry. On 2026-09-23 a fresh visit to the Pi showed equity $984,735 /
+    P&L −$588 — the 10:37 snapshot — while the live account read $984,612 / −$710 at 11:03;
+    and earlier that morning one stuck Alpaca call had every visitor queued on that same key.
+    Against the pre-fix page this fails at session B (fetches stays 1, B shows A's $51,000)."""
+    try:
+        from streamlit.testing.v1 import AppTest  # noqa: F401
+    except Exception as e:
+        print(f"  SKIP test_positions_page_reads_account_per_session (AppTest unavailable: {e})")
+        return
+    _check_positions_read_per_session(
+        str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py"))
 
 
 if __name__ == "__main__":

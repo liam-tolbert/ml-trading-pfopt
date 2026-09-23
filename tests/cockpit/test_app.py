@@ -402,13 +402,12 @@ def test_trade_plan_preview_renders_stop_controls():
     import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import journal_cache, scan as scanmod, cache, trade
+    from src.stock_screener.cockpit import scan as scanmod, cache, trade
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
 
     app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
-    journal_cache.cached_fills.clear()          # process-global cache; keep this run offline
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(scanmod, "run_scan", return_value=result), \
             patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
@@ -454,7 +453,7 @@ def test_trade_panel_risk_guidance():
     import tempfile
     from unittest.mock import patch
 
-    from src.stock_screener.cockpit import journal_cache, scan as scanmod, cache, trade
+    from src.stock_screener.cockpit import scan as scanmod, cache, trade
     prices, spy, _ = _synthetic_slice()
     result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
                              cfg=ScanConfig(min_rs=0.0))
@@ -482,7 +481,6 @@ def test_trade_panel_risk_guidance():
         at.session_state["trade_mode"] = "Risk % to stop"
 
     # 1) guidance + one-click apply
-    journal_cache.cached_fills.clear()
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(scanmod, "run_scan", return_value=result), \
             patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
@@ -509,7 +507,6 @@ def test_trade_panel_risk_guidance():
         calls["n"] += 1
         raise trade.TradeUnavailable("no creds")
 
-    journal_cache.cached_fills.clear()
     with tempfile.TemporaryDirectory() as _tmp, \
             patch.object(scanmod, "run_scan", return_value=result), \
             patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
@@ -772,7 +769,7 @@ def test_journal_page_renders():
         print(f"  SKIP test_journal_page_renders (AppTest unavailable: {e})")
         return
     from unittest.mock import patch
-    from src.stock_screener.cockpit import journal_cache, trade
+    from src.stock_screener.cockpit import trade
 
     offline = {
         "account": {"account_number": "PA00SZOE", "equity": 50000.0, "cash": 10000.0,
@@ -790,7 +787,6 @@ def test_journal_page_renders():
         ],
     }
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "3_Journal.py")
-    journal_cache.cached_fills.clear()          # process-global cache; take THIS patch's data
     with patch.object(trade, "fetch_order_fills", return_value=offline):
         at = AppTest.from_file(page, default_timeout=60)
         at.run()

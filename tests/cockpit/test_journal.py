@@ -217,5 +217,71 @@ def test_fetch_order_fills_offline():
 
 
 
+def _check_fills_read_per_session(page):
+    """The per-session order-history contract, driven through the Journal page at ``page``."""
+    from streamlit.testing.v1 import AppTest
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import trade
+
+    calls = []
+
+    def _fake_fills():
+        calls.append(1)
+        return {"account": {"account_number": "PA00SZOE", "cash": 10000.0,
+                            "equity": 50000.0 + 1000.0 * len(calls),   # every read is distinct
+                            "using_dedicated": True},
+                "fills": [
+                    {"symbol": "AAA", "side": "buy", "qty": 10.0, "price": 100.0,
+                     "time": "2026-06-01T14:30:00Z", "order_id": "1",
+                     "client_order_id": "SEPAoto-AAA-1"},
+                    {"symbol": "AAA", "side": "sell", "qty": 10.0, "price": 111.0,
+                     "time": "2026-06-10T14:30:00Z", "order_id": "2",
+                     "client_order_id": "SEPAstop-AAA-2"}]}
+
+    with patch.object(trade, "fetch_order_fills", side_effect=_fake_fills):
+        a = AppTest.from_file(page, default_timeout=60)
+        a.run()
+        assert not a.exception, f"session A raised: {a.exception}"
+        assert len(calls) == 1 and "equity $51,000" in _rendered_text(a), len(calls)
+
+        b = AppTest.from_file(page, default_timeout=60)      # a second visitor, same server
+        b.run()
+        assert not b.exception, f"session B raised: {b.exception}"
+        assert len(calls) == 2, (f"session B must read the order history itself, not reuse "
+                                 f"A's (fetches={len(calls)})")
+        assert "equity $52,000" in _rendered_text(b), "session B shows another session's read"
+
+        a.checkbox[0].uncheck().run()                        # an ordinary widget rerun
+        assert len(calls) == 2, "a widget rerun inside FILLS_MAX_AGE_S must reuse the read"
+
+        [r for r in a.button if "Refresh" in str(r.label)][0].click().run()
+        assert len(calls) == 3 and "equity $53,000" in _rendered_text(a), len(calls)
+
+        memo = dict(a.session_state["fills_memo"])
+        memo["mono"] -= 3600                    # age the read past FILLS_MAX_AGE_S
+        a.session_state["fills_memo"] = memo
+        a.checkbox[0].check().run()
+        assert len(calls) == 4, "a read older than FILLS_MAX_AGE_S must be re-fetched"
+        assert not a.exception, f"session A raised: {a.exception}"
+
+
+def test_order_history_read_per_session():
+    """journal_cache.cached_fills reads per browser session; reruns reuse it; age and the
+    Journal's Refresh expire it.
+
+    It was @st.cache_data keyed on jr_nonce, which every session starts at 1: ONE entry per
+    server with no expiry, so (found 2026-09-23 beside the Positions-page staleness) a new buy
+    stayed out of the Positions page's P1 entry dates, the Journal, and the trade panel's
+    risk sizing until someone pressed Refresh on the Journal. Against the pre-fix
+    journal_cache this fails at session B (fetches stays 1)."""
+    try:
+        from streamlit.testing.v1 import AppTest  # noqa: F401
+    except Exception as e:
+        print(f"  SKIP test_order_history_read_per_session (AppTest unavailable: {e})")
+        return
+    _check_fills_read_per_session(
+        str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "3_Journal.py"))
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "journal"))

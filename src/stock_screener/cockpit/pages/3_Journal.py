@@ -55,7 +55,6 @@ if "jr_nonce" not in st.session_state:
     st.session_state.jr_nonce = 1
 if st.button("🔄 Refresh"):
     st.session_state.jr_nonce += 1
-    journal_cache.cached_fills.clear()
 
 try:
     data = journal_cache.cached_fills(st.session_state.jr_nonce)

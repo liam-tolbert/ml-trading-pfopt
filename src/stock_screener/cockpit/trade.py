@@ -29,6 +29,10 @@ MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-ord
 STALE_PLAN_BARS = 2         # skip a plan name whose freshest daily bar is more than this many
                             # *trading* days old rather than size on stale data (the scan memo
                             # has no time-based invalidation). 2 absorbs a weekend + a holiday.
+ALPACA_TIMEOUT_S = (5.0, 15.0)  # (connect, read) seconds on every Alpaca request. alpaca-py sends
+                                # none, so a silently dropped connection blocks the caller forever
+                                # — and behind the Positions page's st.cache_data, every later
+                                # visit queues on that same stuck call. Alpaca answers in < 1 s.
 # When a frozen judged_pivot drives the plan, mirror scan._entry_levels: default stop 7.5% below
 # the pivot, hard-floored at MAX_STOP_FROM_PIVOT (Minervini's 7-8% ideal / 10% max).
 DEFAULT_STOP_FROM_PIVOT = 0.075
@@ -92,6 +96,38 @@ class TradeUnavailable(RuntimeError):
     """Alpaca can't be reached — package missing, or credentials absent from .env."""
 
 
+def _with_timeout(client, timeout=ALPACA_TIMEOUT_S):
+    """Give every request on ``client``'s HTTP session a default ``timeout``. Returns ``client``.
+
+    alpaca-py builds its own ``requests.Session`` (``client._session``) and never passes a
+    timeout, so the only hook is the session's transport adapter: it fills the timeout in on
+    each send unless the caller set one. A client without ``_session`` (a future alpaca-py)
+    is returned untouched rather than refused — ``test_connect_paper_installs_timeout`` fails
+    the deploy gate on that version instead of the app failing closed at runtime."""
+    from requests.adapters import HTTPAdapter
+
+    class _DefaultTimeout(HTTPAdapter):
+        def send(self, request, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = timeout
+            return super().send(request, **kwargs)
+
+    session = getattr(client, "_session", None)
+    if session is not None:
+        adapter = _DefaultTimeout()
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+    return client
+
+
+def _alpaca_timeout(err) -> TradeUnavailable:
+    """The read paths' timeout, as the pages' "can't reach Alpaca" error. TradeUnavailable is
+    shown as a warning and never cached by the Positions page, so Refresh retries rather than
+    replaying the failure."""
+    return TradeUnavailable(f"Alpaca didn't answer within {ALPACA_TIMEOUT_S[1]:.0f}s — "
+                            f"press Refresh to retry. ({type(err).__name__})")
+
+
 def _connect_paper():
     """Return ``(paper TradingClient, using_dedicated)`` for the cockpit's account.
 
@@ -119,7 +155,7 @@ def _connect_paper():
             "No Alpaca credentials in .env. Add the Minervini Trader paper account's keys as "
             "ALPACA_API_KEY_MINERVINI / ALPACA_API_KEY_SECRET_MINERVINI (each Alpaca paper "
             "account has its own key pair), or a shared ALPACA_API_KEY / ALPACA_API_SECRET pair.")
-    return TradingClient(key, secret, paper=True), bool(ded_key and ded_secret)
+    return _with_timeout(TradingClient(key, secret, paper=True)), bool(ded_key and ded_secret)
 
 
 def fetch_account_summary() -> dict:
@@ -870,11 +906,17 @@ def _open_sell_stops_by_symbol(client, *, GetOrdersRequest, QueryOrderStatus,
 
     Same type filter as :func:`_open_sell_stops` but omits the ``symbols=`` filter, so the whole
     account's protective stops come back in a single round-trip (the positions page needs every
-    symbol's stop at once). Returns ``{symbol: [order, ...]}``; empty dict on any error."""
+    symbol's stop at once). Returns ``{symbol: [order, ...]}``; empty dict on any error except a
+    timeout, which raises :class:`TradeUnavailable`."""
+    from requests.exceptions import Timeout
     stop_types = {OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
     try:
         opens = client.get_orders(filter=GetOrdersRequest(
             status=QueryOrderStatus.OPEN, side=OrderSide.SELL))
+    except Timeout as e:
+        # "No answer" is not "no stops": an empty dict here renders a protected position as
+        # unprotected, and rearm_stops would then place a second stop on the same shares.
+        raise _alpaca_timeout(e) from e
     except Exception:
         return {}
     out: Dict[str, List] = {}
@@ -1243,10 +1285,14 @@ def fetch_positions() -> dict:
     except ImportError as e:
         raise TradeUnavailable(str(e)) from e
 
-    acct = client.get_account()
+    from requests.exceptions import Timeout
+    try:
+        acct = client.get_account()
+        raw = list(client.get_all_positions())
+    except Timeout as e:
+        raise _alpaca_timeout(e) from e
     equity, cash = float(acct.equity), float(acct.cash)
     account_number = getattr(acct, "account_number", "?")
-    raw = list(client.get_all_positions())
     stops_by_sym = _open_sell_stops_by_symbol(
         client, GetOrdersRequest=GetOrdersRequest, QueryOrderStatus=QueryOrderStatus,
         OrderSide=OrderSide, OrderType=OrderType)
