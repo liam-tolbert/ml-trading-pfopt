@@ -1,13 +1,14 @@
-"""Pure helpers for the cockpit watchlist (no Streamlit — unit-testable).
+"""Pure helpers for the cockpit watchlist. No Streamlit, so they are unit-testable.
 
-The watchlist is an ordered list of ENTRY DICTS — ``{ticker, judged_pivot, date_added,
-pivot_source, note}`` — persisted to JSON. ``judged_pivot`` is the FROZEN trigger level:
-the detected pivot drifts with every scan, so the level is recorded once (user-judged,
-``pivot_source="judged"``, or auto-frozen by the EOD check, ``pivot_source="auto"``) and
-stays put. ``date_added`` stamps the current pivot decision. Legacy files (a bare JSON array
-of ticker strings) migrate to unfrozen entries at read time; rewritten on first mutation.
+The watchlist is an ordered list of entry dicts, ``{ticker, judged_pivot, date_added,
+pivot_source, note}``, persisted to JSON. ``judged_pivot`` is the frozen trigger level. The
+detected pivot drifts with every scan, so the level is recorded once and stays put: judged
+by the user (``pivot_source="judged"``) or auto-frozen by the trigger check
+(``pivot_source="auto"``). ``date_added`` stamps the current pivot decision. A legacy file
+(a bare JSON array of ticker strings) reads as unfrozen entries and is rewritten on the
+next save.
 
-Also here: the two CSV builders (decision list + long-format OHLCV dump) and the .txt
+Also here: the two CSV builders (decision list and long-format OHLCV dump) and the .txt
 ticker-list parser.
 """
 from __future__ import annotations
@@ -24,17 +25,18 @@ PIVOT_SOURCES = ("judged", "auto")
 
 def make_entry(ticker, judged_pivot=None, date_added=None, pivot_source=None,
                note: str = "") -> Optional[dict]:
-    """Normalize one watchlist entry; returns ``None`` when the ticker is blank (invalid).
+    """Normalize one watchlist entry. Returns ``None`` when the ticker is blank.
 
-    The pivot is coerced with ``float()`` (an ``np.float64`` would make ``json.dumps`` raise
-    inside :func:`save_watchlist`'s swallow-all — a silent no-persist) and rounded to cents;
-    non-positive/NaN/garbage pivots become ``None``. ``pivot_source`` is kept only when it
-    names a known source AND a pivot is set — an unfrozen entry carries ``pivot_source=None``.
+    The pivot is coerced with ``float()`` and rounded to cents. A numpy scalar such as
+    ``np.int64`` or ``np.float32`` would make ``json.dumps`` raise inside
+    :func:`save_watchlist`, which swallows the error and persists nothing. Non-positive, NaN
+    or unparseable pivots become ``None``. ``pivot_source`` is kept only when it names a
+    known source and a pivot is set; an unfrozen entry carries ``pivot_source=None``.
 
-    Tickers adopt the yfinance dash convention (``BRK.B`` → ``BRK-B``, mirroring
-    ``data_feed.normalize`` without importing it) so watchlist entries always match the
-    scan-payload keys — a dotted .txt-upload add would otherwise never find its data. This
-    single choke point also heals legacy dotted ``watchlist.json`` entries at load time.
+    Tickers take the yfinance dash form (``BRK.B`` → ``BRK-B``), mirroring
+    ``data_feed.normalize`` without importing it, so entries match the scan-payload keys. A
+    dotted ticker from a .txt upload would never find its data. Every entry passes through
+    here, so dotted ``watchlist.json`` entries are healed at load time too.
     """
     sym = str(ticker or "").strip().upper().replace(".", "-")
     if not sym:
@@ -77,24 +79,24 @@ def _coerce_entries(entries) -> List[dict]:
 
 
 def watchlist_tickers(entries: Sequence) -> List[str]:
-    """Ordered, de-duped ticker projection of a watchlist. Tolerates mixed dict/str input
-    (a half-migrated caller or an old test seed never crashes a consumer)."""
+    """The watchlist's tickers, ordered and de-duplicated. Accepts mixed dict/str input, so
+    a caller passing bare tickers never crashes a consumer."""
     return [e["ticker"] for e in _coerce_entries(entries)]
 
 
 def save_watchlist(path, entries: Sequence) -> None:
-    """Persist the watchlist as a JSON array of entry dicts (strings are coerced to
-    unfrozen entries). The write is ATOMIC: serialized to a pid-suffixed sibling temp
-    file, then ``os.replace``'d over the target — a crash mid-write can never leave a
-    truncated file for :func:`load_watchlist` to silently read back as ``[]``, and the
-    app/refresh_job writers can't see each other's half-written bytes. Best-effort: a
-    failure is swallowed (the in-session list stays authoritative) and the existing
-    file is left intact."""
+    """Persist the watchlist as a JSON array of entry dicts. Strings become unfrozen entries.
+
+    The write is atomic: a pid-suffixed sibling temp file, then ``os.replace`` over the
+    target. A crash mid-write cannot leave a truncated file that :func:`load_watchlist`
+    reads back as ``[]``, and the app and refresh_job never see each other's partial
+    writes. Best-effort: a failure is swallowed and the existing file is left intact. The
+    in-session list stays authoritative."""
     tmp = None
     try:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")  # unique per process — no collisions
+        tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")  # per process: writers can't collide
         tmp.write_text(json.dumps(_coerce_entries(entries)), encoding="utf-8")
         os.replace(tmp, p)
     except Exception:
@@ -120,19 +122,19 @@ def load_watchlist(path) -> List[dict]:
 
 
 def merge_frozen_pivots(primary: Sequence, donor: Sequence) -> List[dict]:
-    """Lost-update-safe merge of two watchlist copies (pure — no I/O).
+    """Lost-update-safe merge of two watchlist copies. Pure, no I/O.
 
     ``primary`` is authoritative for membership, order, notes, and any pivot it has
-    frozen itself; the ONLY thing taken from ``donor`` is a frozen pivot
+    frozen itself. The only thing taken from ``donor`` is a frozen pivot
     (``judged_pivot``/``date_added``/``pivot_source``) for a primary entry that is
     still unfrozen. Both sides go through the usual entry coercion.
 
-    Both directions of the app <-> refresh_job race use it just before saving:
-    the app persists ``merge(session, disk)`` so its stale session copy can't clobber
-    pivots the half-hourly trigger job froze meanwhile; the trigger persists
-    ``merge(disk_now, frozen_copies)`` so entries the user removed or 📌-re-froze
-    during its slow fetch window stay removed/judged, and its auto pivots land only
-    on entries still unfrozen on disk.
+    The app and refresh_job both merge just before saving. The app persists
+    ``merge(session, disk)``, so its stale session copy can't clobber pivots the
+    half-hourly trigger job froze meanwhile. The trigger job persists
+    ``merge(disk_now, frozen_copies)``, so entries the user removed or 📌-re-froze during
+    its slow fetch stay removed or judged. Its auto pivots land only on entries still
+    unfrozen on disk.
     """
     out = _coerce_entries(primary)
     frozen = {e["ticker"]: e for e in _coerce_entries(donor)
@@ -177,9 +179,8 @@ def watchlist_list_csv(candidates: Optional[pd.DataFrame], entries: Sequence,
     if candidates is None or len(candidates) == 0 or "ticker" not in candidates.columns:
         rows = pd.DataFrame({"ticker": tickers})
     else:
-        # One row per watchlist entry IN watchlist order: reindex over ALL tickers so a stale
-        # (not-in-scan) name stays IN PLACE as a ticker-only NaN row, instead of being appended
-        # at the end (which broke the documented "in the order you added them" ordering).
+        # Reindex over all tickers so a name missing from the scan keeps its watchlist place
+        # as a ticker-only NaN row. Appended at the end, it would break the watchlist order.
         rows = (candidates.drop_duplicates("ticker").set_index("ticker")
                 .reindex(tickers).reset_index())
         if columns:

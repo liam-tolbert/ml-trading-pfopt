@@ -1,13 +1,15 @@
-"""Armed-entries CLI — the morning half of the buy automation.
+"""Armed-entries CLI: the morning half of the buy automation.
 
     python src/stock_screener/cockpit/entry_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
-Runs pre-open (~09:26 ET): loads the latest armed entry plan (written by the app's
-"Arm for next open" button at the evening ritual) and submits AT MOST ONE still-armed
-buy — limit at the buy-zone top + GTC OTO stop — through the same plan-submit path the
-panel uses. Requires ``AUTOBUY=1`` (ships dark); the progressive-exposure gate FAILS
-CLOSED on this unattended path. No plan / a stale plan is NORMAL (the user simply
-didn't arm anything) — exit 0; exit 1 only on failed/partial submission.
+Runs pre-open (~09:26 ET). It loads the latest armed entry plan, written by the app's
+"Arm for next open" button in the evening, and submits at most one still-armed buy: a
+limit at the buy-zone top with a GTC OTO stop. The buy goes through the same plan-submit
+path the panel uses. Requires ``AUTOBUY=1``; it ships dark. The progressive-exposure gate
+fails closed on this unattended path.
+
+No plan or a stale plan is normal (the user armed nothing) and exits 0, as does AUTOBUY
+off. Exit 1 only on a failed or partial submission, or an unexpected error.
 """
 from __future__ import annotations
 
@@ -25,8 +27,9 @@ from src.stock_screener.cockpit import entries, trade  # noqa: E402
 
 
 def _real_submit(row: dict) -> dict:
-    """One armed row through the REAL plan-submit path (pending-buy guard, tradability,
-    10% cap, stop validity, GTC OTO limit — all re-checked there)."""
+    """Submit one armed row through the real plan-submit path, which re-checks the
+    pending-buy guard, tradability, the 10% cap, stop validity and the GTC OTO limit.
+    Returns ``{status, detail}``."""
     out = trade.submit_buy_plan([row], attach_stop=True)
     res = (out.get("results") or [{}])[0]
     return {"status": res.get("status"), "detail": res.get("detail", "")}

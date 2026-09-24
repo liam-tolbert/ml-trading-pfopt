@@ -1,28 +1,26 @@
-"""Background scan worker — the universe scan in a daemon thread, so it (a) kicks off as
-soon as ANY cockpit page loads and (b) survives page switches.
+"""Background scan worker: the universe scan runs in a daemon thread, so it starts as soon
+as any cockpit page loads and survives page switches.
 
 Streamlit cancels the running *script* whenever the user navigates or interacts, so a scan
-executed inline dies with the run that started it: the old cockpit both started the
-multi-minute cold scan only when the scan page rendered, and lost the whole fetch if you
-clicked another page mid-download. Here the scan runs in a plain daemon thread that never
-touches Streamlit APIs — a page switch kills the script run, not the thread — and the scan
-page polls ``snapshot()`` for live progress until the result lands.
+run inline dies with the run that started it. The thread never touches Streamlit APIs: a
+page switch kills the script run, not the thread. The scan page polls ``snapshot()`` for
+live progress until the result lands.
 
 One worker per browser session (``get_worker()`` keeps it in ``st.session_state``), so
-AppTest sessions stay isolated and a browser refresh starts clean. The actual ``run_scan``
-call is serialized process-wide (``_SCAN_SERIAL``) so two sessions of the LAN app (laptop +
-phone) can't race yfinance or the CSV price caches with duplicate concurrent downloads.
+AppTest sessions stay isolated and a browser refresh starts clean. The ``run_scan`` call is
+serialized process-wide (``_SCAN_SERIAL``), so two sessions of the LAN app (laptop and
+phone) can't race yfinance or the CSV price caches with duplicate downloads.
 
 This process schedules nothing, and page interaction never refreshes: entering or clicking
 a page serves the stored result and downloads nothing. Price freshness belongs to
 ``cockpit-refresh.timer`` (09:30, :00/:30 to 15:30, 16:10 ET), which tops up the watchlist
 plus held names, and to ``cockpit-eod.timer`` (16:20 ET), which sweeps the whole universe
 and then screens it. Both run from one-shot containers, so they are visible in
-``systemctl list-timers`` and cannot die with this container. The only network paths left
-in-process are the true cold start and the explicit Re-scan / full-re-download buttons.
+``systemctl list-timers`` and cannot die with this container. The only in-process network
+paths are the true cold start and the explicit Re-scan / full-re-download buttons.
 
-``scan.run_scan`` is resolved at call time inside the thread, so a test's
-``patch.object(scan, "run_scan", ...)`` is honored exactly like the old inline call.
+``scan.run_scan`` MUST be resolved at call time inside the thread, so a test's
+``patch.object(scan, "run_scan", ...)`` is honored.
 """
 from __future__ import annotations
 
@@ -38,46 +36,39 @@ from typing import Dict, Optional, Tuple
 from .cache import (LAST_SCAN_PKL as _LAST_SCAN_PKL,
                     SCAN_PERSIST_VERSION as _PERSIST_VERSION)
 
-# The app scans the full US common-stock universe with the full 8/8 trend template —
-# app.py and the non-scan pages' warm-up must agree on these or they'd start two scans.
+# The full US common-stock universe on the full 8/8 trend template. app.py and the
+# non-scan pages' warm-up MUST agree on these, or they start two scans.
 DEFAULT_UNIVERSE = "full_us"
 DEFAULT_MIN_CRITERIA = 8
 
-_SCAN_SERIAL = threading.Lock()    # process-wide: one real scan at a time, ever
+_SCAN_SERIAL = threading.Lock()    # process-wide: one real scan at a time
 
-# This process schedules NOTHING. Price freshness is owned by cockpit-refresh.timer
-# (09:30, :00/:30 to 15:30, 16:10 ET; watchlist plus held names) and the universe sweep
-# by cockpit-eod.timer, whose second step also SCREENS nightly. The old in-app
-# scheduler thread was invisible to `systemctl list-timers` and died with the container
-# — a deploy landing after its slot silently cost that day's scan — so refreshes now
-# live where every other scheduled job in this project lives.
-
-# The last completed ScanResult, pickled so a SERVER RESTART serves it instantly (the
-# store itself is process memory). Loaded lazily on the first miss; any load failure
-# (missing / corrupt / old shape / different key) fails open to a cold scan. The path
-# and version come from cache.py because the weekend hunt reads this same file.
+# The last completed ScanResult is pickled so a server restart serves it instantly; the
+# store itself is process memory. ``get`` re-reads the file whenever its mtime advances.
+# Any load failure (missing, corrupt, old shape, different key) falls back to a cold
+# scan. The path and version come from cache.py because the weekend hunt reads this file.
 
 
 def _testing() -> bool:
-    """True inside the AppTest harness. Page/app AppTests patch ``scan.run_scan`` per
-    test and rely on per-session isolation — the process-wide store must stay inert
-    there or results would leak across tests (the tell is sticky for the whole test
-    process, so unit tests inject a store explicitly instead)."""
+    """True inside the AppTest harness. Page and app AppTests patch ``scan.run_scan`` per
+    test and rely on per-session isolation, so the process-wide store MUST stay inert
+    there, or results leak across tests. The tell is sticky for the whole test process,
+    so unit tests inject a store explicitly."""
     return "streamlit.testing.v1" in sys.modules
 
 
 @dataclass
 class StoreEntry:
-    result: object          # ScanResult — treated as IMMUTABLE by every consumer
+    result: object          # ScanResult; consumers MUST treat it as immutable
     completed_wall: float   # time.time()      — "data as of HH:MM" display
     completed_mono: float   # time.monotonic() — staleness / throttle / adopt ordering
 
 
 class ResultStore:
-    """Process-wide last-completed-scan store, keyed ``(universe, min_criteria)`` —
-    deliberately NOT by generation (generations are per-session identities; the store is
-    process identity). Streamlit-free and clock-injectable so unit tests run without a
-    browser session or real sleeps."""
+    """Process-wide store of the last completed scan, keyed ``(universe, min_criteria)``.
+    Not keyed by generation: generations are per-session, the store is per-process.
+    Streamlit-free and clock-injectable, so unit tests need no browser session or real
+    sleeps."""
 
     def __init__(self, clock=time.monotonic, persist_path=None) -> None:
         self._lock = threading.Lock()
@@ -92,18 +83,18 @@ class ResultStore:
             return self._entries.get(key)
 
     def _sync_locked(self, key) -> None:
-        """Adopt the persisted scan whenever the FILE is newer than anything we hold.
+        """Adopt the persisted scan for ``key`` when the file's mtime has advanced and its
+        scan is newer than the one held (caller holds ``_lock``).
 
         This store is process memory, but ``last_scan.pkl`` is shared state:
         ``cockpit-eod`` (step 2) rewrites it from a one-shot container while the Streamlit
-        process runs for days. A load-once-per-process guard (what this was) made every
-        scheduled screen invisible until the next deploy happened to restart the app — the
-        job would run nightly and the table would never move. So freshness is decided by
-        mtime, not by whether we have ever loaded.
+        process runs for days. Freshness MUST be decided by mtime, not by whether the file
+        was ever loaded. A load-once guard hides every scheduled screen until the app
+        restarts.
 
-        Re-reading our OWN ``put`` is harmless and explicitly tolerated: the disk copy is
-        only adopted when its ``completed_wall`` is strictly newer, so an in-memory entry
-        (which carries a real ``completed_mono``) is never replaced by its own -inf copy."""
+        Re-reading this store's own ``put`` is harmless. The disk copy is adopted only when
+        its ``completed_wall`` is strictly newer, so an in-memory entry, which carries a real
+        ``completed_mono``, is never replaced by its own -inf copy."""
         if self._persist_path is None:
             return
         try:
@@ -120,12 +111,14 @@ class ResultStore:
             self._entries[key] = loaded
 
     def _read_locked(self, key) -> Optional[StoreEntry]:
-        """Read the pickled scan for ``key`` (caller holds ``_lock``); no mutation.
+        """Read the pickled scan for ``key`` (caller holds ``_lock``); no mutation. Returns
+        a StoreEntry, or None when the file is unreadable, another version or another
+        key.
 
-        ``completed_wall`` is the ORIGINAL scan time ("data as of yesterday 18:30");
-        ``completed_mono`` is -inf — monotonic clocks don't survive a restart, and -inf
-        makes the entry never adoptable by an in-flight run's adopt-while-queued check (a
-        run that already started should really scan). Any failure → None (cold scan)."""
+        ``completed_wall`` is the original scan time. ``completed_mono`` is -inf, because
+        monotonic clocks don't survive a restart. -inf also keeps an in-flight run's
+        adopt-while-queued check from adopting it, so a run that has already started does
+        its own scan."""
         try:
             with open(self._persist_path, "rb") as f:
                 d = pickle.load(f)
@@ -147,9 +140,9 @@ class ResultStore:
         return ent
 
     def _persist(self, key, ent: StoreEntry) -> None:
-        """Best-effort atomic pickle (tmp + os.replace, the house pattern) from the
-        worker thread — a failed persist costs one cold scan after the next restart,
-        never a crash. completed_mono is deliberately NOT persisted (process-relative)."""
+        """Pickle ``ent`` atomically (tmp + ``os.replace``), best effort. Never raises: a
+        failed persist costs one cold scan after the next restart. ``completed_mono`` is
+        not persisted because it is process-relative."""
         tmp = None
         try:
             path = self._persist_path
@@ -170,31 +163,31 @@ class ResultStore:
                     pass
 
     def now(self) -> float:
-        """The store's clock — run birth times for the adopt check MUST come from here,
-        never raw time.monotonic(), so an injected test clock and real time are never
-        compared against each other."""
+        """The store's clock. Run birth times for the adopt check MUST come from here, never
+        from raw ``time.monotonic()``, so an injected test clock is never compared with
+        real time."""
         return self._clock()
 
 
-# The production singleton (inert under AppTest): survives page/session churn in
-# memory, and a SERVER RESTART via the last-scan pickle.
+# The production singleton, inert under AppTest. It survives page and session churn in
+# memory, and a server restart via the last-scan pickle.
 _STORE = ResultStore(persist_path=_LAST_SCAN_PKL)
 
 
 _PRICE_PREFIX = "Prices · "        # run_scan's fetch-phase progress label prefix
 
 # What the progress bar calls each phase. "cache" is a price label whose detail says
-# "cached" — a zero-network serve used to render as "Downloading SYM: cached (…)", which
-# read as a full re-download to the user. The label STRINGS from data_feed stay untouched
-# (they're pinned by tests); only this classification/rendering layer changes.
+# "cached": a zero-network serve MUST NOT read as "Downloading". data_feed's label
+# strings are pinned by tests, so the phase is classified here instead.
 _PHASE_LABELS = {"cache": "Reading cache", "fetch": "Downloading", "screen": "Screening"}
 
 
 class ScanWorker:
     """State machine: idle → running → done|error, re-armed by ``request_rescan``.
 
-    Every mutable field sits behind ``_lock``; the thread writes only plain Python state
-    (never Streamlit elements), which is what makes it immune to script-run cancellation.
+    Every mutable field sits behind ``_lock``. The thread MUST write only plain Python
+    state, never Streamlit elements: that is what makes it immune to script-run
+    cancellation.
     """
 
     def __init__(self, universe: str = DEFAULT_UNIVERSE,
@@ -230,19 +223,20 @@ class ScanWorker:
     # ---- API for script runs ---------------------------------------------- #
     def ensure_started(self) -> None:
         """Adopt the newest store result, then start a scan for the current key unless
-        one is running or already landed. A failed run does NOT auto-retry (its error
-        sticks to the key — an auto-retry would hammer yfinance in a rerun loop); the
-        page's Retry button goes through ``request_rescan`` for a fresh key. Page
-        interaction NEVER starts a background refresh — the only network paths are the
-        true cold start (no result anywhere) and an explicit Re-scan. Price freshness is
-        cockpit-refresh.timer's job and happens outside this process entirely."""
+        one is running or has already landed.
+
+        A failed run MUST NOT auto-retry: its error sticks to the key, because a retry
+        would hammer yfinance in a rerun loop. The page's Retry button goes through
+        ``request_rescan`` for a fresh key. Page interaction never starts a background
+        refresh; the only network paths are the true cold start (no result anywhere) and
+        an explicit Re-scan."""
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
             if self._pending_force:
-                # An armed forced run OUTRANKS adoption: it is never satisfied by
-                # someone else's result, and leaving the flag armed would detonate
-                # inside a later scheduled refresh as a surprise full re-download.
+                # A forced run outranks adoption. Another session's result MUST NOT
+                # satisfy it, and a flag left armed would fire in a later run as a
+                # surprise full re-download.
                 self._start_locked(adopt_ok=False)
                 return
             store = self._store_or_none()
@@ -264,11 +258,12 @@ class ScanWorker:
 
     def request_rescan(self, force: bool = False) -> None:
         """Invalidate the current result (new generation) and start a fresh run.
-        ``force=True`` = the Advanced full 2-year re-download. A mid-flight run can't be
-        cancelled (yfinance has no abort) — the bumped generation makes its result land
-        stale, and the page's ``ensure_started`` starts the fresh run when it finishes.
-        A user-forced run is never satisfied by someone else's result (``adopt_ok``
-        False)."""
+        ``force=True`` is the Advanced full 2-year re-download.
+
+        A mid-flight run can't be cancelled; yfinance has no abort. The bumped generation
+        makes its result land stale, and the page's ``ensure_started`` starts the fresh
+        run when it finishes. A run started here never adopts another session's result
+        (``adopt_ok`` False)."""
         with self._lock:
             self._generation += 1
             self._pending_force = self._pending_force or force
@@ -281,14 +276,14 @@ class ScanWorker:
             return self._result if ready else None
 
     def latest(self):
-        """Newest result this session can serve RIGHT NOW, without waiting: the
-        current-key done result, else — with the store active — whatever ``_result``
-        holds even mid-refresh (stale-while-refresh; possibly adopted from another
-        session). Returns None on a true cold start, and ALSO under the AppTest tell
-        while a run is in flight: the store is inert there, so the app falls through to
-        ``wait()`` and blocks for the run's own result — the deterministic flow the
-        AppTests (memo-hit counts, forces ordering) are built on. Do not "simplify"
-        this divergence away."""
+        """The newest result this session can serve now, without waiting.
+
+        That is the current-key done result, else, with the store active, whatever
+        ``_result`` holds, even mid-refresh (stale-while-refresh, possibly adopted from
+        another session). None on a true cold start. Under the AppTest tell it is also
+        None until the current key is done: the store is inert there, so the app falls
+        through to ``wait()`` and blocks for the run's own result. The AppTests (memo-hit
+        counts, force ordering) are built on that flow, so this divergence MUST stay."""
         with self._lock:
             if self._status == "done" and self._result_key == self._key():
                 return self._result
@@ -297,10 +292,12 @@ class ScanWorker:
             return self._result
 
     def wait(self, grace: float = 3.0):
-        """Poll for the result, but only within ``grace`` seconds OF THE RUN'S START:
-        a run that began moments ago (fresh cache / test fake) completes without the
-        page ever flashing the progress view, while a rerun during a long cold scan
-        falls straight through to it. Returns the ScanResult or None."""
+        """Poll for the result until ``grace`` seconds after the run's start. Returns the
+        ScanResult, or None on an error or once the grace has run out.
+
+        A run that began moments ago (fresh cache, test fake) completes without the page
+        flashing the progress view. A rerun during a long cold scan falls straight
+        through to it."""
         while True:
             res = self.result_if_ready()
             if res is not None:
@@ -330,11 +327,10 @@ class ScanWorker:
         self._progress = (0, 0, "starting")
         self._phase = "fetch"
         self._started_at = time.monotonic()          # wait()'s grace anchor: REAL clock
-        # The adopt-check birth time comes from the STORE's clock (identical to
-        # monotonic in production; coherent under an injected test clock), captured
-        # BEFORE the serial-lock wait — a result landing while we queue must count.
-        # The resolved store rides along as a thread arg so _run can never re-resolve
-        # a different one than the clock came from.
+        # The adopt-check birth time comes from the store's clock, captured before the
+        # serial-lock wait: a result landing while the run queues MUST count. The
+        # resolved store rides along as a thread arg, so _run can't re-resolve a
+        # different store than the clock came from.
         store = self._store_or_none()
         run_started = store.now() if store is not None else self._started_at
         self._thread = threading.Thread(target=self._run,
@@ -343,8 +339,6 @@ class ScanWorker:
         self._thread.start()
 
     def _on_progress(self, done: int, total: int, label: str) -> None:
-        # Phase classification feeds the status line's "Reading cache / Downloading /
-        # Screening n/total" text.
         label = str(label)
         if label.startswith(_PRICE_PREFIX):
             phase = "cache" if "cached" in label[len(_PRICE_PREFIX):] else "fetch"
@@ -359,8 +353,8 @@ class ScanWorker:
             with _SCAN_SERIAL:
                 ent = store.get(key[:2]) if store is not None else None
                 if adopt_ok and ent is not None and ent.completed_mono >= run_started:
-                    # Another session's scan landed while we queued on the serial lock —
-                    # adopt it instead of re-scanning (dedups the two-sessions cold start).
+                    # Another session's scan landed while this run queued on the serial
+                    # lock: adopt it instead of scanning twice.
                     res, completed_wall = ent.result, ent.completed_wall
                 else:
                     from . import scan          # attribute lookup at call time → patchable
@@ -376,8 +370,8 @@ class ScanWorker:
             with self._lock:
                 self._status, self._result_key = "error", key
                 self._error = traceback.format_exc()
-                # _result deliberately kept: a failed REFRESH keeps serving the stale
-                # result via latest(); only the error banner/status line changes.
+                # _result is kept: a failed refresh keeps serving the stale result via
+                # latest(), and only the error banner changes.
 
 
 def get_worker() -> ScanWorker:
@@ -391,10 +385,10 @@ def get_worker() -> ScanWorker:
 
 
 def autostart() -> None:
-    """Kick the default scan from a NON-scan page, so it's warming while the user reads
-    Positions/Journal/Guide. Inert under the test harness: page AppTests don't patch
-    ``run_scan``, so a background scan there would hit the real network — the
-    ``streamlit.testing`` import is the tell that we're inside one."""
+    """Start the default scan from a non-scan page, so it warms while the user reads
+    Positions, Journal or the Guide. Best effort; never raises. Inert under the test
+    harness, detected by the ``streamlit.testing`` import: page AppTests don't patch
+    ``run_scan``, so a background scan there would hit the real network."""
     if "streamlit.testing.v1" in sys.modules:
         return
     try:

@@ -313,7 +313,8 @@ stuck Alpaca call: a finished request leaves exactly that.
 ## 9. Conventions
 
 - **Source comments say WHY the code must be this way, never which bug/review/date produced it**
-  (§6.47). The incident ledger lives in test docstrings and this file.
+  (§6.47). The incident ledger lives in test docstrings and this file. `CLAUDE.md` at the
+  repo root holds the full comment and commit rules.
 - **Tests run as plain scripts**, no pytest. `python tests/test_cockpit.py` is the gate's entry point;
   the suites live in `tests/cockpit/test_<category>.py` and each runs standalone.
 - **Exit-code contract: 0 for anything normal — including "nothing to do" and "disabled" — and 1 only

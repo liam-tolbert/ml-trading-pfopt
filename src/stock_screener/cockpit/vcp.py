@@ -1,14 +1,14 @@
-"""Cockpit-local VCP / contraction detector (a drop-in for the vendored one).
+"""Cockpit-local VCP / contraction detector, a drop-in for the vendored one.
 
 The vendored ``minervini_screener`` ``detect_vcp_pattern`` finds zero contractions on most
-of a broad universe (its base anchors too tight for its swing window), so this re-implements
-detection with a **volatility-adaptive ZigZag** yielding a strictly-alternating high/low
-pivot sequence — contractions are always well-formed (depth ≥ 0) and shallow tight bases
-are found. Returns the SAME dict schema, so it drops into ``scan.py`` unchanged.
+of a broad universe: its base anchors are too tight for its swing window. This detector
+uses a **volatility-adaptive ZigZag** instead. Its pivots strictly alternate high/low, so
+every contraction is well-formed (depth ≥ 0) and shallow tight bases are found. It returns
+the same dict schema, so it drops into ``scan.py`` unchanged.
 
-Design goal (validated against the 200-chart hand-labeled benchmark in
-``tests/vcp_labels.py``): a **recall-first pre-filter** that must never hide a live setup —
-misses are unacceptable, false alarms only cost a glance. So instead of one yes/no it
+Design goal, validated against the 200-chart hand-labeled benchmark in
+``tests/vcp_labels.py``: a **recall-first pre-filter** that MUST NOT hide a live setup.
+Misses are unacceptable; false alarms only cost a glance. So instead of one yes/no it
 assigns a review **tier**:
 
   A — review: a valid tightening base with price below / at / within ~5% above the pivot.
@@ -18,7 +18,7 @@ assigns a review **tier**:
       at any threshold, stale base) that cannot be a usable setup.
 
 Detection runs at several ZigZag thresholds (long-history, recent-window, and extra-tight
-variants) and keeps the best read — a VCP by definition ends *quieter* than the stock's own
+variants) and keeps the best read. A VCP by definition ends *quieter* than the stock's own
 history, so a single history-calibrated threshold goes blind exactly at the tight ending.
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ ZZ_THRESHOLD = 0.04        # fallback ZigZag reversal size (used when the adapti
 ATR_PERIOD = 10            # smoothing for the true-range% used by the adaptive threshold
 ADAPT_K = 2.75             # adaptive ZigZag threshold = ADAPT_K × median(true-range%) over the
                            # base, clipped to [THR_MIN, THR_MAX]. K is set so a typical mid-vol
-                           # name (~1.5%/day true range) lands near the old fixed 0.04.
+                           # name (~1.5%/day true range) lands near ZZ_THRESHOLD.
 THR_MIN = 0.03             # floor: don't chase noise on ultra-quiet mega-caps
 THR_MAX = 0.10             # cap: don't blur a high-vol small-cap's swings into one leg
 RECENT_WINDOW_BARS = 42    # ~2 months: "how quiet is the stock NOW" (the contraction itself)
@@ -50,18 +50,18 @@ MIN_CONTRACTIONS = 2
 MAX_CONTRACTIONS = 6
 MAX_BASE_WEEKS = 65        # a base older than this isn't the current setup
 MAX_DEPTH_PCT = 35.0       # a leg deeper than this is a decline, not a base contraction
-PEAK_FLAT_BAND = 1.15      # base peaks must sit within this ratio (a flat-ish top); a bigger
-                           # gap means price advanced/broke out between the legs -> a different base
-FINAL_TIGHT_PCT = 12.0     # the last contraction must be at least this tight
-UNIFORM_TIGHT_PCT = 6.5    # …or, if the "tighter than 0.8× the first leg" ratio fails because ALL
-                           # legs are already small (a uniform quiet shelf), a final leg at/below
-                           # this absolute size still counts as tight
-NEAR_HIGH_PCT = 25.0       # price must be within this % of the 52-week high
+PEAK_FLAT_BAND = 1.15      # max ratio between base peaks (a flat-ish top); a bigger gap
+                           # means price advanced/broke out between the legs -> a different base
+FINAL_TIGHT_PCT = 12.0     # max depth of the last contraction
+UNIFORM_TIGHT_PCT = 6.5    # …or at/below this absolute size. In a uniform quiet shelf ALL legs
+                           # are already small, so the final one may not shrink to 0.8× the
+                           # first, yet it is tight.
+NEAR_HIGH_PCT = 25.0       # max % below the 52-week high
 LOOKBACK_BARS = 325        # ~65 weeks of trading days
-RMV_TIGHT_MAX = 30.0       # RMV gate: below the pivot the base must be quiet (near the bottom of
-                           # its own volatility range); at/above the pivot a breakout is a burst of
-                           # movement, so RMV stops vetoing and structure alone decides. The
-                           # below-pivot veto stays — removing it admits loud/junk names.
+RMV_TIGHT_MAX = 30.0       # RMV gate: below the pivot the base has to be quiet (near the bottom
+                           # of its own volatility range). At/above the pivot a breakout is a burst
+                           # of movement, so RMV stops vetoing and structure alone decides. The
+                           # below-pivot veto MUST stay: without it, loud junk names pass.
 # Sanity rules (HANDOFF §6):
 MIN_LEG_BARS = 2           # same-day / 1-bar "legs" are junk anchors; 2-day shakeouts are real
                            # final contractions in quiet staged climbers, so the floor sits at 2.
@@ -82,11 +82,11 @@ _TIER_RANK = {'A': 0, 'B': 1, 'C': 2}
 
 
 def _zigzag_pivots(high: np.ndarray, low: np.ndarray, thr: float) -> List[tuple]:
-    """Percentage ZigZag over the hot path: identical logic to ``_zigzag_pivots_ref``
-    (which it delegates to), fed plain-Python floats — per-element ndarray indexing boxes
-    a fresh np.float64 every access, and this loop runs ~325 iterations × up to 4
-    thresholds × every VCP candidate. Parity with the ref is pinned by
-    ``test_zigzag_fast_parity`` on the 200-chart benchmark fixtures."""
+    """Percentage ZigZag for the hot path: :func:`_zigzag_pivots_ref` fed plain-Python
+    floats. Per-element ndarray indexing boxes a fresh np.float64 on every access, and the
+    loop runs ~325 iterations × up to 4 thresholds × every VCP candidate.
+    ``test_zigzag_fast_parity`` pins parity with the ref on the 200-chart benchmark
+    fixtures."""
     return _zigzag_pivots_ref(np.asarray(high).tolist(), np.asarray(low).tolist(), thr)
 
 
@@ -95,9 +95,10 @@ def _zigzag_pivots_ref(high, low, thr: float) -> List[tuple]:
 
     A swing high is confirmed once price falls ``thr`` below the running high; a swing low
     once it rises ``thr`` above the running low. Alternation is structural, so every 'H' is
-    followed by an 'L' — every down-leg is a genuine peak->trough with the trough below the
+    followed by an 'L', and every down-leg is a real peak->trough with the trough below the
     peak. The final running extreme is appended as a tentative pivot (the live edge).
-    Accepts any indexable sequence (ndarray or list) — the reference implementation.
+    The reference implementation; accepts any indexable sequence (ndarray or list). Empty
+    for fewer than 2 bars.
     """
     n = len(high)
     piv: List[tuple] = []
@@ -132,10 +133,11 @@ def _zigzag_pivots_ref(high, low, thr: float) -> List[tuple]:
 def _adaptive_threshold(base: pd.DataFrame) -> float:
     """Scale the ZigZag reversal size to the stock's *own* volatility.
 
-    A high-vol small-cap needs a wider swing filter (or one pullback fragments into three);
-    an ultra-quiet mega-cap needs a tighter one (or its tight final contraction is invisible).
-    We use median true-range% over the base — the same scale-free volatility RMV is built on —
-    so ``thr`` floats with the stock instead of being a magic 0.04. Clipped to [THR_MIN, THR_MAX].
+    A high-vol small-cap needs a wider swing filter, or one pullback fragments into three.
+    An ultra-quiet mega-cap needs a tighter one, or its tight final contraction is invisible.
+    The scale is the median of the ``ATR_PERIOD``-bar mean true-range% over the base, the
+    same scale-free volatility RMV is built on. Returns ``ADAPT_K`` × that, clipped to
+    [THR_MIN, THR_MAX]; ``ZZ_THRESHOLD`` when the median is missing or non-positive.
     """
     trp = true_range_pct(base).rolling(ATR_PERIOD, min_periods=ATR_PERIOD).mean()
     med = float(np.nanmedian(trp.to_numpy())) if len(trp) else np.nan
@@ -159,9 +161,8 @@ def _detect_at(base: pd.DataFrame, current_price: float,
                week_52_high: float) -> Dict[str, any]:
     """One detection pass at a fixed ZigZag threshold; returns the full result dict.
 
-    ``rmv_now``/``week_52_high`` are threshold-INDEPENDENT and hoisted into
-    :func:`detect_vcp` so the multi-threshold loop doesn't recompute them up to 4x per
-    ticker (they were this function's only uses of the full price frame)."""
+    ``rmv_now`` and ``week_52_high`` don't depend on the threshold, so :func:`detect_vcp`
+    computes them once for every pass."""
     high = base['High'].to_numpy(dtype=float)
     low = base['Low'].to_numpy(dtype=float)
     vol = (base['Volume'].to_numpy(dtype=float) if 'Volume' in base.columns
@@ -199,22 +200,23 @@ def _detect_at(base: pd.DataFrame, current_price: float,
         })
 
     # Select the CURRENT base. A VCP is a single consolidation under a flat-ish top that
-    # tightens toward the pivot, so anchor on the most recent contraction and walk BACKWARD,
-    # including an older leg only while (a) the base's peaks stay within a flat band (a bigger
-    # gap means price broke out between the legs — a *different* base) and (b) the older leg is
-    # wider (widest-first → tighter shape). Legs spanning < MIN_LEG_BARS trading days are
-    # dropped up front — a same-day/2-day dip is noise that produced fake single-leg "bases".
+    # tightens toward the pivot. So anchor on the most recent contraction and walk BACKWARD,
+    # adding an older leg only while (a) the peaks stay within PEAK_FLAT_BAND, since a bigger
+    # gap means price broke out between the legs, a *different* base; and (b) the older leg
+    # is at least 0.9× as deep as the one after it (widest first). Legs spanning fewer than
+    # MIN_LEG_BARS bars are dropped first: a same-bar or next-bar dip is noise that makes a
+    # fake single-leg base.
     last_date = idx[-1]
     cutoff = last_date - pd.Timedelta(weeks=MAX_BASE_WEEKS)
     recent = [c for c in contractions
               if c['drawdown_pct'] <= MAX_DEPTH_PCT and c['peak_date'] >= cutoff
               and (c['trough_index'] - c['peak_index']) >= MIN_LEG_BARS]
-    # A leg REMOVED for depth (a > MAX_DEPTH_PCT collapse) sitting chronologically between two
-    # kept legs is a base BOUNDARY, not a leg to skip over: PEAK_FLAT_BAND only rejects an ADVANCE
-    # between legs, so without this a crash-and-recover gets stitched into one "base" (is_vcp /
-    # tier A over a > 35% drop). Only DEPTH bounds the base — a filtered-out short (<2-bar) leg is a
-    # normal shakeout, and treating those as boundaries over-fragments real bases (it cost 5 tier-A
-    # YES on the 200-chart benchmark for a precision gain this recall-first tool doesn't want).
+    # A leg REMOVED for depth (> MAX_DEPTH_PCT) that sits between two kept legs is a base
+    # BOUNDARY, not a leg to skip over. PEAK_FLAT_BAND only rejects an ADVANCE between legs,
+    # so without this a crash-and-recover is stitched into one base (tier A over a > 35%
+    # drop). A short (< MIN_LEG_BARS) leg MUST NOT bound the base: it is a normal shakeout,
+    # and bounding on those over-fragments real bases (5 fewer tier-A YES on the 200-chart
+    # benchmark), a precision gain this recall-first tool doesn't want.
     disq = [c for c in contractions if c['drawdown_pct'] > MAX_DEPTH_PCT]
     sel: List[dict] = []
     if recent:
@@ -227,7 +229,7 @@ def _detect_at(base: pd.DataFrame, current_price: float,
             peaks = [x['peak_price'] for x in sel] + [c['peak_price']]
             if max(peaks) / min(peaks) > PEAK_FLAT_BAND:            # top not flat -> different base
                 break
-            if c['drawdown_pct'] >= sel[0]['drawdown_pct'] * 0.9:   # older leg is wider-or-equal
+            if c['drawdown_pct'] >= sel[0]['drawdown_pct'] * 0.9:   # older leg >= 0.9× as deep
                 sel.insert(0, c)
             else:
                 break
@@ -239,9 +241,10 @@ def _detect_at(base: pd.DataFrame, current_price: float,
     n = len(sel)
     depths = [c['drawdown_pct'] for c in sel]
 
-    # Tightening quality (0-100): is each pullback shrinking? A slope on log-depths, so a single
-    # non-monotone leg (25→12→14→6) doesn't tank an obviously-tightening base. Blend the log-depth
-    # downtrend, the strict-monotone fraction, and the overall first→last shrink; n==2 stays simple.
+    # Tightening quality (0-100): is each pullback shrinking? A slope on log-depths, so one
+    # non-monotone leg (25→12→14→6) doesn't sink an obviously-tightening base. The score
+    # blends the log-depth downtrend, the strictly-shrinking fraction and the first→last
+    # shrink.
     if n >= 3:
         x = np.arange(n, dtype=float)
         y = np.log(np.clip(np.asarray(depths, dtype=float), 1e-6, None))
@@ -271,23 +274,23 @@ def _detect_at(base: pd.DataFrame, current_price: float,
                        <= current_price
                        <= pivot_price * (1 + BUY_ZONE_PCT))
     # RMV is min-max normalized 0-100 over its lookback, so rmv_now <= RMV_TIGHT_MAX means
-    # volatility has contracted to the tight end of the base's own range. Below the pivot
-    # the base should be quiet, so RMV vetoes there; at/above the pivot a breakout is a
-    # burst of movement, so it stops vetoing and structure alone decides.
+    # volatility sits at the tight end of the base's own range. It vetoes only below the
+    # pivot (see RMV_TIGHT_MAX).
     vol_confirms = rmv_now <= RMV_TIGHT_MAX
     rmv_ok = vol_confirms or not below_pivot
 
     fresh = leg_age_weeks <= MAX_LEG_AGE_WEEKS
     long_enough = base_length_weeks >= MIN_BASE_WEEKS
-    # Tight ending: clearly tighter than the first leg, or absolutely small — a uniform
+    # Tight ending: clearly tighter than the first leg, or small in absolute terms. A uniform
     # quiet shelf (4.4% → 3.8%) can't shrink 20% further but IS tight.
     final_tight = bool(depths and depths[-1] <= FINAL_TIGHT_PCT
                        and (depths[-1] <= depths[0] * 0.8
                             or depths[-1] <= UNIFORM_TIGHT_PCT))
 
-    # A VCP: 2-6 progressively-tighter pullbacks (each spanning >= MIN_LEG_BARS days), a
-    # tight final leg, a base at least 3 weeks long with its newest leg recent, price near
-    # its high, and — while still below the pivot — volatility confirming the contraction.
+    # A VCP: min_contractions to max_contractions progressively-tighter pullbacks (each
+    # spanning >= MIN_LEG_BARS bars), a tight final leg, a base at least MIN_BASE_WEEKS
+    # long with its newest leg fresh, price near its high, and, below the pivot, volatility
+    # confirming.
     structure_ok = bool(
         min_contractions <= n <= max_contractions
         and contraction_quality >= TIGHTEN_MIN_PCT
@@ -298,12 +301,11 @@ def _detect_at(base: pd.DataFrame, current_price: float,
     )
     is_vcp = structure_ok and rmv_ok
 
-    # ---- Review tier (recall-first: C is ONLY for safe, can't-be-a-setup exclusions) ---- #
-    # Each branch's comment records why that tier was assigned.
+    # ---- Review tier (recall-first: C MUST be only a safe, can't-be-a-setup exclusion) ---- #
     if n == 0:
-        tier = 'C'          # no pullbacks found — nothing resembling a base
+        tier = 'C'          # no pullbacks found: nothing resembling a base
     elif not fresh:
-        tier = 'C'          # stale base: newest pullback {leg_age_weeks:.0f} weeks old
+        tier = 'C'          # stale base: newest pullback older than MAX_LEG_AGE_WEEKS
     elif is_vcp and in_buy_zone:
         tier = 'A'          # valid tightening base in/near the buy zone
     elif is_vcp:
@@ -312,7 +314,8 @@ def _detect_at(base: pd.DataFrame, current_price: float,
         tier = 'B'          # base still forming (few legs / far from the 52-wk high /
         #                     too short / final leg not tight / not tightening / loud tape)
 
-    # Quality 0-100 (same weighting as the vendored detector, so the app help text holds).
+    # Quality 0-100. The weighting MUST match the vendored detector's: the app help text
+    # describes it.
     q = 0.0
     if min_contractions <= n <= max_contractions:
         q += min(20.0, n / max_contractions * 20.0)
@@ -341,8 +344,8 @@ def _detect_at(base: pd.DataFrame, current_price: float,
         'pattern_details': pattern_details,
         'tier': tier,
         'zz_threshold': round(float(thr), 4),
-        # pivot_price is not exported, but the calculation above stays LIVE: in_buy_zone /
-        # below_pivot / the A-vs-B tier split all hang off it. Un-comment to expose it:
+        # pivot_price is not exported, but in_buy_zone, below_pivot and the A-vs-B tier split
+        # use it. Un-comment to expose it:
         # 'pivot_price': round(pivot_price, 2) if pivot_price else None,
     }
 
@@ -351,39 +354,36 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
                thr: Optional[float] = None, min_contractions: int = MIN_CONTRACTIONS,
                max_contractions: int = MAX_CONTRACTIONS) -> Dict[str, any]:
     """Detect a Volatility Contraction Pattern. Drop-in for the vendored
-    ``detect_vcp_pattern`` — same return schema (``is_vcp``, ``vcp_quality``,
+    ``detect_vcp_pattern``, with the same return schema (``is_vcp``, ``vcp_quality``,
     ``contractions`` with number/peak_date/trough_date/peak_price/trough_price/
     drawdown_pct/volume_ratio/duration_days, ``contraction_count`` …) plus the review
     ``tier`` ('A'/'B'/'C'), ``zz_threshold`` and ``median_tr_pct`` (the median daily
-    true range over the last ``DEAD_TAPE_BARS``, in percent — the name's typical day;
-    None with too little data). (The pivot is computed internally for the buy-zone/extended
-    tier split but not exported; see ``_detect_at``.)
+    true range over the last ``DEAD_TAPE_BARS``, in percent; None with too little data).
+    (The pivot is computed internally for the buy-zone/extended tier split but not
+    exported; see ``_detect_at``.)
 
     ``thr`` is the ZigZag reversal size. Leave it ``None`` (default) to run at up to four
-    thresholds — long-history, recent-window (~2 months), an extra-tight 0.7× recent, and
-    a fixed 3.5% — keeping the best read (a strict pass wins; otherwise the strongest
-    tier/quality). Pass an explicit value to pin a single threshold (tests do this for
-    deterministic pivot counts; pinning also skips the dead-tape guard)."""
+    thresholds: long-history, recent-window (~2 months), an extra-tight 0.7× recent, and
+    a fixed 3.5%. The best read wins: a strict pass, else the strongest tier/quality. An
+    explicit value pins a single threshold and skips the dead-tape guard; tests pin it for
+    deterministic pivot counts. No frame or under 40 bars returns an empty tier-C result."""
     if price_data is None or len(price_data) < 40:
         return _empty('Insufficient data')
 
     base = price_data.tail(min(len(price_data), LOOKBACK_BARS))
 
-    # Median daily true-range% over the last DEAD_TAPE_BARS: the dead-tape gate below, and
-    # exported as the name's "typical day" so a stop can be judged against ordinary noise.
-    # Computed on every path; only the adaptive path gates on it.
+    # Exported on every path as the typical day. Only the adaptive path gates on it.
     _tr = true_range_pct(base).tail(DEAD_TAPE_BARS).to_numpy()
     med_tr = float(np.nanmedian(_tr)) if np.isfinite(_tr).any() else float('nan')
     med_tr_pct = round(med_tr * 100.0, 2) if np.isfinite(med_tr) else None
 
     if thr is not None:
-        # Pinned threshold = a raw single-threshold read (tests pin this for deterministic
-        # pivot counts); the dead-tape guard is skipped so synthetic H=L=C frames (which
-        # have no intrabar range and so under-read true range) stay usable.
+        # A raw single-threshold read. The dead-tape guard is skipped so synthetic H=L=C
+        # frames stay usable: with no intrabar range they under-read true range.
         candidates = [float(thr)]
     else:
-        # Dead tape (threshold-independent): a stock pinned flat for months has no swings to
-        # contract. Median daily true-range% below DEAD_TAPE_MEDIAN_TR can't be a live setup.
+        # Dead tape: a stock pinned flat for months has no swings to contract, so it can't
+        # be a live setup.
         if np.isfinite(med_tr) and med_tr < DEAD_TAPE_MEDIAN_TR:
             return {**_empty(f'Dead tape: median daily range {med_tr * 100:.2f}% '
                              f'over the last {DEAD_TAPE_BARS} sessions'),
@@ -395,8 +395,7 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
                                                    THR_FIXED_TIGHT)},
                             reverse=True)
 
-    # Threshold-INDEPENDENT reads, hoisted out of the per-threshold loop (they were
-    # recomputed identically up to 4x per ticker in the scan's hot path).
+    # Threshold-independent, so computed once for every pass.
     week_52_high = phase_info.get('week_52_high') or float(price_data['High'].tail(252).max())
     rmv_series = relative_measured_volatility(base).dropna()
     rmv_now = float(rmv_series.iloc[-1]) if len(rmv_series) else 100.0

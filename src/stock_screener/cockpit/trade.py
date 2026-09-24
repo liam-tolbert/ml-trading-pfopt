@@ -1,17 +1,17 @@
 """Paper-trade the cockpit watchlist through Alpaca.
 
-Each name is sized by a chosen mode (see :func:`build_buy_plan`): a % of equity, a flat $
-amount, an explicit share count, or **risk-to-stop** —
-``shares = floor((equity × risk%) / (price − stop))``, Minervini's position sizer, so a
-stop-out costs ≈ risk% of the account (the idea the Step-4 panel shows, sized on the live
-fill price rather than the pivot). Orders are plain market BUYs on the **paper** account
-(``alpaca_trader.connect()`` forces ``paper=True``); the guardrails apply — a per-order
-floor of $50 (dollar-denominated modes) and a 10%-of-equity single-order cap (the risk mode
-clamps to it and flags ``capped``; the other modes skip an over-cap name — never fatal).
+:func:`build_buy_plan` sizes each name by a chosen mode: a % of equity, a flat $ amount,
+an explicit share count, or **risk-to-stop**, Minervini's position sizer:
+``shares = floor((equity × risk%) / (price − stop))``. A stop-out then costs ≈ risk% of the
+account. Sizing uses the live price (or the limit), not the pivot.
 
-The plan builder (:func:`build_buy_plan`) is pure and network-free so it's unit-tested;
-:func:`submit_buy_plan` is the thin side-effecting wrapper that talks to Alpaca and is
-imported lazily (so the cockpit still loads when ``alpaca-py`` isn't installed).
+Orders go to the **paper** account only: :func:`_connect_paper` forces ``paper=True``.
+Guardrails: a $50 per-order floor in the dollar-denominated modes and a 10%-of-equity
+single-order cap. The risk mode clamps to the cap and flags ``capped``; submit skips any
+other over-cap buy.
+
+:func:`build_buy_plan` is pure and network-free. The Alpaca functions import alpaca-py
+lazily, so the cockpit still loads without it.
 """
 from __future__ import annotations
 
@@ -25,21 +25,20 @@ from .doctrine import (DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR, DERIVED_STOP
                        DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS, MAX_LOSS_FROM_FILL,
                        NO_CHASE_PCT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 
-MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so the pure
-                            # plan builder needn't import alpaca-py)
-MAX_ORDER_PCT = 0.10        # mirrors alpaca_trader.MAX_ORDER_PCT — single-order cap as a
-                            # fraction of equity; the risk mode clamps to it (submit re-checks)
-STALE_PLAN_BARS = 2         # skip a plan name whose freshest daily bar is more than this many
-                            # *trading* days old rather than size on stale data (the scan memo
-                            # has no time-based invalidation). 2 absorbs a weekend + a holiday.
-ALPACA_TIMEOUT_S = (5.0, 15.0)  # (connect, read) seconds on every Alpaca request. alpaca-py sends
-                                # none, so a silently dropped connection blocks the caller forever
-                                # — and behind the Positions page's st.cache_data, every later
-                                # visit queues on that same stuck call. Alpaca answers in < 1 s.
+MIN_TRADE_USD = 50.0        # MUST match alpaca_trader.MIN_TRADE_USD. Copied so the pure
+                            # plan builder needn't import alpaca-py.
+MAX_ORDER_PCT = 0.10        # single-order cap, a fraction of equity. MUST match
+                            # alpaca_trader.MAX_ORDER_PCT, which submit re-checks against.
+STALE_PLAN_BARS = 2         # skip a plan name whose freshest bar is more than this many
+                            # trading days old. The scan memo never expires. 2 absorbs a
+                            # weekend plus a holiday.
+ALPACA_TIMEOUT_S = (5.0, 15.0)  # (connect, read) seconds on every Alpaca request. alpaca-py
+                                # sets none, so a dropped connection would block the caller
+                                # forever. Alpaca answers in < 1 s.
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
-BREAKEVEN_GAIN = 0.16       # gain past which the stop should be at least breakeven (~2x initial risk)
+BREAKEVEN_GAIN = 0.16       # gain past which the auto stop is at least breakeven (~2x initial risk)
 TRAIL_GAIN = 0.20           # gain past which, "well in profit", trail the 50-day SMA
 SELL_STRENGTH_GAIN = 0.20   # gain past which to consider selling part into strength
 HEAVY_VOL_RATIO = VOL_CONFIRM_RATIO   # a heavy-volume day IS the breakout-confirmation bar
@@ -64,24 +63,22 @@ DECISIVE_BELOW_PIVOT_PCT = 0.02  # a close >2% below the pivot is decisive, not 
 GATE_HALF_SIZE_AFTER = 2    # consecutive losing closed trades -> advise half-size probes
 FREE_ROLL_R = 2.0           # R-multiple where selling part + breakeven stop is advised
 
-# The cockpit trades a SEPARATE Alpaca paper account from the All-Weather mirror (which owns
-# the shared ALPACA_API_KEY/SECRET pair). Each paper account has its own key pair, so prefer
-# the dedicated "Minervini Trader" keys, falling back to the shared pair only if unset. The
-# dedicated names must match .env EXACTLY — a mismatch silently resolves to None and the code
-# then trades the SHARED account — so keep these two constants in sync with .env.
+# The cockpit trades its own Alpaca paper account, separate from the All-Weather mirror that
+# owns the shared ALPACA_API_KEY/SECRET pair. Each paper account has its own key pair. The
+# dedicated "Minervini Trader" keys win; the shared pair is the fallback. These two names MUST
+# match .env exactly: a mismatch reads None and silently trades the shared account.
 MINERVINI_KEY_ENVS = "ALPACA_API_KEY_MINERVINI"
 MINERVINI_SECRET_ENVS = "ALPACA_API_KEY_SECRET_MINERVINI"
-# The shared pair accepts either spelling (_first_env takes the first non-empty in the tuple).
+# Either spelling works for the shared pair; the first non-empty one wins.
 SHARED_KEY_ENVS = ("ALPACA_API_KEY", "ALPACA_API_KEY_PAPER1")
 SHARED_SECRET_ENVS = ("ALPACA_API_SECRET", "ALPACA_API_SECRET_PAPER1")
 
 
 def _first_env(names: "Sequence[str] | str") -> Optional[str]:
-    """Return the value of the first env var named in ``names`` that is set and non-empty.
+    """The value of the first env var in ``names`` that is set and non-empty, else None.
 
-    Accepts a single name (``str``) or a sequence of candidate names. A bare string is
-    treated as ONE name — never iterated character-by-character, which would silently
-    resolve a stray one-char env var (e.g. ``$_``) instead of the intended key.
+    ``names`` is one name or a sequence of names. A bare string is ONE name: iterating it
+    would resolve a stray one-char var such as ``$_`` instead of the key.
     """
     if isinstance(names, str):
         names = (names,)
@@ -93,17 +90,18 @@ def _first_env(names: "Sequence[str] | str") -> Optional[str]:
 
 
 class TradeUnavailable(RuntimeError):
-    """Alpaca can't be reached — package missing, or credentials absent from .env."""
+    """Alpaca can't be reached: alpaca-py is missing, .env has no credentials, or a read
+    timed out."""
 
 
 def _with_timeout(client, timeout=ALPACA_TIMEOUT_S):
     """Give every request on ``client``'s HTTP session a default ``timeout``. Returns ``client``.
 
-    alpaca-py builds its own ``requests.Session`` (``client._session``) and never passes a
-    timeout, so the only hook is the session's transport adapter: it fills the timeout in on
-    each send unless the caller set one. A client without ``_session`` (a future alpaca-py)
-    is returned untouched rather than refused — ``test_connect_paper_installs_timeout`` fails
-    the deploy gate on that version instead of the app failing closed at runtime."""
+    alpaca-py builds its own ``requests.Session`` (``client._session``) and passes no
+    timeout, so the hook is the session's transport adapter. It fills in the timeout on each
+    send unless the caller set one. A client without ``_session`` is returned untouched, not
+    refused: ``test_connect_paper_installs_timeout`` then fails the deploy gate instead of the
+    app failing closed at runtime."""
     from requests.adapters import HTTPAdapter
 
     class _DefaultTimeout(HTTPAdapter):
@@ -121,9 +119,8 @@ def _with_timeout(client, timeout=ALPACA_TIMEOUT_S):
 
 
 def _alpaca_timeout(err) -> TradeUnavailable:
-    """The read paths' timeout, as the pages' "can't reach Alpaca" error. TradeUnavailable is
-    shown as a warning and never cached by the Positions page, so Refresh retries rather than
-    replaying the failure."""
+    """A read timeout as the pages' "can't reach Alpaca" error. The Positions page shows a
+    TradeUnavailable as a warning and never memoizes it, so Refresh retries."""
     return TradeUnavailable(f"Alpaca didn't answer within {ALPACA_TIMEOUT_S[1]:.0f}s — "
                             f"press Refresh to retry. ({type(err).__name__})")
 
@@ -159,9 +156,9 @@ def _connect_paper():
 
 
 def fetch_account_summary() -> dict:
-    """Connect and read the target account so the UI can confirm *which* account will be
-    traded before any order is sent. Returns ``{account_number, equity, cash,
-    using_dedicated}``; raises :class:`TradeUnavailable` on missing package/credentials."""
+    """The target account, so the UI can confirm *which* account will trade before any
+    order is sent. Returns ``{account_number, equity, cash, using_dedicated}``; raises
+    :class:`TradeUnavailable` on missing package/credentials."""
     client, using_dedicated = _connect_paper()
     acct = client.get_account()
     return {
@@ -173,11 +170,11 @@ def fetch_account_summary() -> dict:
 
 
 def fetch_held_shares() -> Dict[str, int]:
-    """``{symbol: whole shares held}`` on the cockpit's paper account (same ``int(float(qty))``
-    convention as :func:`submit_buy_plan`). Lets the Build-plan preview mark already-held names
-    ('stop re-arm only, no buy') since :func:`build_buy_plan` is holdings-blind. Raises
-    :class:`TradeUnavailable` on missing package/credentials — the caller treats that as 'unknown'
-    (no held annotations)."""
+    """``{symbol: whole shares held}`` on the cockpit's paper account, truncated by
+    ``int(float(qty))`` as in :func:`submit_buy_plan`. Feeds :func:`build_buy_plan`'s
+    ``held`` and the Build preview's "stop re-arm only, no buy" marks. Raises
+    :class:`TradeUnavailable` on missing package/credentials; the caller reads that as
+    unknown (no held marks)."""
     client, _ = _connect_paper()
     return {p.symbol: int(float(p.qty)) for p in client.get_all_positions()}
 
@@ -191,25 +188,27 @@ def _pos_float(p, name) -> Optional[float]:
 
 
 def position_symbols() -> List[str]:
-    """Just the symbols currently held on the paper account — no price history, no journal.
+    """The sorted symbols held on the paper account. No price history, no journal.
 
-    Deliberately lighter than :func:`fetch_positions` and :func:`fetch_gate_inputs`: the
-    refresh job calls this to decide WHICH prices to download, and ``fetch_positions``
-    downloads price history itself, which would make that circular. A held name that has
-    fallen off the watchlist still needs fresh bars — the Positions page and the sell
-    pillars go blind on a position they cannot price. Raises :class:`TradeUnavailable`
-    when credentials are absent; the caller degrades to watchlist-only."""
+    The refresh job calls this to decide which prices to download, so it MUST NOT download
+    prices itself as :func:`fetch_positions` does. A held name off the watchlist still needs
+    fresh bars, or the Positions page and the sell pillars cannot price it. Raises
+    :class:`TradeUnavailable` on missing package/credentials; the caller falls back to the
+    watchlist alone."""
     client, _ = _connect_paper()
     return sorted({s for s in (getattr(p, "symbol", None)
                                for p in client.get_all_positions()) if s})
 
 
 def fetch_gate_inputs() -> dict:
-    """Light inputs for :func:`gate_status`: Alpaca positions only (NO price-history
-    fetch — the unrealized figures come from the broker) plus the journal's open/closed
-    episodes. Raises :class:`TradeUnavailable` on any failure; the manual trade panel
-    treats that as gate UNKNOWN (open — the human judges), the unattended morning
-    executor as CLOSED. The asymmetric fail direction is deliberate."""
+    """Inputs for :func:`gate_status`: Alpaca positions plus the journal's open and closed
+    episodes. No price history: the unrealized figures come from the broker.
+
+    Returns ``{positions, open_episodes, closed_episodes}``. Raises
+    :class:`TradeUnavailable` on missing package/credentials; other broker errors
+    propagate. On any failure the manual trade panel reads the gate as UNKNOWN (open; the
+    human judges) and the unattended morning executor as CLOSED. The asymmetry is
+    deliberate."""
     client, _ = _connect_paper()
     positions = []
     for p in client.get_all_positions():
@@ -228,24 +227,23 @@ def gate_status(positions: List[dict], open_episodes: List[dict],
                 closed_episodes: List[dict]) -> dict:
     """Progressive-exposure gate: may a NEW position be opened right now? Pure.
 
-    Scope is cockpit-TAGGED positions only — an Alpaca position counts only when a
-    tagged OPEN journal episode exists for its symbol, so manual/legacy holdings never
-    poison the gate (a book of untagged names reads as flat). Rules:
+    Only cockpit-TAGGED positions count: an Alpaca position needs a tagged OPEN journal
+    episode for its symbol. Manual or legacy holdings never affect the gate; a book of
+    untagged names reads as flat. Rules:
 
-    * flat (no tagged positions) -> OPEN — the first pilot is always allowed;
-    * otherwise every position in the NEWEST set (all tagged positions sharing the max
-      entry DATE — same-open fills differ only by milliseconds, so day granularity)
-      must be at breakeven or better, AND the tagged book's net unrealized P&L must be
-      >= 0;
-    * ``consecutive_losses`` counts losing TAGGED closed trades from the most recent
-      backwards (re-sorted by ``exit_date`` — the journal groups by symbol; ``pl >= 0``
-      including a $0 scratch breaks the streak); at ``GATE_HALF_SIZE_AFTER`` the
-      ``probe_size_factor`` drops to 0.5. ADVISORY ONLY — surfaced in captions, never
-      auto-applied to quantities.
+    * flat (no tagged positions) -> OPEN; the first pilot is always allowed;
+    * otherwise OPEN only when every position in the NEWEST set is at breakeven or better
+      (an unknown P&L fails), AND the tagged book's net unrealized P&L is >= 0. The
+      newest set is the tagged positions sharing the latest entry DATE: same-open fills
+      differ only by milliseconds;
+    * ``consecutive_losses`` counts losing TAGGED closed trades back from the latest
+      ``exit_date``. Any ``pl >= 0``, a $0 scratch included, ends the streak. At
+      ``GATE_HALF_SIZE_AFTER`` the ``probe_size_factor`` drops to 0.5. ADVISORY ONLY:
+      shown in captions, never applied to quantities.
 
-    Sells and stop re-arms are never gated (risk-reducing). A position whose entry
-    date can't be resolved counts as newest (conservative). Returns
-    ``{open, reason, probe_size_factor, consecutive_losses}``."""
+    Sells and stop re-arms are never gated; they reduce risk. A position whose entry date
+    can't be read counts as newest. Returns ``{open, reason, probe_size_factor,
+    consecutive_losses}``."""
     import pandas as pd
 
     tagged_open = {e.get("symbol"): e for e in (open_episodes or []) if e.get("tagged")}
@@ -306,33 +304,30 @@ SIZING_MODES = ("pct", "dollars", "shares", "risk")
 
 
 def stop_is_valid(stop_price, price) -> bool:
-    """A protective sell-stop is valid only strictly BELOW the reference price.
+    """True when ``stop_price`` is positive and strictly BELOW the reference ``price``.
 
-    Alpaca rejects a sell stop at/above the market (it would trigger instantly) and an OTO
-    stop-loss leg that isn't below the entry. Used by the UI (live per-keystroke check) and
-    re-checked in :func:`submit_buy_plan` against the last close.
+    Alpaca rejects a sell stop at or above the market, which would trigger at once, and an
+    OTO stop-loss leg that isn't below the entry.
     """
     return bool(stop_price and price and stop_price > 0 and stop_price < price)
 
 
 def stop_below_fill(fill, pct) -> float:
-    """A stop ``pct`` (fraction) below ``fill``, rounded UP to the cent — rounding down would
-    let the builder emit a stop its own guard (:func:`stop_within_max_loss`) then refuses.
-    The inner ``round`` absorbs float noise (42 × 0.9 × 100 = 3780.0000000000005 must not
-    ceil to 3781)."""
+    """A stop ``pct`` (fraction) below ``fill``, rounded UP to the cent.
+
+    Rounding down could emit a stop that :func:`stop_within_max_loss` refuses. The inner
+    ``round`` strips float noise: 42 × 0.9 × 100 is 3780.0000000000005."""
     return math.ceil(round(float(fill) * (1.0 - float(pct)) * 100.0, 6)) / 100.0
 
 
 def fill_floor(fill) -> float:
-    """The lowest stop the max-loss rule allows for a buy that fills at ``fill``:
-    ``MAX_LOSS_FROM_FILL`` below it, to the cent (see :func:`stop_below_fill`)."""
+    """The lowest stop the max loss allows for a fill at ``fill``."""
     return stop_below_fill(fill, MAX_LOSS_FROM_FILL)
 
 
 def stop_within_max_loss(stop, fill) -> bool:
-    """True when a stop at ``stop`` loses no more than ``MAX_LOSS_FROM_FILL`` of a buy filled
-    at ``fill`` (Minervini: never more than 10% below the price you pay). Missing inputs read
-    False — the callers only ask about a real stop on a real fill."""
+    """True when ``stop`` loses at most ``MAX_LOSS_FROM_FILL`` of a buy filled at ``fill``.
+    Missing inputs read False."""
     try:
         s, f = float(stop), float(fill)
     except (TypeError, ValueError):
@@ -348,17 +343,16 @@ def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
     """Minervini stop suggestion for a held position under a chosen ``basis``.
 
     Basis levels: ``initial`` = ``avg_entry × (1 - INITIAL_STOP_PCT)`` (~8% below entry;
-    ``initial_pct`` replaces the 8% — the derived stop, :func:`derived_stop_pct`, once active);
-    ``breakeven`` = ``avg_entry``; ``sma50`` = ``sma_50 × 0.99`` (just under the 50-day). ``auto``
-    picks by gain (the position's stage): well in profit (``gain_pct >= TRAIL_GAIN``) with a 50-day
-    available → trail the SMA; working (``gain_pct >= BREAKEVEN_GAIN``) → at least breakeven; else
-    the initial 8% stop.
+    ``initial_pct`` overrides the 8%, e.g. with :func:`derived_stop_pct`);
+    ``breakeven`` = ``avg_entry``; ``sma50`` = ``sma_50 × 0.99``, just under the 50-day.
+    ``auto`` picks by gain: ``gain_pct >= TRAIL_GAIN`` with a 50-day trails the SMA;
+    ``gain_pct >= BREAKEVEN_GAIN`` is at least breakeven; else ``initial``.
 
-    Returns ``(suggested_price_or_None, effective_basis_label)``. The suggestion is floored at the
-    current in-force stop — and, once the trade is working, at breakeven — so it is ratchet-safe
-    (never proposes LOWER than what's in force, never gives back a working trade below breakeven).
-    Returns ``None`` when no basis input is available or the result isn't strictly below
-    ``current_price`` (underwater / already stopped-out territory → leave for a manual edit)."""
+    Returns ``(price_or_None, effective_basis)``. The price is floored at ``current_stop``,
+    so it never proposes a lower stop. ``auto`` also floors it at breakeven once
+    ``gain_pct >= BREAKEVEN_GAIN``; an explicit basis is honoured as chosen. The price is
+    None when there is neither a basis level nor a ``current_stop``, or when the result
+    isn't strictly below ``current_price``; that case is left for a manual edit."""
     initial_val = (avg_entry * (1.0 - (INITIAL_STOP_PCT if initial_pct is None else initial_pct))
                    if avg_entry else None)
     breakeven_val = float(avg_entry) if avg_entry else None
@@ -375,9 +369,7 @@ def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
         eff = basis
 
     base_val = {"initial": initial_val, "breakeven": breakeven_val, "sma50": sma_val}.get(eff)
-    # Ratchet-safe floor: never below the in-force stop. In AUTO mode also never below breakeven
-    # once the trade is working (so trailing the 50-day can't give back a won trade) — an EXPLICIT
-    # basis is honored as chosen (still floored at the in-force stop).
+    # The breakeven floor stops an auto 50-day trail giving back a working trade.
     floors = [v for v in (base_val, current_stop) if v is not None]
     if (basis == "auto" and gain_pct is not None and gain_pct >= BREAKEVEN_GAIN
             and breakeven_val is not None):
@@ -389,8 +381,9 @@ def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
 
 
 def position_stage(gain_pct: Optional[float]) -> Optional[str]:
-    """The position's stage on the Minervini stop ladder, from its gain. Pure. Uses the SAME
-    thresholds as :func:`suggest_stop`'s auto basis so the label and the suggested stop agree."""
+    """The position's stage on the stop ladder from its gain: ``underwater``, ``fresh``,
+    ``working`` or ``well in profit``; None without a gain. Pure. The thresholds MUST match
+    :func:`suggest_stop`'s auto basis so the label and the suggested stop agree."""
     if gain_pct is None:
         return None
     if gain_pct < 0:
@@ -406,17 +399,18 @@ def r_multiple(avg_entry, current_price, pivot=None, current_stop=None,
                stop_pct=None) -> Tuple[Optional[float], bool]:
     """The position's gain as a multiple of its reconstructed initial risk. Pure.
 
-    The entry-time stop is not persisted anywhere, so risk is reconstructed from the levels
-    the plan builder could have attached for a frozen ``pivot``: the pivot-derived stop
-    (``pivot × (1 - DEFAULT_STOP_FROM_PIVOT)``) raised to the max-loss floor of a market
-    fill (~the entry) or of a zone-top limit (``pivot × (1 + NO_CHASE_PCT)``), plus the
-    bare pivot-derived stop that entries before the floor carried. With the derived stop
-    active (``stop_pct``, :func:`derived_stop_pct`) the same two fills at ``stop_pct`` come
-    first. When the in-force ``current_stop`` is one of them (to the cent) that is the stop
-    the OTO attached — exact, ``approximate=False``. Otherwise (the stop has been ratcheted,
-    or none is readable) the first candidate is the estimate, ``approximate=True``; no usable
-    pivot falls back to ``stop_pct`` (else ``INITIAL_STOP_PCT``) off the entry, also
-    approximate. Returns ``(r, approximate)``; ``(None, True)`` on missing/degenerate inputs."""
+    The entry stop isn't stored, so it is rebuilt from the stops the plan builder could
+    have attached for a frozen ``pivot``. Candidates, in order:
+
+    * with ``stop_pct``: ``stop_pct`` below a market fill (≈ the entry) and below a
+      zone-top limit, each raised to the pivot default;
+    * the pivot default raised to the max-loss floor of those same two fills;
+    * the bare pivot default, which older entries carry.
+
+    A candidate within a cent of ``current_stop`` is exact (``approximate=False``).
+    Otherwise the first candidate is an estimate. With no usable pivot, risk is
+    ``stop_pct`` (else ``INITIAL_STOP_PCT``) off the entry. Returns ``(r, approximate)``;
+    ``(None, True)`` on missing or degenerate inputs."""
     try:
         e, c = float(avg_entry), float(current_price)
     except (TypeError, ValueError):
@@ -453,12 +447,12 @@ def r_multiple(avg_entry, current_price, pivot=None, current_stop=None,
 
 
 def position_advisories(pos: dict) -> List[str]:
-    """Display-only Minervini exit advisories derived from a :func:`fetch_positions` dict. Pure.
+    """Display-only Minervini exit advisories for a :func:`fetch_positions` dict, as a list
+    of messages. Pure.
 
-    Note the "×initial-risk" rule (#4) approximates the initial risk at ``INITIAL_STOP_PCT`` (8%),
-    because the entry-time stop distance isn't persisted anywhere — so it's a nudge, not exact.
-    The earnings-cushion rules fire only for a KNOWN upcoming report (``earnings_in`` 0..21) with
-    a KNOWN gain — a just-reported name (negative days) or missing data stays silent."""
+    The "2× initial risk" rule assumes an ``INITIAL_STOP_PCT`` stop because the entry stop
+    isn't stored, so it is a nudge, not exact. The earnings rules fire only for a known
+    report within ``EARNINGS_SOON_DAYS`` (``earnings_in`` >= 0) and a known gain."""
     out: List[str] = []
     gain = pos.get("gain_pct")
     avg_entry = pos.get("avg_entry")
@@ -468,15 +462,14 @@ def position_advisories(pos: dict) -> List[str]:
         out.append("⚠ No protective stop armed — arm one.")
     elif (cur_stop and avg_entry and cur_stop < avg_entry
             and not stop_within_max_loss(cur_stop, avg_entry)):
-        # A market buy that gapped up at the open fills above the price its stop was set
-        # for; the plan builder can only floor the stop for the fill it expects.
+        # A gap-up market fill lands above the price the plan floored the stop for.
         out.append(f"⚠ Stop {(1 - cur_stop / avg_entry) * 100:.1f}% below your cost "
                    f"(max {MAX_LOSS_FROM_FILL * 100:.0f}%) — raise it to ≥ "
                    f"${fill_floor(avg_entry):,.2f}.")
     ei = pos.get("earnings_in")
     if ei is not None and 0 <= ei <= EARNINGS_SOON_DAYS and gain is not None:
-        # A stop can't protect against an earnings gap — the exit decision must come BEFORE
-        # the report unless the position has already built a cushion.
+        # A stop can't protect against an earnings gap. Without a cushion, the exit comes
+        # before the report.
         if gain < 0:
             out.append(f"⚠ Earnings in {int(ei)}d with a loss — no cushion; "
                        "exit or reduce before the report.")
@@ -496,11 +489,10 @@ def position_advisories(pos: dict) -> List[str]:
 
 
 def _trading_days_since(last, today) -> Optional[int]:
-    """Number of *trading* days between a bar date ``last`` and ``today`` — 0 when ``last`` is
-    the freshest possible bar (e.g. Friday's bar read on the weekend, or today's own bar).
-    Business-day based; holidays aren't modelled, so a holiday reads as one extra day and the
-    caller's tolerance absorbs it. Returns None if either date can't be parsed, so the caller
-    skips the check rather than blocking a trade on a parse error."""
+    """Business days from bar date ``last`` to ``today``; 0 when ``last`` is the freshest
+    possible bar (today's, or Friday's read on a weekend). Holidays aren't modelled, so one
+    reads as an extra day; the caller's tolerance absorbs it. None if either date can't be
+    parsed, so the caller skips the check rather than block a trade on a parse error."""
     try:
         import pandas as pd
         a = pd.Timestamp(last).normalize()
@@ -516,30 +508,29 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                  spy_note=None, today=None) -> dict:
     """The sell doctrine's four thesis pillars for ONE holding. Pure, display-only.
 
-    Any pillar failing kills the trade — the stop is only the disaster floor for what
-    happens between checks. Reads SETTLED closes (``pos["last_close"]`` / ``pos["df"]``),
-    never the live print. Tolerates missing inputs everywhere: each pillar degrades to
-    ``unknown`` rather than raising, and a bare position dict (no new keys) yields four
-    unknowns. Returns ``{"P1".."P4": {"status": "ok"|"warn"|"fail"|"unknown",
-    "detail": str}}``.
+    Any failing pillar kills the trade; the stop is only the disaster floor between
+    checks. Reads SETTLED closes (``pos["last_close"]`` / ``pos["df"]``), never the live
+    print. Missing inputs never raise; a pillar without its inputs reads ``unknown``, and
+    a bare position dict with no other arguments yields four unknowns. Returns
+    ``{"P1".."P4": {"status": "ok"|"warn"|"fail"|"unknown", "detail": str}}``.
 
-    * P1 breakout holding — needs ``entry_date`` (the journal open-episode's first buy;
-      tz-aware timestamps are read in exchange time) and ideally ``pivot`` (the
-      watchlist's frozen level; without it only the laggard clock runs). Day-0 close
-      back below the pivot, a decisive close below it (>2% or a 2nd consecutive), or a
-      close below the breakout bar's low fail outright; a stalled clock warns at day
+    * P1 breakout holding — needs ``entry_date``, the journal open episode's first buy
+      (tz-aware timestamps are read in exchange time). ``pivot`` is the watchlist's frozen
+      level; without it the pivot checks are skipped. A Day-0 close back below the pivot,
+      a decisive close below it (> ``DECISIVE_BELOW_PIVOT_PCT`` or a 2nd in a row), or a
+      close below the breakout bar's low fails outright. A stalled clock warns at day
       ``P1_CUSHION_DAYS`` without a ``P1_CUSHION_PCT`` cushion and fails flat-to-red at
       day ``P1_STALL_DAYS``. Post-breakout violations
-      (:func:`advisories.post_breakout_read` — the 20-day line and the rest) warn; with
-      ``doctrine.VIOLATIONS_CAN_FAIL`` on, ``VIOLATION_FAIL_COUNT`` of them fail.
-    * P2 template — STRICT: anything under 8/8 fails (user decision; expect occasional
-      one-day red flips when a knife-edge SMA criterion wobbles).
-    * P3 tape — the scan regime dict when available, else the trigger report's SPY-only
-      read (partial: ok/warn), else unknown.
+      (:func:`advisories.post_breakout_read`) warn. With ``doctrine.VIOLATIONS_CAN_FAIL``
+      on, ``VIOLATION_FAIL_COUNT`` of them fail.
+    * P2 template — STRICT: anything under 8/8 fails, by the user's choice. Expect an
+      occasional one-day red flip when an SMA criterion sits on the edge.
+    * P3 tape — the scan ``regime`` dict when available, else the trigger report's
+      SPY-only ``spy_note`` (partial: ok/warn), else unknown.
     * P4 earnings — inside the ``EARNINGS_SOON_DAYS`` window a loss or a thin cushion
       (< ``EARNINGS_CUSHION_MIN``) fails; a real cushion still warns (trim to
-      hold-through size). ``earnings_in`` None reads unknown — "no report scheduled"
-      and "data missing" are indistinguishable upstream."""
+      hold-through size). ``earnings_in`` None reads unknown: upstream can't tell "no
+      report scheduled" from "data missing"."""
     import pandas as pd
 
     def _pill(status, detail):
@@ -596,8 +587,6 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                 elif day_n >= P1_CUSHION_DAYS and gain < P1_CUSHION_PCT:
                     warns.append(f"day {day_n}, no {P1_CUSHION_PCT * 100:.0f}% cushion "
                                  "— sell into strength")
-            # Post-breakout violations (the 20-day line, heavy selling, lower lows, a gain
-            # given back). Warnings unless the doctrine switch promotes a cluster to a fail.
             if df is not None and len(df):
                 from . import advisories, doctrine
                 read = advisories.post_breakout_read(
@@ -668,9 +657,9 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
 
 
 def _stop_only_entry(t, price, pivot, frozen, buy_hi, stop, payload) -> dict:
-    """A zero-share plan row for a HELD name whose buy failed the sizing gates: submit's
-    held path sends no buy anyway and only re-arms the GTC stop, so this row exists purely
-    to carry ``stop_price`` there instead of the name silently losing stop maintenance."""
+    """A zero-share ``stop_only`` plan row for a HELD name whose buy failed a sizing gate.
+    Submit's held path sends no buy and only re-arms the GTC stop, so the row carries
+    ``stop_price`` there and the name keeps its stop maintenance."""
     return {"ticker": t, "shares": 0, "price": round(price, 2),
             "pivot": round(float(pivot), 2) if pivot else None,
             "pivot_frozen": bool(frozen),
@@ -696,71 +685,64 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     * ``"dollars"`` — ``amount`` dollars per name;
     * ``"shares"``  — exactly ``amount`` (whole) shares per name;
     * ``"risk"``    — ``amount`` % of ``equity`` risked to the stop (needs ``equity`` + a stop):
-      ``shares = (equity × amount%) / (price − stop)`` — Minervini's position sizer, so a
-      stop-out costs ≈ ``amount``% of the account. Sized on the current price (the real fill),
-      not the pivot, so the risk figure is honest for the order actually sent.
+      ``shares = (equity × amount%) / (price − stop)``, Minervini's position sizer. A
+      stop-out costs ≈ ``amount``% of the account. Sized on the price of the order sent (the
+      last close, or the limit), not the pivot, so the risk figure holds for that order.
 
-    Returns ``(plan, skipped)``. Each plan entry has ticker / shares / price / pivot /
-    est_value / extended / stop_price / capped; each skipped entry is ``{ticker, reason}``. A
-    name is skipped when it isn't in the current scan, has no current price, sizes to < 1 share,
-    or (for every dollar-denominated mode — pct/dollars/risk) rounds to a notional under the $50
-    floor; the ``"shares"`` mode is exempt from that floor since the count is explicit. The
-    ``"risk"`` mode additionally skips a name with no stop, or a stop not below the price (a
-    non-positive risk-per-share). ``extended`` flags a price already above the no-chase buy zone
-    (> pivot × 1.05); the caller surfaces it as a warning rather than skipping. ``capped`` is
-    True only in ``"risk"`` mode when the risk-sized quantity would exceed the 10%-of-equity
-    single-order cap and was clamped down to it (so the realized risk falls BELOW the target —
-    the caller labels it); it's always False for the other modes. ``stop_price`` is the
-    app-computed protective stop (``levels["stop"]``, ~7-8% below pivot) or ``None`` if
-    unavailable — the caller may edit it before submit; note that editing it after build does
-    NOT re-scale a risk-sized quantity. ``earnings_in`` (calendar days to the next scheduled
-    report, from the scan payload; None = unknown) is carried through untouched so the caller
-    can warn about buying into an imminent report — advisory only, never a skip.
+    Returns ``(plan, skipped)``; raises ValueError for an unknown ``mode`` or
+    ``order_type``. Each plan entry has ticker, shares, price, pivot, pivot_frozen,
+    est_value, extended, capped, stop_price, stop_floored, stop_derived, limit_price,
+    earnings_in and day_range_pct. Each skipped entry is ``{ticker, reason}``. A name is
+    skipped when it isn't in the current scan, has no current price, sizes to < 1 share, or
+    rounds to a notional under the $50 floor in a dollar-denominated mode (pct, dollars,
+    risk). ``"shares"`` is exempt from the floor: the count is explicit. pct and risk skip
+    every name without ``equity``. ``"risk"`` also skips a name with no stop, or a stop not
+    below the basis (no positive risk per share).
 
-    When ``max_bar_age_days`` is set, a name whose freshest bar is more than that many
-    *trading* days old (relative to ``asof`` or today) is skipped as stale rather than sized
-    on days-old data — the app pairs this with :func:`freshen_prices` at Build so ordinary
-    names read fresh. Both default to off, keeping the builder pure and unchanged for callers
-    (and unit tests) that omit them.
+    ``extended`` flags a price above the buy zone's top; the caller warns, never skips.
+    ``capped`` is True only in ``"risk"`` mode, when the quantity was clamped to the
+    10%-of-equity single-order cap; the realized risk is then below target. ``stop_price``
+    is the protective stop (``levels["stop"]``, ~7-8% below the pivot) or None. The caller
+    may edit it before submit, but an edit does NOT re-scale a risk-sized quantity.
+    ``earnings_in`` (calendar days to the next report; None = unknown) passes through for
+    an advisory warning, never a skip. ``day_range_pct`` is the name's typical daily range
+    (%), for judging the stop against noise.
 
-    ``pivots`` maps ticker -> a FROZEN judged_pivot (the level the watchlist trigger fired on).
-    The detected scan pivot drifts every scan, so for a name with a frozen pivot the buy zone,
-    ``extended`` flag, default ``stop_price``, and risk sizing all key off the frozen level
-    instead of the current payload's ``levels`` (default stop 7.5% below it, hard-floored 10%
-    below — mirroring ``scan._entry_levels``; a tighter engine stop below the frozen pivot is
-    kept). Each plan entry carries ``pivot_frozen`` (True when its pivot came from ``pivots``).
-    Omit ``pivots`` and every name uses its scan-derived levels as before.
+    With ``max_bar_age_days`` set, a name whose freshest bar is more than that many trading
+    days older than ``asof`` (default today) is skipped as stale. The app pairs this with
+    :func:`freshen_prices` at Build. Omit ``max_bar_age_days`` and the builder never reads
+    the clock.
 
-    **Max loss from the fill.** For a name NOT held, the stop is then raised to
-    :func:`fill_floor` of the worst-case fill (the limit for a limit plan, the last price for
-    a market plan): Minervini's 10% maximum is measured from the price paid, and a
-    pivot-based stop under a fill near the top of the zone would otherwise risk up to 14.3%.
-    Paying more therefore buys a TIGHTER stop. A raised stop at/above the current price
-    (a limit far above a name still under its pivot) skips the name. Held names are exempt —
-    their stop is a re-arm target, and raising it there would silently start a trailing stop.
-    A name with no stop at all is left without one (submit refuses it with the stop attached).
+    ``pivots`` maps ticker -> a FROZEN judged_pivot, the level the watchlist trigger fired
+    on. The scan's detected pivot drifts, so a frozen name's buy zone, ``extended`` flag,
+    default ``stop_price`` and risk sizing all key off the frozen level. Its stop is the
+    engine's stop when that is below the frozen pivot, else ``DEFAULT_STOP_FROM_PIVOT``
+    below it, floored at ``MAX_LOSS_FROM_FILL`` below it, as in ``scan._entry_levels``.
+    ``pivot_frozen`` marks rows whose pivot came from ``pivots``. Without ``pivots``, every
+    name uses its scan levels.
 
-    ``stop_pct`` (the derived stop, :func:`derived_stop_pct`; None = off) puts a non-held
-    buy's stop that fraction below the same worst-case fill — half the trader's average
-    win, the book's sizing once there are numbers. A TIGHTER stop already on the name (the
-    pivot default or engine support) is kept; ``stop_derived`` marks rows where it bound.
-    None leaves every existing behavior unchanged.
+    **Max loss from the fill.** A non-held name's stop is raised to :func:`fill_floor` of
+    its worst-case fill: the limit, or the last price for a market plan. Paying more
+    therefore buys a tighter stop. A raised stop at or above the current price skips the
+    name. Held names are exempt: their stop is a re-arm target, and raising it would start
+    a trailing stop unasked. A name with no stop keeps none; submit refuses it when the
+    stop is attached. ``stop_floored`` marks rows where the floor bound.
 
-    ``held`` (optional ``{ticker: shares}``) closes the build-time stop gap: a HELD
-    name whose buy fails a sizing gate (rounds < 1 share, or under the $50 floor) is
-    emitted as a zero-share ``stop_only=True`` row instead of skipped, so submit's held
-    path still re-arms its protective stop. Names skipped before levels exist (not in
-    scan / no price / stale) or without a computable stop still skip — there's no level
-    to arm. Omit ``held`` (the default) and behavior is unchanged.
+    ``stop_pct`` (:func:`derived_stop_pct`; None = off) puts a non-held stop that fraction
+    below the same worst-case fill. A tighter existing stop is kept. ``stop_derived`` marks
+    rows where the derived stop bound.
 
-    ``order_type="limit"`` plans limit BUYs instead of market: each entry gets a
-    ``limit_price`` defaulting to its buy-zone TOP (effective pivot × 1.05 — the no-chase
-    cap, so a name that gaps past the zone simply doesn't fill; a name with no pivot falls
-    back to the last close, a marketable cap). Sizing, the risk-per-share, the $50 floor,
-    and the 10% cap all use the LIMIT as the basis — the worst-case fill for a buy limit
-    is the limit itself (fills lower, never higher) — so ``est_value`` is the honest
-    maximum. The risk mode requires ``stop < limit``. ``"market"`` (the default) leaves
-    every existing behavior byte-identical; ``limit_price`` is then ``None``.
+    ``held`` (``{ticker: shares}``) turns a HELD name whose buy fails a sizing gate (< 1
+    share, or under the $50 floor) into a zero-share ``stop_only=True`` row instead of a
+    skip, so submit's held path still re-arms its protective stop. Every other skip stands,
+    and a name without a stop still skips: there is no level to arm.
+
+    ``order_type="limit"`` plans limit BUYs. Each ``limit_price`` defaults to the buy
+    zone's top, the no-chase cap, so a name that gaps past the zone doesn't fill. With no
+    zone top it is the last close, a marketable cap. Sizing, the risk per share, the $50
+    floor and the 10% cap all use the limit as the basis: a buy limit never fills higher,
+    so ``est_value`` is the maximum. A stop at or above the current price skips the name.
+    ``"market"`` (the default) sizes on the last close; ``limit_price`` is then None.
     """
     if mode not in SIZING_MODES:
         raise ValueError(f"mode must be one of {SIZING_MODES}, got {mode!r}")
@@ -794,16 +776,15 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                                 f"old) — Re-scan to refresh"})
                 continue
 
-        # Effective entry levels (read early — the risk mode sizes against the stop). A frozen
-        # judged_pivot overrides the drifted scan pivot: buy zone, extended flag, and the default
-        # stop all key off it, so the order the user submits matches the level the trigger fired on.
+        # A frozen judged_pivot overrides the drifted scan pivot, so the order matches the
+        # level the trigger fired on.
         frozen = None
         if pivots:
             _fp = pivots.get(t)
             frozen = float(_fp) if _fp and _fp > 0 else None
         if frozen:
             pivot, buy_hi = frozen, frozen * (1.0 + NO_CHASE_PCT)
-            _eng = lv.get("stop")                        # keep a tighter engine stop below the pivot
+            _eng = lv.get("stop")                        # used if below the pivot
             _raw = (_eng if (_eng and _eng > 0 and _eng < frozen)
                     else frozen * (1.0 - DEFAULT_STOP_FROM_PIVOT))
             stop = max(_raw, frozen * (1.0 - MAX_LOSS_FROM_FILL))
@@ -813,16 +794,14 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             stop = lv.get("stop")
         capped = False
 
-        # Sizing basis: the worst-case fill. Market orders fill ~at the current price; a buy
-        # LIMIT fills at or below its limit, so the limit itself is the honest basis for
-        # share counts, the $50 floor, and the 10% cap.
+        # Size on the worst-case fill: ~the current price for a market order, the limit for a
+        # buy limit, which never fills higher.
         limit = None
         basis = price
         if order_type == "limit":
-            # A stop AT/ABOVE the current price means the base broke down below its
-            # pivot: the zone-top limit would be MARKETABLE, fill ~at the price, and the
-            # OTO stop leg would arm above the market — an instant stop-out. The market
-            # path rejects the same numbers at submit; reject here at the source.
+            # A stop at or above the price means the base broke below its pivot. The
+            # zone-top limit would fill at once and the OTO stop would arm above the market,
+            # an instant stop-out. Submit rejects the same numbers for a market plan.
             if stop and stop > 0 and price and stop >= price:
                 skipped.append({"ticker": t, "reason":
                                 "stop not below the current price — the base has broken "
@@ -831,9 +810,8 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             limit = float(buy_hi) if buy_hi and buy_hi > 0 else price
             basis = limit
 
-        # Max loss is measured from the price paid: raise a buy's stop to 10% below its
-        # worst-case fill — or to the derived stop, when active. The OTO stop is fixed at
-        # submit, so a limit order carries the level for its LIMIT even if it fills lower.
+        # The OTO stop is fixed at submit, so a limit order MUST carry the stop for its
+        # limit, even if it fills lower.
         stop_floored = stop_derived = False
         if not (held and held.get(t, 0) > 0):
             if stop_pct:
@@ -874,17 +852,15 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                                 "can't risk-size"})
                 continue
             shares = int((equity * amount / 100.0) / (basis - stop))  # floor
-            # Risk sizing yields position% ≈ risk% / stop-distance%, which routinely exceeds the
-            # 10% single-order cap (1% risk / 8% stop = 12.5%). Clamp to the cap rather than skip;
-            # the realized risk then sits below target and the caller flags it via ``capped``.
+            # Position% ≈ risk% / stop%, which often exceeds the 10% cap (1% / 8% = 12.5%).
+            # Clamp rather than skip; ``capped`` flags the below-target risk.
             cap_shares = int(MAX_ORDER_PCT * equity / basis)
             if shares > cap_shares:
                 shares, capped = cap_shares, True
         else:                                                        # "shares"
             shares = int(amount)
 
-        # A held name failing a sizing gate still needs its stop maintained — emit a
-        # stop-only row (shares=0) instead of dropping it (needs a valid stop).
+        # A held name that fails a sizing gate still needs its stop maintained.
         _held_fallback = bool(held and held.get(t, 0) > 0 and stop and stop > 0)
         if shares < 1:
             if _held_fallback:
@@ -913,28 +889,23 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "stop_derived": stop_derived,
             "limit_price": round(limit, 2) if limit else None,
             "earnings_in": payload.get("earnings_in"),
-            # the name's typical day (%), so the panel can judge the stop against noise
             "day_range_pct": (payload.get("vcp") or {}).get("median_tr_pct"),
         })
     return plan, skipped
 
 
 def freshen_prices(tickers: Sequence[str], payloads: Dict[str, dict]) -> Dict[str, dict]:
-    """Re-pull the latest daily bars for the given watchlist ``tickers`` and return a small
-    payloads dict with each name's ``df`` replaced by the freshest available frame, so
-    :func:`build_buy_plan` sizes on current prices instead of the possibly days-old closes
-    frozen in the scan memo (the scan result lives in session_state with no time-based
-    invalidation and the trigger fragment keeps the tab alive for days).
+    """A payloads dict for ``tickers`` with each ``df`` replaced by the freshest daily bars.
 
-    Uses the cheap incremental top-up (``max_age_days=0`` — the same path refresh_job
-    uses to fetch the finalized close without a full 2y refetch); only the handful of
-    watchlist names are fetched, never the universe. Any name the refresh can't reach keeps
-    its existing frame — :func:`build_buy_plan`'s ``max_bar_age_days`` guard then skips a
-    genuinely stale one. Tickers absent from ``payloads`` are dropped (the builder already
-    reports those as 'not in the current scan'). ``levels`` and ``earnings_in`` are carried
-    through untouched; only the price frame is refreshed. ``data_feed`` is imported lazily so
-    the cockpit still loads without its optional deps, and a total fetch failure degrades to
-    the original frames rather than raising."""
+    The scan memo lives in session_state and never expires, and the trigger fragment keeps
+    the tab alive for days, so its closes can be days old at Build. Network call: the
+    incremental top-up (``max_age_days=0``, as refresh_job uses) for these names only,
+    never the universe. Only ``df`` changes; the other payload keys pass through. A name
+    the fetch can't reach keeps its frame, and :func:`build_buy_plan`'s
+    ``max_bar_age_days`` then skips it if stale. Tickers absent from ``payloads`` are
+    dropped; the builder reports them. A total fetch failure returns the original frames
+    and never raises. ``data_feed`` is imported lazily, so the cockpit loads without its
+    optional deps."""
     want = [t for t in dict.fromkeys(tickers) if payloads.get(t)]
     if not want:
         return {}
@@ -954,10 +925,10 @@ def _open_sell_stops(client, ticker: str, *, GetOrdersRequest, QueryOrderStatus,
                      OrderSide, OrderType) -> List:
     """This ticker's OPEN sell **stop** orders (STOP / STOP_LIMIT / TRAILING_STOP).
 
-    A manual limit sell isn't a stop, so it's excluded. Alpaca surfaces a triggered OTO stop
-    leg as its own top-level SELL order too, so this flat query catches both standalone stops
-    and prior OTO legs. Returns the order objects (each carries a ``stop_price``) so the caller
-    can read the current stop level for the ratchet AND cancel them when raising.
+    A limit sell isn't a stop and is excluded. Alpaca lists a triggered OTO stop leg as its
+    own top-level SELL order, so this flat query catches OTO legs as well as standalone
+    stops. Returns the order objects, which carry ``stop_price``, for the caller to read
+    and cancel; [] on any error.
     """
     stop_types = {OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
     try:
@@ -976,9 +947,8 @@ def _open_sell_stops(client, ticker: str, *, GetOrdersRequest, QueryOrderStatus,
 
 
 def _stop_price_of(order) -> Optional[float]:
-    """Best-effort read of an order's stop trigger price (alpaca-py ``Order.stop_price``) as a
-    float, or None if absent/unparseable. Real stops always carry one; None just means we
-    can't compare, so the caller falls back to replacing rather than ratcheting."""
+    """An order's ``stop_price`` as a float, or None if absent or unparseable. Callers
+    drop None, so a stop with no readable level is replaced rather than ratcheted."""
     v = getattr(order, "stop_price", None)
     if v is None:
         return None
@@ -989,8 +959,7 @@ def _stop_price_of(order) -> Optional[float]:
 
 
 def _order_qty(order) -> int:
-    """Whole-share qty of an order (alpaca-py ``Order.qty``), or 0 if absent/unparseable — used
-    to check whether the in-force stop(s) still cover the whole position after it grew."""
+    """An order's ``qty`` in whole shares, or 0 if absent or unparseable."""
     v = getattr(order, "qty", None)
     if v is None:
         return 0
@@ -1001,8 +970,8 @@ def _order_qty(order) -> int:
 
 
 def _cancel_orders(client, orders) -> List[str]:
-    """Cancel each order by id, independently guarded so one stuck order never blocks the rest.
-    Returns the cancelled ids."""
+    """Cancel each order by id; one failed cancel never blocks the rest. Returns the
+    cancelled ids."""
     cancelled: List[str] = []
     for od in orders or []:
         try:
@@ -1017,10 +986,9 @@ def _open_sell_stops_by_symbol(client, *, GetOrdersRequest, QueryOrderStatus,
                                OrderSide, OrderType) -> Dict[str, List]:
     """ALL open sell STOP/STOP_LIMIT/TRAILING_STOP orders in ONE query, grouped by symbol.
 
-    Same type filter as :func:`_open_sell_stops` but omits the ``symbols=`` filter, so the whole
-    account's protective stops come back in a single round-trip (the positions page needs every
-    symbol's stop at once). Returns ``{symbol: [order, ...]}``; empty dict on any error except a
-    timeout, which raises :class:`TradeUnavailable`."""
+    Same type filter as :func:`_open_sell_stops` without ``symbols=``, so every stop on the
+    account comes back in one round trip. Returns ``{symbol: [order, ...]}``; an empty dict
+    on any error except a timeout, which raises :class:`TradeUnavailable`."""
     from requests.exceptions import Timeout
     stop_types = {OrderType.STOP, OrderType.STOP_LIMIT, OrderType.TRAILING_STOP}
     try:
@@ -1045,9 +1013,9 @@ def _open_sell_stops_by_symbol(client, *, GetOrdersRequest, QueryOrderStatus,
 
 def _open_cockpit_buy_orders(client, *, GetOrdersRequest, QueryOrderStatus,
                              OrderSide) -> list:
-    """OPEN cockpit BUY orders (``client_order_id`` starts ``SEPA``) in ONE query — the
-    order OBJECTS, for callers that need ids (cancel) as well as symbols (skip). Side=BUY
-    already excludes ``SEPAstop-`` sells. Empty list on any error (fail-open)."""
+    """OPEN cockpit BUY orders (``client_order_id`` starts ``SEPA``), in one query. Returns
+    the order objects: callers need ids to cancel and symbols to skip. Side=BUY excludes
+    ``SEPAstop-`` sells. [] on any error (fail-open)."""
     try:
         opens = client.get_orders(filter=GetOrdersRequest(
             status=QueryOrderStatus.OPEN, side=OrderSide.BUY))
@@ -1061,25 +1029,24 @@ def _open_cockpit_buy_orders(client, *, GetOrdersRequest, QueryOrderStatus,
 def _open_cockpit_buys(client, *, GetOrdersRequest, QueryOrderStatus, OrderSide) -> set:
     """Symbols with an OPEN cockpit BUY order.
 
-    The documented cadence submits after the close, so a queued BUY (or a resting GTC
-    limit) has no position yet — :func:`submit_buy_plan`'s only 'already invested'
-    guard is ``get_all_positions()``, which wouldn't see it. Skipping these on a
-    re-submit prevents a second BUY (double position, double risk)."""
+    A BUY queued after the close, or a resting GTC limit, has no position yet, so
+    ``get_all_positions()`` misses it. :func:`submit_buy_plan` skips these symbols so a
+    re-submit can't send a second BUY and double the risk."""
     return {od.symbol for od in _open_cockpit_buy_orders(
         client, GetOrdersRequest=GetOrdersRequest, QueryOrderStatus=QueryOrderStatus,
         OrderSide=OrderSide)}
 
 
 def cancel_pending_buys() -> dict:
-    """Cancel every OPEN cockpit BUY order (``SEPA…`` tags only — never sells, stops, or
-    other tools' orders). THE control for a resting GTC limit whose setup broke (limits
-    rest until filled or canceled; the pending-buy guard blocks re-submits but cannot
-    cancel). Canceling an unfilled OTO parent cancels its held stop leg too — nothing
-    was bought, so there is nothing left to protect.
+    """Cancel every OPEN cockpit BUY order (``SEPA…`` tags only; never sells, stops or
+    other tools' orders). This is the cockpit's control for a resting GTC limit whose setup
+    broke: the pending-buy guard blocks re-submits but cannot cancel. Cancelling an
+    unfilled OTO parent cancels its held stop leg too; nothing was bought, so nothing
+    needs protecting.
 
     Returns ``{"cancelled": [{ticker, id}], "errors": [{ticker, id, error}]}``; one
-    failed cancel never aborts the rest. Raises :class:`TradeUnavailable` only for
-    missing package/credentials (the panel catches it)."""
+    failed cancel never aborts the rest. A failed order query reads as no orders. Raises
+    :class:`TradeUnavailable` only for missing package/credentials."""
     client, _using = _connect_paper()
     try:
         from alpaca.trading.requests import GetOrdersRequest
@@ -1101,28 +1068,27 @@ def cancel_pending_buys() -> dict:
 
 def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, existing, *,
                     OrderSide, TimeInForce, StopOrderRequest) -> dict:
-    """Minervini's one-way GTC stop ratchet for a held position — the single source of truth,
-    called by both :func:`submit_buy_plan` (held-name branch) and :func:`rearm_stops`.
+    """Minervini's one-way GTC stop ratchet for a held position. The one implementation,
+    shared by :func:`submit_buy_plan`'s held branch and :func:`rearm_stops`.
 
-    ``existing`` is that symbol's open sell-stop orders (the caller fetches them, per-ticker or
-    batched). The current in-force stop is ``max(_stop_price_of(existing))``. Returns a PARTIAL
-    result dict — ``{status, detail}`` plus ``stop_price`` when a level is set — where status is
-    ``"stop_only"`` (placed/raised), ``"stop_kept"`` (existing kept — a would-be lower/equal or
-    an invalid new stop), ``"skipped"`` (no valid stop and none in force) or ``"failed"``
-    (replacement rejected). NEVER lowers a stop: it only cancels + replaces to RAISE. GTC so
-    the stop persists across sessions.
+    ``existing`` is the symbol's open sell-stop orders, fetched by the caller. The in-force
+    stop is the highest of their stop prices. It is NEVER lowered: old stops are cancelled
+    and replaced only to raise the level, or to re-place it at the same level for the full
+    held quantity when they cover fewer shares. GTC keeps the stop across sessions.
 
-    Cancel-before-place is guarded (same pattern as
-    :func:`submit_position_sell`): if the replacement submit fails AFTER the old stop was
-    cancelled, the previous stop is RESTORED at its old level for the full held quantity —
-    the position is never silently left unprotected. A failed restore is loudly reported."""
+    Returns a PARTIAL result dict: ``{status, detail}``, plus ``stop_price`` when a level is
+    in force. ``status`` is ``"stop_only"`` (placed, raised or re-placed), ``"stop_kept"``
+    (a stop is in force and the new one is lower, equal or invalid), ``"skipped"`` (no
+    valid stop and none in force) or ``"failed"`` (placement rejected).
+
+    If placement fails after the old stops were cancelled, the old level is restored once
+    for the full held quantity, as in :func:`submit_position_sell`. The position is never
+    silently left unprotected: a failed restore is reported in ``detail``."""
     prices = [p for p in (_stop_price_of(od) for od in existing) if p is not None]
-    cur = max(prices) if prices else None                # current stop level, if any
+    cur = max(prices) if prices else None
     new_stop = round(float(desired_stop), 2) if desired_stop else None
 
     if not stop_is_valid(new_stop, price):
-        # New stop isn't below the price. If a valid stop is already in force the position stays
-        # protected — keep it; otherwise there's nothing to place.
         if cur is not None:
             return {"status": "stop_kept", "stop_price": cur,
                     "detail": f"kept existing stop @ {cur:.2f} (new stop not below price)"}
@@ -1152,17 +1118,16 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
                 out["detail"] += "; stop restore FAILED — arm a stop manually"
         return out
 
-    # Ratchet: only replace to RAISE the stop; a lower-or-equal one is kept — UNLESS the in-force
-    # stop under-covers the position (it grew via a manual pyramid buy Alpaca-side). Then re-place
-    # at the SAME (never-lower) level for the full held qty so the added shares aren't left
-    # unprotected while the UI reports a stop in force. Only acts on positive evidence of
-    # under-coverage (0 < covered < held), so an unreadable qty never triggers needless churn.
+    # A lower-or-equal stop is kept unless the stops under-cover the position, e.g. after a
+    # manual pyramid buy. Then re-place at the same level for the full quantity, or the added
+    # shares sit unprotected while the UI shows a stop. Only 0 < covered < held counts, so an
+    # unreadable qty never causes churn.
     if cur is not None and new_stop <= cur:
         covered = sum(_order_qty(od) for od in existing)
         if not (0 < covered < held_shares):
             return {"status": "stop_kept", "stop_price": cur,
                     "detail": f"kept existing stop @ {cur:.2f} — not lowering to {new_stop:.2f}"}
-        cancelled = _cancel_orders(client, existing)     # under-covered -> re-place at cur, full qty
+        cancelled = _cancel_orders(client, existing)
         resp = _try_place(cur)
         if resp is None:
             return _failed(cur, cancelled)
@@ -1170,7 +1135,7 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
                 "detail": f"GTC stop re-placed for full {held_shares} sh @ {cur:.2f} "
                           f"(was {covered} sh; id {getattr(resp, 'id', '?')})"}
 
-    cancelled = _cancel_orders(client, existing)         # replace the lower stop(s)
+    cancelled = _cancel_orders(client, existing)
     resp = _try_place(new_stop)
     if resp is None:
         return _failed(new_stop, cancelled)
@@ -1183,48 +1148,47 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
 
 
 def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
-    """Submit each planned order on the cockpit's Alpaca **paper** account (Minervini Trader
-    keys preferred — see :func:`_connect_paper`), attaching a protective stop when
-    ``attach_stop`` is set.
+    """Submit each plan row on the cockpit's Alpaca **paper** account (see
+    :func:`_connect_paper`), with a protective stop when ``attach_stop`` is set.
 
     Per name:
 
-    * **already held** in the account — no buy is sent; a **GTC** sell-stop protects the WHOLE
-      held position, managed as Minervini's one-way ratchet (never lower a stop, only raise it):
-      if no stop is open it's placed at ``stop_price``; if one already is, it's replaced only to
-      RAISE it — a would-be lower-or-equal stop is left untouched (result ``"stop_kept"``). GTC
-      so it persists across sessions instead of expiring each close. Exempt from the $50 floor /
-      10%-cap since a protective stop is risk-reducing.
-    * **not held** — a BUY. With ``attach_stop`` it's an OTO order carrying a stop-loss
-      leg (the stop activates only after the buy fills, so it works even when the buy is queued
-      to the next open). The whole OTO is **GTC** end-to-end: the stop leg is held until
-      the buy fills, then rests as a GTC stop that SURVIVES the close — a DAY leg would
-      expire at that day's close, leaving an intraday fill unprotected overnight. The
-      held-name ratchet manages (only ever raises) the same stop from the next re-arm
-      on. Without ``attach_stop``, a plain market BUY.
+    * **already held** — no buy. With ``attach_stop``, :func:`_rearm_gtc_stop` places a
+      **GTC** sell-stop at ``stop_price`` for the WHOLE position, or raises the one in
+      force; a lower-or-equal stop leaves it untouched (``"stop_kept"``). Without
+      ``attach_stop`` the row is skipped. The 10% cap doesn't apply: a protective stop
+      reduces risk.
+    * **not held** — a BUY. With ``attach_stop`` it is a **GTC** OTO order with a stop-loss
+      leg. The leg activates only on the fill, so it works for a buy queued to the next
+      open, and then rests as a GTC stop past the close. A DAY leg would expire at the
+      close and leave an intraday fill unprotected overnight. The held-name ratchet
+      manages that stop from the next re-arm on. Without ``attach_stop``, a plain DAY
+      market BUY.
 
-      An entry carrying a positive ``limit_price`` (a ``build_buy_plan(order_type="limit")``
-      plan) is sent as a **limit** BUY instead: with ``attach_stop`` a GTC OTO limit + stop
-      leg — same GTC-end-to-end shape, so a fill on ANY later day is protected the
-      moment it happens, and an unfilled limit rests until filled or canceled (the pending-buy
-      guard blocks re-submits meanwhile); without ``attach_stop`` a DAY limit that expires at
-      the close. Stop validity is checked against the worst-case fill. No ``limit_price``
-      → the market behavior above, unchanged.
+      A positive ``limit_price`` sends a **limit** BUY instead. With ``attach_stop`` it is a
+      GTC OTO limit with a stop leg, so a fill on any later day is protected at once; an
+      unfilled limit rests until filled or cancelled, and the pending-buy guard blocks
+      re-submits meanwhile. Without ``attach_stop`` it is a DAY limit. A present but
+      non-positive ``limit_price`` is skipped. The 10% cap is recomputed from the limit.
+      A row whose stop isn't below both the limit and the last price is skipped: a
+      marketable limit fills near the price.
 
-      With ``attach_stop``, a buy whose stop sits more than ``MAX_LOSS_FROM_FILL`` below its
-      highest possible fill (the limit, else the last price) is skipped — the same rule
-      :func:`build_buy_plan` applies, re-checked because both levels are editable.
+      With ``attach_stop``, a buy whose stop is more than ``MAX_LOSS_FROM_FILL`` below its
+      highest possible fill (the limit, else the last price) is skipped. The stop and the
+      limit are editable after Build, so this MUST re-check what the builder applied.
 
-      **Build-time intent is binding:** an entry stamped ``rearm_only`` (held when the plan
-      was built — the preview showed it with no checkbox and "no buy") or ``stop_only``
-      (zero-share stop carrier), whose position has since closed, is SKIPPED — never
-      converted into a buy the user did not consent to. Rebuild the plan to buy such a name.
+      **Build-time intent is binding.** A ``rearm_only`` row (held at Build; the preview
+      offered no buy) or a ``stop_only`` row whose position has since closed is SKIPPED,
+      never turned into a buy the user did not consent to. Rebuild the plan to buy it. A
+      row under 1 share, a ``gate_blocked`` row and a symbol with a cockpit BUY already
+      queued are skipped too.
 
-    Reuses ``alpaca_trader``'s tradability check and 10%-of-equity order cap (buys only).
-    Returns ``{equity, cash, account_number, using_dedicated, results}`` where each result is
-    the plan entry plus a ``status`` ("submitted" / "stop_only" / "stop_kept" / "skipped" /
-    "failed") and a ``detail`` string. Raises :class:`TradeUnavailable` if alpaca-py or
-    credentials are missing.
+    Every row goes through ``alpaca_trader``'s tradability check, and buys through its
+    10%-of-equity order cap too. One failed symbol never aborts the rest. Returns ``{equity,
+    cash, account_number, using_dedicated, results}``; each result is the plan entry plus
+    a ``status`` ("submitted" / "stop_only" / "stop_kept" / "skipped" / "failed") and a
+    ``detail`` string. Raises :class:`TradeUnavailable` if alpaca-py or credentials are
+    missing.
     """
     client, using_dedicated = _connect_paper()          # paper=True enforced inside
     try:
@@ -1241,10 +1205,9 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
     acct = client.get_account()
     equity, cash = float(acct.equity), float(acct.cash)
     account_number = getattr(acct, "account_number", "?")
-    # {ticker: whole shares held} — mirrors get_account_state's int(float(qty)) convention.
+    # Truncated to whole shares as alpaca_trader.get_account_state does.
     held = {p.symbol: int(float(p.qty)) for p in client.get_all_positions()}
-    # Cockpit BUYs still queued (submitted after the close, not yet filled) don't show as
-    # positions — skip a re-buy on those so a re-submit can't double the position.
+    # A queued cockpit BUY isn't a position yet; skipping it stops a re-submit doubling one.
     pending_buys = _open_cockpit_buys(
         client, GetOrdersRequest=GetOrdersRequest,
         QueryOrderStatus=QueryOrderStatus, OrderSide=OrderSide)
@@ -1262,8 +1225,6 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
             continue
         try:
             if held_shares > 0:
-                # Already invested — no buy; manage a GTC protective stop for the whole position
-                # via the shared one-way ratchet (never lower, only raise — see _rearm_gtc_stop).
                 if not attach_stop:
                     results.append({**o, "status": "skipped",
                                     "detail": f"already held ({held_shares} sh); "
@@ -1278,15 +1239,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                 results.append({**o, **res})
                 continue
 
-            # Not held — a BUY (market, or limit when the entry carries a limit_price),
-            # with an OTO protective stop when attach_stop is on.
-            #
-            # Build-time-intent guard: a row the plan preview showed as "already held —
-            # stop re-arm only, no buy" (``rearm_only``, stamped from BUILD-time
-            # holdings) or a zero-share ``stop_only`` row must NEVER convert into a buy
-            # just because the position closed between Build and Submit (its GTC stop
-            # firing is enough) — the user was shown no checkbox and consented to no
-            # buy. Same guard kills qty<1 rows before they reach the API as noise.
+            # A rearm_only or stop_only row MUST NOT become a buy because the position
+            # closed after Build; its stop firing is enough. The user consented to no buy.
             if o.get("rearm_only") or o.get("stop_only") or int(o.get("shares", 0)) < 1:
                 results.append({**o, "status": "skipped",
                                 "detail": "position closed since the plan was built — "
@@ -1304,35 +1258,32 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                           "not re-submitting"})
                 continue
             _lim = o.get("limit_price")
-            # None = a market plan; a PRESENT but non-positive limit is an edit error — skip
-            # rather than silently falling back to an uncapped market buy.
+            # None is a market plan. A present, non-positive limit is an edit error: skip it
+            # rather than fall back to an uncapped market buy.
             if _lim is not None and not (float(_lim) > 0):
                 results.append({**o, "status": "skipped",
                                 "detail": "invalid limit price — set a limit > 0"})
                 continue
             limit = float(_lim) if _lim else None
-            # The 10% cap binds on the worst-case fill: for a limit row RECOMPUTE from
-            # the (possibly user-EDITED) limit — the entry's est_value is build-time and
-            # an upward edit would otherwise slip past the cap. Market rows keep the
-            # build value (the price isn't editable).
+            # The cap binds on the worst-case fill. A limit row MUST recompute it from the
+            # limit, which is editable after Build; est_value is not. A market row's price
+            # isn't editable.
             _est = o["shares"] * limit if limit else o["est_value"]
             if _est > max_allowed:
                 results.append({**o, "status": "skipped",
                                 "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
                 continue
             if attach_stop:
-                # Stop validity is against the WORST fill either way: a limit BUY can
-                # fill anywhere at or below the limit — including ~the current price
-                # when the limit is marketable — so the stop must clear BOTH.
+                # A limit BUY fills at or below the limit, near the price when marketable,
+                # so the stop MUST be below both.
                 _worst = min(limit, o["price"]) if limit else o["price"]
                 if not stop_is_valid(stop, _worst):
                     results.append({**o, "status": "skipped",
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
                     continue
-                # ...and the max loss binds on the HIGHEST fill: the limit, or the price.
-                # Re-checked here because the stop and the limit are both editable after
-                # Build, and the unattended entry executor submits through this path too.
+                # ...and the max loss binds on the HIGHEST fill. The unattended entry
+                # executor submits through here too.
                 _paid = limit if limit else o["price"]
                 if not stop_within_max_loss(stop, _paid):
                     results.append({**o, "status": "skipped",
@@ -1342,10 +1293,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                               f"{float(_paid):,.2f} — raise it to ≥ "
                                               f"{fill_floor(_paid):,.2f}"})
                     continue
-                # GTC OTO: the stop leg inherits GTC ("held" until the fill), so the
-                # protective stop persists past the close — a DAY leg expires AT the
-                # close and can leave an intraday fill unprotected overnight. The same
-                # shape covers a limit that fills days later: its stop arms on the fill.
+                # The OTO MUST be GTC: the stop leg inherits it and outlives the close. A
+                # DAY leg expires at the close and can leave an intraday fill unprotected.
                 if limit:
                     req = LimitOrderRequest(
                         symbol=t, qty=o["shares"], side=OrderSide.BUY,
@@ -1387,8 +1336,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
 
 
 def _attr_float(obj, attr: str) -> Optional[float]:
-    """``getattr`` + float-coerce-or-None. alpaca-py ``Position`` P&L fields are read
-    defensively — any absent/odd-typed field reads as None and the view renders without it."""
+    """``obj.attr`` as a float, or None when absent or not numeric, so the view renders
+    without it."""
     v = getattr(obj, attr, None)
     if v is None:
         return None
@@ -1399,14 +1348,15 @@ def _attr_float(obj, attr: str) -> Optional[float]:
 
 
 def fetch_positions() -> dict:
-    """Read the cockpit's Alpaca **paper** account (Minervini keys preferred) and return holdings
-    enriched with P&L, in-force stop level, 50-day SMA, earnings date (for the cushion
-    advisories), stage on the stop ladder, and Minervini exit advisories.
+    """The cockpit's **paper** holdings, each with P&L, in-force stop, 20- and 50-day SMAs,
+    volume ratio, template read, earnings date, stop-ladder stage and exit advisories.
+    Network: Alpaca, and price and fundamentals fetches when their caches are stale.
 
     Returns ``{"account": {account_number, equity, cash, using_dedicated, positions_count,
-    total_unrealized_pl}, "positions": [ per-position dict ]}``. Raises :class:`TradeUnavailable`
-    on missing package/credentials (the page catches it). Every per-position numeric field degrades
-    to ``None`` (never raises) when a Position attribute is absent or price history is < 50 bars."""
+    total_unrealized_pl}, "positions": [per-position dict]}``. Raises
+    :class:`TradeUnavailable` on missing package/credentials or an Alpaca read timeout.
+    A per-position field reads None, never raises, when its Position attribute is absent
+    or the price history is missing or too short."""
     client, using_dedicated = _connect_paper()
     try:
         from alpaca.trading.requests import GetOrdersRequest
@@ -1427,20 +1377,18 @@ def fetch_positions() -> dict:
         OrderSide=OrderSide, OrderType=OrderType)
 
     symbols = [s for s in (getattr(p, "symbol", None) for p in raw) if s]
-    # One batched price pull for the 50-day SMA + SMA-cross advisory; lazy imports so trade.py
-    # still loads without yfinance / the vendored screening package present.
+    # One batched price pull. Lazy imports keep trade.py loadable without yfinance or the
+    # vendored screening package.
     frames: dict = {}
     data_feed = None
     if symbols:
         try:
             from . import data_feed as _df_mod
             data_feed = _df_mod
-            # NEVER queue the Positions page behind the bulk pipeline: _YF_LOCK
-            # serializes every in-process download, so while a scan/refresh is mid-sweep
-            # this small fetch would wait on it — and the page (with its SELL controls)
-            # waits on this fetch. Selling needs only Alpaca data; current_price comes
-            # from the Position objects either way, and the SMA-50/volume advisories
-            # tolerate a cache bar.
+            # The Positions page MUST NOT queue behind the bulk pipeline. _YF_LOCK
+            # serializes every in-process download, so a mid-sweep scan or refresh would
+            # stall this fetch and the page's SELL controls with it. Selling needs only
+            # Alpaca data, and the SMA/volume advisories tolerate a cached bar.
             frames = data_feed.get_many_prices(
                 symbols, allow_network=not data_feed.network_busy())
         except Exception:
@@ -1451,8 +1399,8 @@ def fetch_positions() -> dict:
         calculate_sma = None
     import pandas as pd
 
-    # Earnings dates for the cushion advisories (best-effort; weekly JSON cache per ticker,
-    # serial — position counts are small and the page's cache_data absorbs the cost).
+    # Earnings dates, best-effort, from a weekly JSON cache per ticker. Serial: positions
+    # are few.
     earn: Dict[str, tuple] = {}                     # sym -> (next_earnings, earnings_in)
     try:
         from . import data_feed as _fund_mod
@@ -1547,11 +1495,12 @@ def fetch_positions() -> dict:
 
 
 def rearm_stops(targets: List[dict]) -> dict:
-    """Raise/place GTC protective stops for already-held names via the shared one-way ratchet
-    (:func:`_rearm_gtc_stop`) — never lowering a stop. Each target: ``{ticker, stop_price, price}``
-    (``price`` = the reference the stop must sit below). A ticker not held in the account is
-    skipped. Returns ``{equity, cash, account_number, using_dedicated, results}`` — the same shape
-    and status vocabulary as :func:`submit_buy_plan`. Raises :class:`TradeUnavailable`."""
+    """Place or raise GTC protective stops on held names through :func:`_rearm_gtc_stop`;
+    never lowers one. Each target is ``{ticker, stop_price, price}``, where ``price`` is the
+    reference a valid stop sits below. A ticker not held is skipped. Returns ``{equity,
+    cash, account_number, using_dedicated, results}``, with the shape and statuses of
+    :func:`submit_buy_plan`. Raises :class:`TradeUnavailable` on missing package/credentials
+    or a timed-out stops read."""
     client, using_dedicated = _connect_paper()
     try:
         from alpaca.trading.requests import StopOrderRequest, GetOrdersRequest
@@ -1588,24 +1537,23 @@ def rearm_stops(targets: List[dict]) -> dict:
 
 def submit_position_sell(symbol: str, qty: int, *,
                          remainder_stop: Optional[float] = None) -> dict:
-    """Manual market SELL of part/all of a held position (paper account), stop-aware.
+    """Market SELL of part or all of a held position on the paper account, stop-aware.
 
-    Shares covered by an open GTC sell-stop are RESERVED at Alpaca, so the flow is:
-    cancel the symbol's open sell-stops → submit the market SELL (DAY, tagged
-    ``SEPAsell-``) → re-place a GTC stop for any REMAINING shares at
-    ``max(old level, remainder_stop)`` — the ratchet never lowers, and with no prior
-    stop a given ``remainder_stop`` places one (the free-roll's stop→breakeven move
-    rides this). If the market sell fails AFTER the cancel, the previous stop is
-    restored for the full held quantity at the OLD level — the position is never silently left
-    unprotected (the cancel-before-place gap done right).
+    Alpaca RESERVES the shares an open sell-stop covers, so the order is: cancel the
+    symbol's open sell-stops, submit the DAY market SELL (tagged ``SEPAsell-``), then
+    re-place a GTC stop for the REMAINING shares at ``max(old level, remainder_stop)``.
+    The ratchet never lowers. With no prior stop, a given ``remainder_stop`` places one;
+    the free-roll's move to breakeven relies on this. If the sell fails after the cancel,
+    the stop is restored at the OLD level for the full held quantity, so the position is
+    never silently left unprotected.
 
-    No $50 floor / 10%-cap / tradability gate: like the stop re-arm path, a sell is
-    risk-reducing. ``qty`` above the held count clamps to it (a stale page is the only
-    way there — the UI caps the input). A cancel that silently failed can still bounce
-    the market sell on reserved shares; that lands in the failure/restore path and the
-    duplicate restore is itself reported. Returns a flat dict for the page's icon
-    renderer: ``{status: submitted|skipped|failed, detail, symbol, sold_qty, remaining,
-    stop_price, account_number, equity}``. Raises :class:`TradeUnavailable`."""
+    No $50 floor, 10% cap or tradability gate: a sell reduces risk. ``qty`` above the held
+    count clamps to it; only a stale page gets there. A cancel that silently failed can
+    still bounce the sell on reserved shares. That takes the failure path, and the
+    duplicate restore's outcome is reported in ``detail``. Returns ``{status:
+    submitted|skipped|failed, detail, symbol, sold_qty, remaining, stop_price,
+    account_number, equity}``. Raises :class:`TradeUnavailable` if alpaca-py or
+    credentials are missing."""
     client, _using_dedicated = _connect_paper()
     try:
         from alpaca.trading.requests import (MarketOrderRequest, StopOrderRequest,
@@ -1676,8 +1624,8 @@ def submit_position_sell(symbol: str, qty: int, *,
     except Exception as e:
         detail = f"market sell failed: {e}"
         if cancelled and old_level is not None:
-            # Restore at the OLD level: the sell never happened, so a raised
-            # remainder_stop has no business being in force.
+            # The OLD level: the sell never happened, so a raised remainder_stop MUST NOT
+            # take effect.
             detail += (f"; previous stop restored @ {old_level:.2f}"
                        if _place_stop(held, old_level)
                        else "; stop restore FAILED — arm a stop manually")
@@ -1721,26 +1669,27 @@ def _fill_time(fill: dict):
 def build_trade_journal(fills: List[dict]) -> dict:
     """Reconstruct round-trip trades from raw order fills. Pure — no network.
 
-    ``fills``: ``{symbol, side ("buy"/"sell"), qty, price, time, client_order_id}`` dicts
-    (:func:`fetch_order_fills` produces them; any time parseable by pandas works). Fills are
-    sorted by time and grouped per symbol into POSITION EPISODES — flat → long → flat closes
-    one trade — so scale-ins and partial sells aggregate into a single round trip (avg entry
-    vs avg exit), which is what the "know your numbers" stats count as ONE trade.
+    ``fills``: ``{symbol, side ("buy"/"sell"), qty, price, time, client_order_id}`` dicts,
+    as :func:`fetch_order_fills` produces; any time pandas can parse works. A fill with no
+    symbol, or a non-positive or unreadable qty or price, is ignored. Fills are sorted by
+    time and grouped per symbol into POSITION EPISODES: flat → long → flat is one trade.
+    Scale-ins and partial sells aggregate into one round trip (avg entry vs avg exit),
+    which the "know your numbers" stats count as ONE trade.
 
     Returns ``{"closed": [...], "open": [...], "unmatched_sells": [...]}``:
 
-    * ``closed`` — fully-exited episodes: ``{symbol, entry_date, exit_date, hold_days,
-      shares, avg_entry, avg_exit, cost, proceeds, pl, pl_pct, n_fills, tagged}``
-      (``pl_pct`` is a fraction of cost, like the positions page's ``gain_pct``);
+    * ``closed`` — fully exited episodes: ``{symbol, entry_date, exit_date, hold_days,
+      shares, avg_entry, avg_exit, cost, proceeds, pl, pl_pct, n_fills, tagged}``.
+      ``pl_pct`` is a fraction of cost, like the positions page's ``gain_pct``;
     * ``open`` — episodes still holding shares: ``{symbol, entry_date, shares_open,
-      avg_entry, realized_pl, n_fills, tagged}`` — ``realized_pl`` books partial sells at
-      the episode's average cost; open episodes are EXCLUDED from the closed-trade stats;
-    * ``unmatched_sells`` — a sell fill (or the excess part of one) with no prior buy in
-      the supplied history (pre-history / transferred shares): recorded, never guessed at.
+      avg_entry, realized_pl, n_fills, tagged}``. ``realized_pl`` books partial sells at
+      the episode's average cost. Open episodes are EXCLUDED from the closed-trade stats;
+    * ``unmatched_sells`` — a sell fill, or its excess, with no prior buy in the supplied
+      history (pre-history or transferred shares). Recorded, never guessed at.
 
     ``tagged`` is True when ANY fill in the episode carries a cockpit client_order_id
-    (``SEPA_TAG_PREFIXES``) — the entry tag alone is enough, because a triggered OTO stop
-    leg exits under an Alpaca-generated id, not the parent's SEPA one.
+    (``SEPA_TAG_PREFIXES``). The entry tag alone is enough: a triggered OTO stop leg exits
+    under an Alpaca-generated id, not the parent's SEPA one.
     """
     eps = 1e-9
     by_sym: Dict[str, List[dict]] = {}
@@ -1819,12 +1768,11 @@ def journal_stats(closed: List[dict]) -> dict:
 
     Returns ``{n, wins, losses, scratches, batting_avg, avg_win_pct, avg_loss_pct,
     win_loss_ratio, expectancy_pct, total_pl, avg_hold_days_win, avg_hold_days_loss}``.
-    Percent fields are FRACTIONS (0.15 = +15%). ``batting_avg`` = wins / all closed
-    (a $0 scratch counts against the average but is neither win nor loss);
-    ``expectancy_pct`` = mean ``pl_pct`` across ALL closed trades, i.e. batting × avg win
-    + (1 − batting) × avg loss with scratches at 0 — the per-trade edge that gates
-    progressive exposure. Every ratio degrades to ``None`` (never raises) when its inputs
-    are empty, so a fresh account renders as "—" rather than a crash."""
+    Percent fields are FRACTIONS (0.15 = +15%). ``batting_avg`` = wins / all closed; a $0
+    scratch counts against the average but is neither win nor loss. ``expectancy_pct`` =
+    mean ``pl_pct`` over ALL closed trades, i.e. batting × avg win + (1 − batting) × avg
+    loss with scratches at 0. It is the per-trade edge that gates progressive exposure.
+    A ratio with empty inputs is None, never raises, so a fresh account renders "—"."""
     def _mean(xs):
         return sum(xs) / len(xs) if xs else None
 
@@ -1850,18 +1798,16 @@ def journal_stats(closed: List[dict]) -> dict:
 def suggest_risk_pct(closed: List[dict], last_n: int = RISK_GUIDE_LAST_N) -> dict:
     """Progressive-exposure risk-% suggestion from the LAST ``last_n`` closed trades. Pure.
 
-    Trades smaller after losses, earns the right to size up: batting ~.300 at the ~2:1
-    payoff the 7-8% stop discipline targets is roughly breakeven, so below that — or with
-    outright negative expectancy — the recent read is not working and the unit halves
-    (``RISK_PCT_PILOT``). Batting ≥ .500 with positive expectancy steps up ONE notch
-    (``RISK_PCT_STRONG`` — progressive exposure is stepwise, and the 10% single-order cap
-    still clamps position size). A thin sample (< ``RISK_GUIDE_MIN_TRADES``) stays at
-    ``RISK_PCT_BASE`` and never raises. ``closed`` rows come from
-    :func:`build_trade_journal`, which groups by SYMBOL — this function re-sorts by
-    ``exit_date`` so "last N" means the most recent, not an alphabetical accident.
+    Size down after losses; earn the right to size up. Batting ~.300 at the ~2:1 payoff a
+    7-8% stop targets is about breakeven. So batting under .300, or expectancy <= 0, halves
+    the unit to ``RISK_PCT_PILOT``. Batting >= .500 with positive expectancy steps up ONE
+    notch to ``RISK_PCT_STRONG``; exposure grows stepwise, and the 10% single-order cap
+    still clamps size. Under ``RISK_GUIDE_MIN_TRADES`` trades it stays at
+    ``RISK_PCT_BASE``. Rows are re-sorted by ``exit_date``, because
+    :func:`build_trade_journal` groups them by symbol.
 
-    Returns ``{risk_pct, reason, n, wins, losses, batting_avg, expectancy_pct}`` with the
-    numbers baked into ``reason`` for display at the point of sizing."""
+    Returns ``{risk_pct, reason, n, wins, losses, batting_avg, expectancy_pct}``;
+    ``reason`` carries the numbers, for display at the point of sizing."""
     recent = sorted(closed or [], key=lambda t: t["exit_date"])[-last_n:]
     s = journal_stats(recent)
     n, wins, losses = s["n"], s["wins"], s["losses"]
@@ -1883,15 +1829,13 @@ def suggest_risk_pct(closed: List[dict], last_n: int = RISK_GUIDE_LAST_N) -> dic
 
 
 def derived_stop_pct(closed: List[dict]) -> dict:
-    """The book's stop sizing from YOUR numbers: no more than half your average gain. Pure.
+    """The book's stop from your own record: half the average win, from the fill. Pure.
 
-    Over the cockpit-TAGGED closed trades (manual history is a different trader). Below
-    ``DERIVED_STOP_MIN_WINS`` wins the average is noise and ``stop_pct`` is None — the
-    7.5%-below-the-pivot default stands. Otherwise ``avg_win × DERIVED_STOP_WIN_FRACTION``,
-    clamped to ``[DERIVED_STOP_FLOOR, MAX_LOSS_FROM_FILL]``: the floor keeps a small average
-    win from putting the stop inside ordinary daily noise (HANDOFF §6.73 sets it), the cap
-    is the 10% max loss. Measured from the fill, like the max loss. Returns
-    ``{stop_pct, reason, wins, avg_win_pct}`` with the numbers baked into ``reason``."""
+    Counts cockpit-tagged closed trades only; manual history is a different trader.
+    Under ``DERIVED_STOP_MIN_WINS`` wins, ``stop_pct`` is None and the default stop
+    applies. Otherwise it is ``avg_win × DERIVED_STOP_WIN_FRACTION``, clamped to
+    ``[DERIVED_STOP_FLOOR, MAX_LOSS_FROM_FILL]``. Returns ``{stop_pct, reason, wins,
+    avg_win_pct}``; ``reason`` is a caption."""
     tagged = [t for t in (closed or []) if t.get("tagged")]
     s = journal_stats(tagged)
     wins, avg_win = s["wins"], s["avg_win_pct"]
@@ -1912,17 +1856,17 @@ def derived_stop_pct(closed: List[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Loss Adjustment Exercise (Think & Trade Like a Champion) — what tighter stops would
-# have done to YOUR closed trades.
+# Loss Adjustment Exercise (Think & Trade Like a Champion): tighter stops, replayed on
+# closed trades.
 # --------------------------------------------------------------------------- #
 LOSS_ADJUST_GRID = tuple(2.0 + 0.5 * i for i in range(17))    # stop X% below cost, 2..10
-LOSS_ADJUST_MIN_FLOOR = 3.0     # the vendored engine's "too tight" minimum stop — the
-                                # derived-stop floor rule never considers anything tighter
+LOSS_ADJUST_MIN_FLOOR = 3.0     # the engine's "too tight" minimum stop; the floor rule
+                                # MUST NOT go below it
 
 
 def _et_day(ts):
-    """A fill timestamp's exchange-time calendar date (tz-naive midnight). Alpaca fills are
-    UTC: a 15:59 ET fill is 19:59 or 20:59 UTC, and an after-hours one crosses midnight."""
+    """A fill timestamp's exchange-time date, as tz-naive midnight. Alpaca fills are UTC,
+    and an after-hours fill is already the next UTC day."""
     import pandas as pd
     t = pd.Timestamp(ts)
     if t.tzinfo is not None:
@@ -1931,12 +1875,11 @@ def _et_day(ts):
 
 
 def trade_path(trade: dict, df):
-    """The daily bars a closed trade was exposed to AFTER its entry day: dates in
-    ``(entry day, exit day]``, exchange time. The entry day itself is left out — its low may
-    have printed before the fill, so it can't say whether a stop would have fired. Returns
-    None when ``df`` is missing, lacks Open/Low, or ends before the exit day (a truncated
-    path would under-count stop-outs — the caller falls back to the book variant). A
-    same-day round trip returns an empty frame."""
+    """The daily bars a closed trade was exposed to: ``(entry day, exit day]``, exchange
+    time. The entry day is excluded because its low may predate the fill.
+
+    None when ``df`` is missing, lacks Open/Low, or ends before the exit day; a truncated
+    path would under-count stop-outs. A same-day round trip returns an empty frame."""
     import pandas as pd
     if df is None or not len(df) or not {"Open", "Low"}.issubset(df.columns):
         return None
@@ -1954,11 +1897,11 @@ def trade_path(trade: dict, df):
 
 
 def _stopped_return(r: float, path, x: float, avg_entry: float) -> float:
-    """A closed trade's return had a stop sat ``x`` (fraction) below its average cost. The
-    first bar whose low reaches the stop exits at ``min(open, stop)`` — a gap below the
-    stop fills at the open, the backtest's fill rule. The exit day counts only when the real
-    exit went through the stop level (``r < -x``): a stop the trade never crossed before it
-    ended could not have fired. No hit → the actual return."""
+    """A closed trade's return with a stop ``x`` (fraction) below its average cost.
+
+    The first bar whose low reaches the stop exits at ``min(open, stop)``: a gap fills at
+    the open, as in the backtest. The exit day counts only when the real exit went through
+    the stop (``r < -x``). With no hit, the actual return, floored at ``-x``."""
     stop_r = -x
     last = len(path) - 1
     for i, (o, lo) in enumerate(zip(path["Open"], path["Low"])):
@@ -1972,23 +1915,21 @@ def _stopped_return(r: float, path, x: float, avg_entry: float) -> float:
 def loss_adjustment_sweep(closed: List[dict], xs: Sequence[float] = LOSS_ADJUST_GRID,
                           frames: Optional[Dict[str, object]] = None) -> dict:
     """Minervini's Loss Adjustment Exercise over :func:`build_trade_journal` closed trades.
-    Pure — ``frames`` ({symbol: daily OHLC}) are passed in.
+    Pure; ``frames`` is ``{symbol: daily OHLC}``.
 
-    For each stop distance ``x`` (percent below the average cost):
+    For each stop ``x`` (percent below the average cost):
 
-    * **book** — the book's version: every loss bigger than ``x`` is cut to ``-x``, wins
-      unchanged. It can only help, so it is an upper bound.
-    * **price-aware** — the same stop replayed on the trade's own bars
-      (:func:`trade_path`): it also shakes you out of a WINNER that dipped ``x`` first.
-      A trade with no usable bars falls back to its book value; ``n_price_aware`` says how
-      many were replayed.
+    * **book**: every loss bigger than ``x`` is cut to ``-x``; wins are unchanged. It can
+      only help, so it is an upper bound.
+    * **price-aware**: the stop replayed on the trade's bars (:func:`trade_path`). It also
+      stops out a winner that dipped ``x`` first. A trade without usable bars keeps its
+      book value; ``n_price_aware`` counts the replayed ones.
 
-    Totals compound each trade's return in exit order, as if each used the whole account —
-    a comparison between stop choices, not an account curve. ``winners_stopped`` counts the
-    winners the price-aware stop turned into losses: the cost of a tighter stop that the
-    book variant hides. Returns ``{n, wins, wins_price_aware, n_price_aware, actual_total,
-    actual_expectancy, rows: [{x, book_total, aware_total, book_expectancy,
-    aware_expectancy, winners_stopped}]}``."""
+    Totals compound returns in exit order, as if each trade used the whole account. They
+    compare stops; they are not an account curve. ``winners_stopped`` counts winners the
+    price-aware stop turned into losses. Returns ``{n, wins, wins_price_aware,
+    n_price_aware, actual_total, actual_expectancy, rows: [{x, book_total, aware_total,
+    book_expectancy, aware_expectancy, winners_stopped}]}``."""
     trades = sorted(closed or [], key=lambda t: t["exit_date"])
     frames = frames or {}
     paths = [trade_path(t, frames.get(t["symbol"])) for t in trades]
@@ -2025,11 +1966,11 @@ def loss_adjustment_sweep(closed: List[dict], xs: Sequence[float] = LOSS_ADJUST_
 
 def stop_floor_from_sweep(sweep: dict,
                           min_x: float = LOSS_ADJUST_MIN_FLOOR) -> Optional[float]:
-    """The derived stop's floor by the rule PRE-REGISTERED in HANDOFF §6.73, as a fraction:
-    the smallest grid stop ``x >= min_x`` at which the price-aware sweep turns NO closed
-    winner into a loss. None when no winner has price history to judge — the caller then
-    keeps ``DEFAULT_STOP_FROM_PIVOT``. Never the ``x`` that maximises return: with a
-    handful of trades that is a fit to noise (HANDOFF §2)."""
+    """The derived stop's floor, as a fraction, by the rule pre-registered in HANDOFF
+    §6.73: the smallest grid ``x >= min_x`` at which no closed winner becomes a loss.
+
+    None when no winner has price history. The floor MUST NOT be the return-maximising
+    ``x``: on a handful of trades that fits noise (HANDOFF §2)."""
     if not sweep or not sweep.get("wins_price_aware"):
         return None
     for row in sorted(sweep.get("rows") or [], key=lambda r: r["x"]):
@@ -2039,16 +1980,17 @@ def stop_floor_from_sweep(sweep: dict,
 
 
 def fetch_order_fills() -> dict:
-    """Pull the cockpit account's FULL closed-order history from Alpaca and normalize the
-    filled ones into the fill dicts :func:`build_trade_journal` consumes.
+    """The cockpit account's closed-order history as the fill dicts
+    :func:`build_trade_journal` consumes: ``{symbol, side, qty, price, time, order_id,
+    client_order_id}``.
 
-    Pages backwards through ``GetOrdersRequest(status=CLOSED)`` using ``until`` = the
-    oldest ``submitted_at`` seen (Alpaca's ``until`` is exclusive, so pages don't overlap;
-    orders are deduped by id anyway as cheap insurance). Orders that never filled
-    (cancelled/expired, ``filled_qty`` 0) are dropped; partial fills are kept at their
-    ``filled_qty`` × ``filled_avg_price``. Returns ``{"account": {account_number, equity,
-    cash, using_dedicated}, "fills": [...]}`` with fills sorted oldest-first. Raises
-    :class:`TradeUnavailable` on missing package/credentials."""
+    Pages back through ``GetOrdersRequest(status=CLOSED)`` with ``until`` = the oldest
+    ``submitted_at`` seen, for at most ``_MAX_ORDER_PAGES`` pages. Alpaca's ``until`` is
+    exclusive, so pages don't overlap; orders are deduped by id anyway. Orders that never
+    filled are dropped; a partial fill counts at ``filled_qty`` × ``filled_avg_price``.
+    Returns ``{"account": {account_number, equity, cash, using_dedicated}, "fills":
+    [...]}``, fills oldest first. Raises :class:`TradeUnavailable` on missing
+    package/credentials."""
     client, using_dedicated = _connect_paper()
     try:
         from alpaca.trading.requests import GetOrdersRequest

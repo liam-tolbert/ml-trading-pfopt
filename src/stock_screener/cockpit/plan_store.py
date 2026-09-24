@@ -1,15 +1,13 @@
-"""Shared storage for the dated entry/sell plans — the mechanics both planners repeat.
+"""Shared storage for the dated entry and sell plans.
 
-``entries.py`` and ``sells.py`` are deliberate mirrors of each other (arm a buy for the
-next open / plan an exit for the next open), and their *storage* halves had been copied
-verbatim: same day-file naming, same atomic write, same newest-first loader, same env
-gate. The copies had already begun to drift — only one of them cleaned up its temp file
-on a failed write — which is the failure mode this module exists to end. The trading
-logic stays in the two callers, where the rules genuinely differ.
+``entries.py`` and ``sells.py`` mirror each other: one arms buys for the next open, the
+other plans exits for it. Their storage MUST live here once: the day-file naming, the
+atomic write, the newest-first loader and the env gate. Copies drift. The trading logic
+stays in the two callers, where the rules differ.
 
-Both plan kinds live in ``cache.TRIGGERS_DIR`` beside the trigger reports, and
-``cache.TRIGGERS_DIR`` is read at CALL time, never captured at import: the test suite
-patches it to keep AppTests away from real state.
+Both plan kinds live in ``cache.TRIGGERS_DIR`` beside the trigger reports. It MUST be
+read at call time, never captured at import: the test suite patches it to keep AppTests
+away from real state.
 """
 from __future__ import annotations
 
@@ -24,15 +22,15 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 
 def env_enabled(name: str, env: Optional[dict] = None) -> bool:
-    """Is this automation armed? Both executors ship dark and stay off until the env
-    var is set, so the default answer must be False for anything unparseable."""
+    """True when env var ``name`` is truthy (1/true/yes/on). Both executors ship dark, so
+    anything unset or unparseable MUST read False."""
     e = os.environ if env is None else env
     return str(e.get(name, "")).strip().lower() in _TRUTHY
 
 
 def today_iso(today=None) -> str:
-    """ET calendar date as ISO. Plans are named and aged by TRADING day, so the date has
-    to come from the market's clock, not the host's."""
+    """Today's ET calendar date as ISO, or ``today``'s date when given. Plans are named and
+    aged by trading day, so the date MUST come from the market's clock, not the host's."""
     import pandas as pd
     if today is None:
         t = pd.Timestamp.now(tz="America/New_York").normalize().tz_localize(None)
@@ -47,13 +45,12 @@ def plan_path(prefix: str, date_iso: str, dir_path=None) -> Path:
 
 
 def save_plan(prefix: str, plan: dict, dir_path=None) -> Path:
-    """Atomic write (tmp + ``os.replace``).
+    """Write ``plan`` to its day-file atomically (tmp + ``os.replace``); returns the path.
 
-    The building CLI, a page's disarm/veto click and the morning executor are three
-    separate processes writing one day-file; an in-place truncate-write can interleave
-    into JSON the loader then silently skips, which would look exactly like "no plan
-    today" — a silently missed exit. The ``finally`` matters as much: a failed
-    serialization used to leave a stray ``.tmp`` behind in the trigger directory."""
+    Three processes write one day-file: the building CLI, a page's disarm/veto click and
+    the morning executor. An in-place write can interleave into JSON the loader skips,
+    which reads as "no plan today": a silently missed exit. The ``finally`` removes the
+    temp file when serialization fails; the error still propagates."""
     path = plan_path(prefix, plan["date"], dir_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -71,12 +68,13 @@ def save_plan(prefix: str, plan: dict, dir_path=None) -> Path:
 
 def load_latest_plan(prefix: str, dir_path=None, *,
                      before: Optional[str] = None) -> Optional[dict]:
-    """Newest parseable ``<prefix>_*.json``, or None. ``before`` (ISO date) skips plans
-    dated >= it, which is how the evening sell planner reads YESTERDAY's snapshot for the
-    P2 streak instead of its own earlier output on a same-day rerun.
+    """The newest parseable ``<prefix>_*.json`` holding a dict, or None.
 
-    Never raises: one corrupt file must not blind the executor, so the walk continues
-    newest-first past anything unreadable."""
+    ``before`` (ISO date) skips plans dated on or after it. The evening sell planner uses
+    it to read an earlier day's plan for the P2 streak, not its own same-day output.
+
+    Never raises. The walk skips anything unreadable, so one corrupt file can't blind the
+    executor."""
     try:
         d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
         for path in sorted(d.glob(f"{prefix}_*.json"), reverse=True):
@@ -96,10 +94,11 @@ def load_latest_plan(prefix: str, dir_path=None, *,
 
 def flip_status(plan: dict, *, items_key: str, id_key: str, ident: str,
                 from_status: str, to_status: str) -> bool:
-    """Move one row's status in place; True if anything changed.
+    """Move the ``ident`` row from ``from_status`` to ``to_status`` in place; True if
+    anything changed.
 
-    The overnight veto/disarm. Guarded on ``from_status`` so a click can only ever
-    cancel something still pending — never resurrect a submitted or failed row."""
+    This is the overnight veto or disarm. Only a row still in ``from_status`` moves, so a
+    click can cancel a pending row but never resurrect a submitted or failed one."""
     changed = False
     for item in plan.get(items_key, []):
         if item.get(id_key) == ident and item.get("status") == from_status:
