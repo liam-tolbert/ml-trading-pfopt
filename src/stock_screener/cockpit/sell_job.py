@@ -58,9 +58,9 @@ def _positions_and_pillars(today=None):
 
 
 def _market(spy_note) -> dict:
-    """The plan's market read: the trigger report's SPY note (the 16:10 run's settled
-    close — fresher than the day-old scan) and the re-entry streak off CACHED SPY bars
-    (the 16:10 refresh tops SPY up; this job never downloads)."""
+    """The plan's market read: the trigger report's SPY note and the re-entry streak.
+    The note is the 16:10 settled close, fresher than the scan. The streak MUST read
+    cached bars only: this job never downloads."""
     streak = None
     try:
         from src.stock_screener.cockpit import advisories, data_feed

@@ -316,23 +316,21 @@ def stop_is_valid(stop_price, price) -> bool:
 
 
 def stop_below_fill(fill, pct) -> float:
-    """A stop ``pct`` (fraction) below ``fill``, rounded UP to the cent — rounding down would
-    let the builder emit a stop its own guard (:func:`stop_within_max_loss`) then refuses.
-    The inner ``round`` absorbs float noise (42 × 0.9 × 100 = 3780.0000000000005 must not
-    ceil to 3781)."""
+    """A stop ``pct`` (fraction) below ``fill``, rounded UP to the cent.
+
+    Rounding down could emit a stop that :func:`stop_within_max_loss` refuses. The inner
+    ``round`` strips float noise: 42 × 0.9 × 100 is 3780.0000000000005."""
     return math.ceil(round(float(fill) * (1.0 - float(pct)) * 100.0, 6)) / 100.0
 
 
 def fill_floor(fill) -> float:
-    """The lowest stop the max-loss rule allows for a buy that fills at ``fill``:
-    ``MAX_LOSS_FROM_FILL`` below it, to the cent (see :func:`stop_below_fill`)."""
+    """The lowest stop the max loss allows for a fill at ``fill``."""
     return stop_below_fill(fill, MAX_LOSS_FROM_FILL)
 
 
 def stop_within_max_loss(stop, fill) -> bool:
-    """True when a stop at ``stop`` loses no more than ``MAX_LOSS_FROM_FILL`` of a buy filled
-    at ``fill`` (Minervini: never more than 10% below the price you pay). Missing inputs read
-    False — the callers only ask about a real stop on a real fill."""
+    """True when ``stop`` loses at most ``MAX_LOSS_FROM_FILL`` of a buy filled at ``fill``.
+    Missing inputs read False."""
     try:
         s, f = float(stop), float(fill)
     except (TypeError, ValueError):
@@ -348,7 +346,7 @@ def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
     """Minervini stop suggestion for a held position under a chosen ``basis``.
 
     Basis levels: ``initial`` = ``avg_entry × (1 - INITIAL_STOP_PCT)`` (~8% below entry;
-    ``initial_pct`` replaces the 8% — the derived stop, :func:`derived_stop_pct`, once active);
+    ``initial_pct`` overrides the 8%, e.g. with :func:`derived_stop_pct`);
     ``breakeven`` = ``avg_entry``; ``sma50`` = ``sma_50 × 0.99`` (just under the 50-day). ``auto``
     picks by gain (the position's stage): well in profit (``gain_pct >= TRAIL_GAIN``) with a 50-day
     available → trail the SMA; working (``gain_pct >= BREAKEVEN_GAIN``) → at least breakeven; else
@@ -406,17 +404,18 @@ def r_multiple(avg_entry, current_price, pivot=None, current_stop=None,
                stop_pct=None) -> Tuple[Optional[float], bool]:
     """The position's gain as a multiple of its reconstructed initial risk. Pure.
 
-    The entry-time stop is not persisted anywhere, so risk is reconstructed from the levels
-    the plan builder could have attached for a frozen ``pivot``: the pivot-derived stop
-    (``pivot × (1 - DEFAULT_STOP_FROM_PIVOT)``) raised to the max-loss floor of a market
-    fill (~the entry) or of a zone-top limit (``pivot × (1 + NO_CHASE_PCT)``), plus the
-    bare pivot-derived stop that entries before the floor carried. With the derived stop
-    active (``stop_pct``, :func:`derived_stop_pct`) the same two fills at ``stop_pct`` come
-    first. When the in-force ``current_stop`` is one of them (to the cent) that is the stop
-    the OTO attached — exact, ``approximate=False``. Otherwise (the stop has been ratcheted,
-    or none is readable) the first candidate is the estimate, ``approximate=True``; no usable
-    pivot falls back to ``stop_pct`` (else ``INITIAL_STOP_PCT``) off the entry, also
-    approximate. Returns ``(r, approximate)``; ``(None, True)`` on missing/degenerate inputs."""
+    The entry stop isn't stored, so it is rebuilt from the stops the plan builder could
+    have attached for a frozen ``pivot``. Candidates, in order:
+
+    * with ``stop_pct``: ``stop_pct`` below a market fill (≈ the entry) and below a
+      zone-top limit, each raised to the pivot default;
+    * the pivot default raised to the max-loss floor of those same two fills;
+    * the bare pivot default, which older entries carry.
+
+    A candidate within a cent of ``current_stop`` is exact (``approximate=False``).
+    Otherwise the first candidate is an estimate. With no usable pivot, risk is
+    ``stop_pct`` (else ``INITIAL_STOP_PCT``) off the entry. Returns ``(r, approximate)``;
+    ``(None, True)`` on missing or degenerate inputs."""
     try:
         e, c = float(avg_entry), float(current_price)
     except (TypeError, ValueError):
@@ -468,8 +467,7 @@ def position_advisories(pos: dict) -> List[str]:
         out.append("⚠ No protective stop armed — arm one.")
     elif (cur_stop and avg_entry and cur_stop < avg_entry
             and not stop_within_max_loss(cur_stop, avg_entry)):
-        # A market buy that gapped up at the open fills above the price its stop was set
-        # for; the plan builder can only floor the stop for the fill it expects.
+        # A gap-up market fill lands above the price the plan floored the stop for.
         out.append(f"⚠ Stop {(1 - cur_stop / avg_entry) * 100:.1f}% below your cost "
                    f"(max {MAX_LOSS_FROM_FILL * 100:.0f}%) — raise it to ≥ "
                    f"${fill_floor(avg_entry):,.2f}.")
@@ -530,8 +528,8 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
       close below the breakout bar's low fail outright; a stalled clock warns at day
       ``P1_CUSHION_DAYS`` without a ``P1_CUSHION_PCT`` cushion and fails flat-to-red at
       day ``P1_STALL_DAYS``. Post-breakout violations
-      (:func:`advisories.post_breakout_read` — the 20-day line and the rest) warn; with
-      ``doctrine.VIOLATIONS_CAN_FAIL`` on, ``VIOLATION_FAIL_COUNT`` of them fail.
+      (:func:`advisories.post_breakout_read`) warn. With ``doctrine.VIOLATIONS_CAN_FAIL``
+      on, ``VIOLATION_FAIL_COUNT`` of them fail.
     * P2 template — STRICT: anything under 8/8 fails (user decision; expect occasional
       one-day red flips when a knife-edge SMA criterion wobbles).
     * P3 tape — the scan regime dict when available, else the trigger report's SPY-only
@@ -596,8 +594,6 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                 elif day_n >= P1_CUSHION_DAYS and gain < P1_CUSHION_PCT:
                     warns.append(f"day {day_n}, no {P1_CUSHION_PCT * 100:.0f}% cushion "
                                  "— sell into strength")
-            # Post-breakout violations (the 20-day line, heavy selling, lower lows, a gain
-            # given back). Warnings unless the doctrine switch promotes a cluster to a fail.
             if df is not None and len(df):
                 from . import advisories, doctrine
                 read = advisories.post_breakout_read(
@@ -731,20 +727,16 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     kept). Each plan entry carries ``pivot_frozen`` (True when its pivot came from ``pivots``).
     Omit ``pivots`` and every name uses its scan-derived levels as before.
 
-    **Max loss from the fill.** For a name NOT held, the stop is then raised to
-    :func:`fill_floor` of the worst-case fill (the limit for a limit plan, the last price for
-    a market plan): Minervini's 10% maximum is measured from the price paid, and a
-    pivot-based stop under a fill near the top of the zone would otherwise risk up to 14.3%.
-    Paying more therefore buys a TIGHTER stop. A raised stop at/above the current price
-    (a limit far above a name still under its pivot) skips the name. Held names are exempt —
-    their stop is a re-arm target, and raising it there would silently start a trailing stop.
-    A name with no stop at all is left without one (submit refuses it with the stop attached).
+    **Max loss from the fill.** A non-held name's stop is raised to :func:`fill_floor` of
+    its worst-case fill: the limit, or the last price for a market plan. Paying more
+    therefore buys a tighter stop. A raised stop at or above the current price skips the
+    name. Held names are exempt: their stop is a re-arm target, and raising it would start
+    a trailing stop unasked. A name with no stop keeps none; submit refuses it when the
+    stop is attached. ``stop_floored`` marks rows where the floor bound.
 
-    ``stop_pct`` (the derived stop, :func:`derived_stop_pct`; None = off) puts a non-held
-    buy's stop that fraction below the same worst-case fill — half the trader's average
-    win, the book's sizing once there are numbers. A TIGHTER stop already on the name (the
-    pivot default or engine support) is kept; ``stop_derived`` marks rows where it bound.
-    None leaves every existing behavior unchanged.
+    ``stop_pct`` (:func:`derived_stop_pct`; None = off) puts a non-held stop that fraction
+    below the same worst-case fill. A tighter existing stop is kept. ``stop_derived`` marks
+    rows where the derived stop bound.
 
     ``held`` (optional ``{ticker: shares}``) closes the build-time stop gap: a HELD
     name whose buy fails a sizing gate (rounds < 1 share, or under the $50 floor) is
@@ -831,9 +823,8 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             limit = float(buy_hi) if buy_hi and buy_hi > 0 else price
             basis = limit
 
-        # Max loss is measured from the price paid: raise a buy's stop to 10% below its
-        # worst-case fill — or to the derived stop, when active. The OTO stop is fixed at
-        # submit, so a limit order carries the level for its LIMIT even if it fills lower.
+        # The OTO stop is fixed at submit, so a limit order MUST carry the stop for its
+        # limit, even if it fills lower.
         stop_floored = stop_derived = False
         if not (held and held.get(t, 0) > 0):
             if stop_pct:
@@ -913,7 +904,6 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "stop_derived": stop_derived,
             "limit_price": round(limit, 2) if limit else None,
             "earnings_in": payload.get("earnings_in"),
-            # the name's typical day (%), so the panel can judge the stop against noise
             "day_range_pct": (payload.get("vcp") or {}).get("median_tr_pct"),
         })
     return plan, skipped
@@ -1211,9 +1201,9 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       the close. Stop validity is checked against the worst-case fill. No ``limit_price``
       → the market behavior above, unchanged.
 
-      With ``attach_stop``, a buy whose stop sits more than ``MAX_LOSS_FROM_FILL`` below its
-      highest possible fill (the limit, else the last price) is skipped — the same rule
-      :func:`build_buy_plan` applies, re-checked because both levels are editable.
+      With ``attach_stop``, a buy whose stop is more than ``MAX_LOSS_FROM_FILL`` below its
+      highest possible fill (the limit, else the last price) is skipped. The stop and the
+      limit are editable after Build, so this MUST re-check what the builder applied.
 
       **Build-time intent is binding:** an entry stamped ``rearm_only`` (held when the plan
       was built — the preview showed it with no checkbox and "no buy") or ``stop_only``
@@ -1330,9 +1320,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
                     continue
-                # ...and the max loss binds on the HIGHEST fill: the limit, or the price.
-                # Re-checked here because the stop and the limit are both editable after
-                # Build, and the unattended entry executor submits through this path too.
+                # ...and the max loss binds on the HIGHEST fill. The unattended entry
+                # executor submits through here too.
                 _paid = limit if limit else o["price"]
                 if not stop_within_max_loss(stop, _paid):
                     results.append({**o, "status": "skipped",
@@ -1883,15 +1872,13 @@ def suggest_risk_pct(closed: List[dict], last_n: int = RISK_GUIDE_LAST_N) -> dic
 
 
 def derived_stop_pct(closed: List[dict]) -> dict:
-    """The book's stop sizing from YOUR numbers: no more than half your average gain. Pure.
+    """The book's stop from your own record: half the average win, from the fill. Pure.
 
-    Over the cockpit-TAGGED closed trades (manual history is a different trader). Below
-    ``DERIVED_STOP_MIN_WINS`` wins the average is noise and ``stop_pct`` is None — the
-    7.5%-below-the-pivot default stands. Otherwise ``avg_win × DERIVED_STOP_WIN_FRACTION``,
-    clamped to ``[DERIVED_STOP_FLOOR, MAX_LOSS_FROM_FILL]``: the floor keeps a small average
-    win from putting the stop inside ordinary daily noise (HANDOFF §6.73 sets it), the cap
-    is the 10% max loss. Measured from the fill, like the max loss. Returns
-    ``{stop_pct, reason, wins, avg_win_pct}`` with the numbers baked into ``reason``."""
+    Counts cockpit-tagged closed trades only; manual history is a different trader.
+    Under ``DERIVED_STOP_MIN_WINS`` wins, ``stop_pct`` is None and the default stop
+    applies. Otherwise it is ``avg_win × DERIVED_STOP_WIN_FRACTION``, clamped to
+    ``[DERIVED_STOP_FLOOR, MAX_LOSS_FROM_FILL]``. Returns ``{stop_pct, reason, wins,
+    avg_win_pct}``; ``reason`` is a caption."""
     tagged = [t for t in (closed or []) if t.get("tagged")]
     s = journal_stats(tagged)
     wins, avg_win = s["wins"], s["avg_win_pct"]
@@ -1912,17 +1899,17 @@ def derived_stop_pct(closed: List[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Loss Adjustment Exercise (Think & Trade Like a Champion) — what tighter stops would
-# have done to YOUR closed trades.
+# Loss Adjustment Exercise (Think & Trade Like a Champion): tighter stops, replayed on
+# closed trades.
 # --------------------------------------------------------------------------- #
 LOSS_ADJUST_GRID = tuple(2.0 + 0.5 * i for i in range(17))    # stop X% below cost, 2..10
-LOSS_ADJUST_MIN_FLOOR = 3.0     # the vendored engine's "too tight" minimum stop — the
-                                # derived-stop floor rule never considers anything tighter
+LOSS_ADJUST_MIN_FLOOR = 3.0     # the engine's "too tight" minimum stop; the floor rule
+                                # MUST NOT go below it
 
 
 def _et_day(ts):
-    """A fill timestamp's exchange-time calendar date (tz-naive midnight). Alpaca fills are
-    UTC: a 15:59 ET fill is 19:59 or 20:59 UTC, and an after-hours one crosses midnight."""
+    """A fill timestamp's exchange-time date, as tz-naive midnight. Alpaca fills are UTC,
+    and an after-hours fill is already the next UTC day."""
     import pandas as pd
     t = pd.Timestamp(ts)
     if t.tzinfo is not None:
@@ -1931,12 +1918,11 @@ def _et_day(ts):
 
 
 def trade_path(trade: dict, df):
-    """The daily bars a closed trade was exposed to AFTER its entry day: dates in
-    ``(entry day, exit day]``, exchange time. The entry day itself is left out — its low may
-    have printed before the fill, so it can't say whether a stop would have fired. Returns
-    None when ``df`` is missing, lacks Open/Low, or ends before the exit day (a truncated
-    path would under-count stop-outs — the caller falls back to the book variant). A
-    same-day round trip returns an empty frame."""
+    """The daily bars a closed trade was exposed to: ``(entry day, exit day]``, exchange
+    time. The entry day is excluded because its low may predate the fill.
+
+    None when ``df`` is missing, lacks Open/Low, or ends before the exit day; a truncated
+    path would under-count stop-outs. A same-day round trip returns an empty frame."""
     import pandas as pd
     if df is None or not len(df) or not {"Open", "Low"}.issubset(df.columns):
         return None
@@ -1954,11 +1940,11 @@ def trade_path(trade: dict, df):
 
 
 def _stopped_return(r: float, path, x: float, avg_entry: float) -> float:
-    """A closed trade's return had a stop sat ``x`` (fraction) below its average cost. The
-    first bar whose low reaches the stop exits at ``min(open, stop)`` — a gap below the
-    stop fills at the open, the backtest's fill rule. The exit day counts only when the real
-    exit went through the stop level (``r < -x``): a stop the trade never crossed before it
-    ended could not have fired. No hit → the actual return."""
+    """A closed trade's return with a stop ``x`` (fraction) below its average cost.
+
+    The first bar whose low reaches the stop exits at ``min(open, stop)``: a gap fills at
+    the open, as in the backtest. The exit day counts only when the real exit went through
+    the stop (``r < -x``). With no hit, the actual return, floored at ``-x``."""
     stop_r = -x
     last = len(path) - 1
     for i, (o, lo) in enumerate(zip(path["Open"], path["Low"])):
@@ -1972,23 +1958,21 @@ def _stopped_return(r: float, path, x: float, avg_entry: float) -> float:
 def loss_adjustment_sweep(closed: List[dict], xs: Sequence[float] = LOSS_ADJUST_GRID,
                           frames: Optional[Dict[str, object]] = None) -> dict:
     """Minervini's Loss Adjustment Exercise over :func:`build_trade_journal` closed trades.
-    Pure — ``frames`` ({symbol: daily OHLC}) are passed in.
+    Pure; ``frames`` is ``{symbol: daily OHLC}``.
 
-    For each stop distance ``x`` (percent below the average cost):
+    For each stop ``x`` (percent below the average cost):
 
-    * **book** — the book's version: every loss bigger than ``x`` is cut to ``-x``, wins
-      unchanged. It can only help, so it is an upper bound.
-    * **price-aware** — the same stop replayed on the trade's own bars
-      (:func:`trade_path`): it also shakes you out of a WINNER that dipped ``x`` first.
-      A trade with no usable bars falls back to its book value; ``n_price_aware`` says how
-      many were replayed.
+    * **book**: every loss bigger than ``x`` is cut to ``-x``; wins are unchanged. It can
+      only help, so it is an upper bound.
+    * **price-aware**: the stop replayed on the trade's bars (:func:`trade_path`). It also
+      stops out a winner that dipped ``x`` first. A trade without usable bars keeps its
+      book value; ``n_price_aware`` counts the replayed ones.
 
-    Totals compound each trade's return in exit order, as if each used the whole account —
-    a comparison between stop choices, not an account curve. ``winners_stopped`` counts the
-    winners the price-aware stop turned into losses: the cost of a tighter stop that the
-    book variant hides. Returns ``{n, wins, wins_price_aware, n_price_aware, actual_total,
-    actual_expectancy, rows: [{x, book_total, aware_total, book_expectancy,
-    aware_expectancy, winners_stopped}]}``."""
+    Totals compound returns in exit order, as if each trade used the whole account. They
+    compare stops; they are not an account curve. ``winners_stopped`` counts winners the
+    price-aware stop turned into losses. Returns ``{n, wins, wins_price_aware,
+    n_price_aware, actual_total, actual_expectancy, rows: [{x, book_total, aware_total,
+    book_expectancy, aware_expectancy, winners_stopped}]}``."""
     trades = sorted(closed or [], key=lambda t: t["exit_date"])
     frames = frames or {}
     paths = [trade_path(t, frames.get(t["symbol"])) for t in trades]
@@ -2025,11 +2009,11 @@ def loss_adjustment_sweep(closed: List[dict], xs: Sequence[float] = LOSS_ADJUST_
 
 def stop_floor_from_sweep(sweep: dict,
                           min_x: float = LOSS_ADJUST_MIN_FLOOR) -> Optional[float]:
-    """The derived stop's floor by the rule PRE-REGISTERED in HANDOFF §6.73, as a fraction:
-    the smallest grid stop ``x >= min_x`` at which the price-aware sweep turns NO closed
-    winner into a loss. None when no winner has price history to judge — the caller then
-    keeps ``DEFAULT_STOP_FROM_PIVOT``. Never the ``x`` that maximises return: with a
-    handful of trades that is a fit to noise (HANDOFF §2)."""
+    """The derived stop's floor, as a fraction, by the rule pre-registered in HANDOFF
+    §6.73: the smallest grid ``x >= min_x`` at which no closed winner becomes a loss.
+
+    None when no winner has price history. The floor MUST NOT be the return-maximising
+    ``x``: on a handful of trades that fits noise (HANDOFF §2)."""
     if not sweep or not sweep.get("wins_price_aware"):
         return None
     for row in sorted(sweep.get("rows") or [], key=lambda r: r["x"]):

@@ -355,9 +355,9 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     ``contractions`` with number/peak_date/trough_date/peak_price/trough_price/
     drawdown_pct/volume_ratio/duration_days, ``contraction_count`` …) plus the review
     ``tier`` ('A'/'B'/'C'), ``zz_threshold`` and ``median_tr_pct`` (the median daily
-    true range over the last ``DEAD_TAPE_BARS``, in percent — the name's typical day;
-    None with too little data). (The pivot is computed internally for the buy-zone/extended
-    tier split but not exported; see ``_detect_at``.)
+    true range over the last ``DEAD_TAPE_BARS``, in percent; None with too little data).
+    (The pivot is computed internally for the buy-zone/extended tier split but not
+    exported; see ``_detect_at``.)
 
     ``thr`` is the ZigZag reversal size. Leave it ``None`` (default) to run at up to four
     thresholds — long-history, recent-window (~2 months), an extra-tight 0.7× recent, and
@@ -369,9 +369,7 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
 
     base = price_data.tail(min(len(price_data), LOOKBACK_BARS))
 
-    # Median daily true-range% over the last DEAD_TAPE_BARS: the dead-tape gate below, and
-    # exported as the name's "typical day" so a stop can be judged against ordinary noise.
-    # Computed on every path; only the adaptive path gates on it.
+    # Exported on every path as the typical day. Only the adaptive path gates on it.
     _tr = true_range_pct(base).tail(DEAD_TAPE_BARS).to_numpy()
     med_tr = float(np.nanmedian(_tr)) if np.isfinite(_tr).any() else float('nan')
     med_tr_pct = round(med_tr * 100.0, 2) if np.isfinite(med_tr) else None

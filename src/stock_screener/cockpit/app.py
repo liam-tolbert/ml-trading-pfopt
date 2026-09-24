@@ -251,8 +251,7 @@ def _earnings_flag(days) -> str:
 
 
 def _regime_color(regime) -> str:
-    """Strong/moderate Risk-On -> green, Risk-Off -> red, anything else (weak, mixed,
-    transitional, unknown) -> orange. By label prefix: "TRANSITIONAL" contains "on"."""
+    """Strong/moderate Risk-On -> green, Risk-Off -> red, anything else -> orange."""
     return {"strong": "green", "off": "red"}.get(advisories.regime_tier(regime), "orange")
 
 
@@ -727,12 +726,10 @@ with st.sidebar:
             st.caption(":orange[**⚠︎ CAUTION tape** — the market regime advises against "
                        "NEW buys (most breakouts fail in a weak tape). Managing stops is "
                        "fine; think twice before submitting fresh entries.]")
-        # What the book changes in a weak tape, beside the plan's own numbers (advice only).
         _weak = advisories.weak_market_advice(res.regime, stop_pct=DEFAULT_STOP_FROM_PIVOT,
                                               target_pct=0.25)
         if _weak:
             st.caption(f":orange[{_weak}]")
-        # The backtest's re-entry lag: after SPY leaves Stage 4, wait before adding.
         _stk = res.regime.get("spy_ok_streak")
         if _stk is not None and not res.regime.get("spy_ok_satisfied"):
             st.caption(f":orange[SPY has been in Stage 1–2 for only **{_stk}/"
@@ -832,8 +829,7 @@ with st.sidebar:
                 _gi = fetch_gate_inputs()
                 _gate = gate_status(_gi["positions"], _gi["open_episodes"],
                                     _gi["closed_episodes"])
-                # The derived stop (½ the average win) off the SAME journal read — no
-                # extra Alpaca call. Unknown journal → the default stop, said so below.
+                # Same journal read as the gate: no extra Alpaca call.
                 _derived = trade.derived_stop_pct(_gi["closed_episodes"])
             except Exception:
                 _gate = {"open": None,
@@ -990,8 +986,7 @@ with st.sidebar:
                         _cB.caption(":red[stop must be below both limit and price]"
                                     if _is_lim else ":red[stop must be < price]")
                     elif _attach and not stop_within_max_loss(_edstop, _paid):
-                        # Max loss binds on the HIGHEST fill (the limit, else the price);
-                        # submit and arming refuse the row, so say so before the click.
+                        # Submit and arming refuse this row; say so before the click.
                         _cB.caption(f":red[> {MAX_LOSS_FROM_FILL * 100:.0f}% below the "
                                     f"{'limit' if _is_lim else 'price'} — raise to ≥ "
                                     f"{fill_floor(_paid):,.2f}]")
@@ -1344,7 +1339,7 @@ table_box.caption(f"Showing {len(view)} of {len(cand)} — click a row to chart 
 with table_box:
     col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c), help=COL_HELP.get(c))
                   for c in view.columns}
-    # Only columns the frame has: a scan persisted before a column existed still renders.
+    # A scan persisted before a column existed MAY lack it.
     event = st.dataframe(view, width="stretch", hide_index=True, height=380,
                          column_config=col_config,
                          column_order=[c for c in DISPLAY_ORDER if c in view.columns],
@@ -1536,9 +1531,6 @@ with st.container(border=True):
         _mark = "✅" if spp <= 8.0 + 1e-9 else "⚠️"
         st.caption(f"{_mark} Risk pivot → stop: **{spp:.1f}%** "
                    f"(Minervini: 7–8% ideal, 10% hard max){_clamp}")
-    # The 10% max is from the price PAID: past this fill the stop above loses more than
-    # 10%, so a trade plan raises it (a tighter stop, never a wider loss).
-    # Stop vs this stock's ordinary daily movement, from the buy point.
     _dr = (payload.get("vcp") or {}).get("median_tr_pct")
     _room = advisories.stop_room((_dr or 0) / 100.0, lv.get("stop"), lv.get("pivot"))
     if _room:

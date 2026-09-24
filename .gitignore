@@ -12,6 +12,7 @@ src/data/
 *.log
 *.bat
 !HANDOFF.md
+!/CLAUDE.md
 !deploy/**
 !src/stock_screener/minervini_sepa_system.md
 !src/stock_screener/minervini_screener/PROVENANCE.md

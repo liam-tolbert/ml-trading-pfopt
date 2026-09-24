@@ -57,16 +57,16 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
 
     Every position gets a snapshot row (tomorrow's streak needs today's statuses even
     for names with no order). Unknown pillars never trade — missing data is not a
-    signal. Pillar orders are FULL exits (``exit: "full"``); qty is re-read at execution.
+    signal. Pillar orders are full exits (``exit: "full"``); qty is re-read at execution.
 
-    ``market`` (``{spy_note, streak}``: the trigger report's SPY note and
-    :func:`advisories.spy_confirm_streak`) adds the market read: always a note and a
-    ``plan["market"]`` record (tomorrow's plan dates the turn from it). On the evening SPY
-    first closes in Stage 4 (:func:`advisories.market_turn`) the note says to reduce; with
-    ``doctrine.MARKET_TURN_CAN_TRADE`` on it also orders a PARTIAL sell of
-    ``MARKET_TURN_REDUCE_FRACTION`` of every position with no full exit (a single share
-    gets the note only). At most one order per symbol — a full exit always wins — so a
-    Veto still means "don't sell this name tomorrow"."""
+    ``market`` is ``{spy_note, streak}``: the trigger report's SPY note and
+    :func:`advisories.spy_confirm_streak`. It adds a ``plan["market"]`` record, which the
+    next plan dates the turn from, and a note when the tape needs one. On the evening SPY
+    first closes in Stage 4 (:func:`advisories.market_turn`), the note says to reduce.
+    With ``doctrine.MARKET_TURN_CAN_TRADE`` on, the plan also sells
+    ``MARKET_TURN_REDUCE_FRACTION`` of each position without a full exit. A single share
+    gets a note only. A plan MUST hold at most one order per symbol, and a full exit wins,
+    so a Veto still means "don't sell this name tomorrow"."""
     from src.stock_screener.cockpit import advisories, doctrine
     prior_snap = (prior_plan or {}).get("snapshot", {})
     snapshot: Dict[str, dict] = {}
@@ -217,12 +217,12 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
     """Submit every still-planned order. Mutates ``plan`` in place and returns a result
     summary; the caller persists the updated plan.
 
-    ``submit(symbol, qty)`` is the stop-aware sell (``trade.submit_position_sell``) —
-    injected so the logic tests offline; an order carrying ``remainder_stop`` passes it as
-    a keyword (the ratchet can only raise the remainder's stop). ``held_by_symbol`` is the
-    account's CURRENT holdings: qty is clamped to it (the plan's count may be a day old)
-    and a no-longer-held name is skipped, never shorted. A ``partial`` order sells exactly
-    its quantity (clamped) and is skipped when that is 0 — never widened to a full exit. Guards, in order: the ``AUTOSELL`` env gate
+    ``submit(symbol, qty)`` is the stop-aware sell (``trade.submit_position_sell``),
+    injected so the logic tests offline. An order's ``remainder_stop`` is passed as a
+    keyword. ``held_by_symbol`` is the account's CURRENT holdings: qty is clamped to it
+    (the plan's count may be a day old) and a no-longer-held name is skipped, never
+    shorted. A ``partial`` order sells its clamped quantity, or is skipped at 0; it MUST
+    NOT widen to a full exit. Guards, in order: the ``AUTOSELL`` env gate
     (ships dark), then plan freshness (:func:`plan_is_current`). Idempotent — only
     ``planned`` orders act; a double-fire submits nothing twice, and a FAILED order
     stays failed for a human (an ambiguous broker failure may have partially acted —
@@ -255,15 +255,14 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
             continue
         plan_qty = int(o.get("qty") or 0)
         if o.get("exit") == "partial":
-            # A partial sell is exactly its quantity, clamped to what's held — never the
-            # whole position. (The full-exit fallback below turned a 0 into "sell all".)
+            # MUST NOT reach the full-exit branch: its `or held` turns 0 into "sell all".
             qty = min(plan_qty, held)
             if qty < 1:
                 o["status"] = ORDER_SKIPPED
                 o["detail"] = "nothing to sell"
                 summary["skipped"].append(sym)
                 continue
-        else:                             # a full exit (and every plan before "exit")
+        else:                             # a full exit; a plan without "exit" is full
             qty = min(plan_qty, held) or held
         kw = ({"remainder_stop": o["remainder_stop"]}
               if o.get("remainder_stop") is not None else {})

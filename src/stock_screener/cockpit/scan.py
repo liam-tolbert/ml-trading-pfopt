@@ -130,14 +130,12 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
     """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else the
     52-week high (the line a breakout would clear).
 
-    The stop defaults to ``DEFAULT_STOP_FROM_PIVOT`` below the PIVOT (the intended buy point).
-    The engine's ``calculate_stop_loss`` anchors to the *current* price and swing-low/50-SMA
-    support, which for a name below its pivot can sit well past 10% below it, so the advisory
-    stop is floored at ``MAX_LOSS_FROM_FILL`` below the pivot — the lowest fill the zone allows
-    (a tighter engine stop is kept; ``stop_clamped`` records whether the floor bound). The max
-    loss is measured from the price PAID, so ``max_fill_for_stop`` is the highest fill this stop
-    still covers; the plan builder raises the stop for a fill above it. Advisory only — never
-    moves a real order."""
+    The stop defaults to ``DEFAULT_STOP_FROM_PIVOT`` below the pivot. The engine's
+    ``calculate_stop_loss`` anchors to the current price and swing-low/50-SMA support, which
+    for a name below its pivot can sit well past 10% below it. So the stop is floored at
+    ``MAX_LOSS_FROM_FILL`` below the pivot, the lowest fill in the zone. A tighter engine stop
+    is kept; ``stop_clamped`` says whether the floor bound. ``max_fill_for_stop`` is the
+    highest fill this stop still covers. Advisory only — never moves a real order."""
     pivot = breakout.get("breakout_level")
     # A '50 SMA Breakout' level IS the 50-day SMA (a routine pullback-to-50-day recovery), not a
     # base pivot — anchoring the buy zone/stop/target (and the frozen trigger level) to it is

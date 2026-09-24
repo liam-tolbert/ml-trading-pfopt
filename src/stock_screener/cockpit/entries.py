@@ -51,10 +51,10 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
 
     Only genuine BUY rows arm: ``shares >= 1``, not ``rearm_only``/``stop_only``, and
     both a positive ``limit_price`` (the no-chase cap IS the entry mechanic — a market
-    row must never arm) and a positive ``stop_price`` below it (the OTO leg) and no more
-    than ``MAX_LOSS_FROM_FILL`` below it (the limit is the worst fill, and the executor
-    runs unattended — refuse at arming, not at 09:26). Order is preserved — the executor
-    walks rows top-down, so the panel's ordering is the ranking."""
+    row must never arm) and a positive ``stop_price`` below it (the OTO leg), at most
+    ``MAX_LOSS_FROM_FILL`` below the limit. The executor runs unattended, so a bad stop
+    MUST be refused at arming, not at 09:26. Order is preserved — the executor walks rows
+    top-down, so the panel's ordering is the ranking."""
     rows = []
     skipped = []
     for o in final_rows or []:

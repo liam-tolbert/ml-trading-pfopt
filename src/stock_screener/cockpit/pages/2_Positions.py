@@ -190,8 +190,7 @@ try:
     _fills = journal_cache.cached_fills(st.session_state.get("jr_nonce", 1))["fills"]
     _journal = trade.build_trade_journal(_fills)
     _open_by_sym = {r["symbol"]: r for r in _journal["open"]}
-    # The derived stop (½ the average win), once there are enough wins: the "initial"
-    # stop basis and the R reconstruction use it, as the trade plan does.
+    # The trade plan's stop rule, so the "initial" basis and R match what was ordered.
     _derived_pct = trade.derived_stop_pct(_journal["closed"])["stop_pct"]
 except Exception:
     _open_by_sym = {}
@@ -216,8 +215,7 @@ _pillars = {p["symbol"]: trade.sell_pillars(
                 pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy)
             for p in positions}
 
-# --- The tape: the market-turn read from the evening plan, and the book's weak-market
-# numbers beside the plan's (advice only — nothing here changes a stop or a size) ---------- #
+# --- The tape: market turn and weak-market advice (display only) ---------------------------- #
 try:
     _mk = (sells.load_latest_sell_plan() or {}).get("market") or {}
 except Exception:
@@ -232,8 +230,7 @@ _weak_tape = advisories.weak_market_advice(_regime, _spy, target_pct=0.25)
 if _weak_tape:
     st.warning(_weak_tape)
 _PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
-# R-multiples off the reconstructed entry stop ('~' = the in-force stop isn't one the plan
-# builder would have attached, so the initial risk is an estimate).
+# '~' = the initial risk is an estimate (see trade.r_multiple).
 _rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
                                          _wl_pivots.get(p["symbol"]),
                                          current_stop=p.get("current_stop"),
@@ -350,8 +347,8 @@ if _plan and _plan.get("orders"):
                       width="stretch", on_click=_do_veto, args=(o["symbol"],))
     if st.session_state.get("veto_error"):
         st.error(f"Veto failed: {st.session_state.pop('veto_error')}")
-# The plan's notes carry every warning that is NOT an order — P1 violations, the market
-# read, first P2 fails. Shown with or without orders: most evenings have none.
+# Notes are the warnings that aren't orders. They MUST show with no orders too: most
+# evenings have none.
 if _plan and _plan.get("notes"):
     with st.expander(f"Evening plan notes — {_plan.get('date')} ({len(_plan['notes'])})",
                      expanded=not _plan.get("orders")):
@@ -387,8 +384,7 @@ for p in positions:
     if _flagged:
         cA.caption("  ↳ " + " · ".join(f"{k} {_PICON[v['status']]} {v['detail']}"
                                        for k, v in _flagged))
-    # The other half of the post-breakout read: signs the breakout is WORKING (its
-    # violations already show in P1 above).
+    # Violations already show in P1; this adds the follow-through.
     _pb = advisories.post_breakout_read(
         p.get("df"), (_open_by_sym.get(sym) or {}).get("entry_date"),
         avg_entry=p.get("avg_entry"), below_sma50=bool(p.get("below_sma50")),
@@ -405,8 +401,6 @@ for p in positions:
     if not trade.stop_is_valid(_ed, price):
         cB.caption(":red[stop must be < price — set manually]")
     elif price:
-        # How many ORDINARY days of movement the stop sits below the price — a stop inside
-        # ~2 of them is shaken out by noise, not by the trade failing.
         _dr = advisories.typical_day_range(p.get("df"))
         _room = advisories.stop_room(_dr, _ed, price)
         cA.caption(f"  ↳ risk to stop ≈ {(price - _ed) / price * 100:.1f}%"

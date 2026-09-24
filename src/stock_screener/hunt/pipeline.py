@@ -138,8 +138,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         gaps8 = int((gaps[-120:] > 0.08).sum())
 
         depths = [cn["drawdown_pct"] for cn in v["contractions"]]
-        # From df, not the vcp payload: a pickle written before the payload carried it
-        # still reports the same number.
+        # From df, not the vcp payload: older pickles lack median_tr_pct.
         dr = typical_day_range(df)
         room = stop_room(dr, lev.get("stop"), piv)
         s2 = p.get("step2") or {}
@@ -156,7 +155,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "dist_days": dist_days, "gaps8": gaps8,
             "depths": "->".join(f"{d:.0f}" for d in depths),
             "n_legs": len(depths),
-            # the typical day (%) and how many of them the stop sits below the pivot
+            # stop_room: typical days between the pivot and the stop
             "day_range": round(dr * 100.0, 2) if dr else None,
             "stop_room": round(room["room_days"], 1) if room else None,
             "earnings_in": p.get("earnings_in"),

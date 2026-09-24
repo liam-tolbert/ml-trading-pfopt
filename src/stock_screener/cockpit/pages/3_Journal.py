@@ -145,7 +145,7 @@ else:
 
     # --- Loss Adjustment Exercise ------------------------------------------------------------ #
     st.markdown("#### Loss adjustment — what a tighter stop would have done")
-    # Cache-only prices: this page must never queue behind (or start) a download.
+    # Cache only: this page MUST NOT start or wait on a download.
     try:
         from src.stock_screener.cockpit import data_feed
         _frames = data_feed.get_many_prices(sorted({t["symbol"] for t in closed}),

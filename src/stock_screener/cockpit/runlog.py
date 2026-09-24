@@ -121,14 +121,12 @@ class DatedFileHandler(logging.Handler):
         """Drop the open file handle WITHOUT tearing the handler down — it re-opens
         lazily on the next record, so this is safe to call at any time.
 
-        Exists because Windows refuses to unlink a file that is still open: a test whose
-        ``TemporaryDirectory`` holds today's log fails its cleanup with ``WinError 32``.
-        POSIX allows the unlink, which is why the Pi's gate and CI never see it.
+        Windows can't unlink an open file, so a test's ``TemporaryDirectory`` cleanup
+        fails with ``WinError 32`` without this. POSIX allows the unlink.
 
-        NOT named ``release``: that is ``logging.Handler``'s lock-release, which
-        ``Handler.handle`` calls after every emit. Overriding it leaves the handler lock held
-        by the first thread that logs, and every other thread that logs — a page's price
-        read in the app, the background scan — blocks forever."""
+        MUST NOT be named ``release``: ``Handler.handle`` calls that after every emit to
+        free the handler lock. Overriding it leaves the lock held, and every other thread
+        that logs blocks forever."""
         try:
             if self._stream is not None:
                 self._stream.close()
