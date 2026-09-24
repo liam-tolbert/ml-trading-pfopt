@@ -34,6 +34,16 @@ DEFAULT_STOP_FROM_PIVOT = 0.075
 # the stop from a fill up there is too far below the base for the risk to be the setup's.
 NO_CHASE_PCT = 0.05
 
+# The book's stop sizing once you have numbers: no more than HALF your average gain, from
+# the fill. Below DERIVED_STOP_MIN_WINS winning trades the average is noise, so the 7.5%
+# default stands. The floor keeps a tiny average win from producing a stop inside ordinary
+# daily noise: set by the rule pre-registered in HANDOFF §6.73 (the tightest stop >= 3% that
+# turned none of the closed winners into a loss), on ONE winner — re-apply the same rule
+# when the 5th win activates this, never pick the stop that maximises the replayed return.
+DERIVED_STOP_MIN_WINS = 5
+DERIVED_STOP_WIN_FRACTION = 0.5
+DERIVED_STOP_FLOOR = 0.04
+
 # Breakout confirmation: the close must come on >=1.5x the average of the PRIOR
 # VOL_AVG_DAYS bars. Excluding the current bar is the point — including it dilutes the
 # very spike being tested, and the dilution grows with the size of the spike.

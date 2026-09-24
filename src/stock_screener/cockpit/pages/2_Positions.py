@@ -182,11 +182,16 @@ if _sp and _sp.get("symbol") not in {p["symbol"] for p in positions}:
 
 # --- Sell pillars (P1-P4): every input is best-effort; a pillar with no data reads "—" ------- #
 _open_by_sym = {}
+_derived_pct = None
 try:
     # Journal entry dates/prices for P1 — the shared fills cache (same jr_nonce as the
     # Journal page's Refresh). Alpaca down => pillars degrade, the page still renders.
     _fills = journal_cache.cached_fills(st.session_state.get("jr_nonce", 1))["fills"]
-    _open_by_sym = {r["symbol"]: r for r in trade.build_trade_journal(_fills)["open"]}
+    _journal = trade.build_trade_journal(_fills)
+    _open_by_sym = {r["symbol"]: r for r in _journal["open"]}
+    # The derived stop (½ the average win), once there are enough wins: the "initial"
+    # stop basis and the R reconstruction use it, as the trade plan does.
+    _derived_pct = trade.derived_stop_pct(_journal["closed"])["stop_pct"]
 except Exception:
     _open_by_sym = {}
 try:
@@ -214,7 +219,8 @@ _PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
 # builder would have attached, so the initial risk is an estimate).
 _rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
                                          _wl_pivots.get(p["symbol"]),
-                                         current_stop=p.get("current_stop"))
+                                         current_stop=p.get("current_stop"),
+                                         stop_pct=_derived_pct)
            for p in positions}
 
 
@@ -337,7 +343,8 @@ for p in positions:
     sym, price = p["symbol"], p["current_price"]
     suggested, eff = trade.suggest_stop(
         avg_entry=p["avg_entry"], current_price=price, sma_50=p["sma_50"],
-        current_stop=p["current_stop"], gain_pct=p["gain_pct"], basis=basis)
+        current_stop=p["current_stop"], gain_pct=p["gain_pct"], basis=basis,
+        initial_pct=_derived_pct)
     seed = suggested if suggested is not None else (p["current_stop"] or 0.0)
     cA, cB = st.columns([3, 2])
     _g = f"{p['gain_pct'] * 100:+.1f}%" if p["gain_pct"] is not None else "n/a"

@@ -149,6 +149,157 @@ def test_suggest_risk_pct():
         f"last-10 must be by exit date, not symbol order: {sorted_read['reason']}"
 
 
+def _lae_trade(sym, entry, exit_, avg_entry, pl_pct):
+    import pandas as pd
+    return {"symbol": sym, "entry_date": pd.Timestamp(entry, tz="UTC"),
+            "exit_date": pd.Timestamp(exit_, tz="UTC"), "avg_entry": avg_entry,
+            "pl_pct": pl_pct, "pl": pl_pct * 1000.0, "hold_days": 5}
+
+
+def test_loss_adjustment_book_variant():
+    """§6.73 (audit #3): the book's Loss Adjustment Exercise — every loss bigger than X is
+    cut to −X, wins and smaller losses untouched, compounded in exit order. Without price
+    frames every trade is judged on the book value."""
+    from src.stock_screener.cockpit.trade import loss_adjustment_sweep
+
+    closed = [_lae_trade("W", "2026-06-01 15:00", "2026-06-10 15:00", 100.0, 0.20),
+              _lae_trade("L1", "2026-06-02 15:00", "2026-06-05 15:00", 50.0, -0.08),
+              _lae_trade("L2", "2026-06-03 15:00", "2026-06-06 15:00", 20.0, -0.03)]
+    sw = loss_adjustment_sweep(closed, xs=(5.0, 10.0))
+    assert sw["n"] == 3 and sw["wins"] == 1 and sw["n_price_aware"] == 0
+    assert abs(sw["actual_total"] - (1.2 * 0.92 * 0.97 - 1)) < 1e-12
+    r5, r10 = sw["rows"]
+    assert abs(r5["book_total"] - (1.2 * 0.95 * 0.97 - 1)) < 1e-12     # -8% cut to -5%
+    assert abs(r10["book_total"] - sw["actual_total"]) < 1e-12          # nothing past -10%
+    assert abs(r5["book_expectancy"] - (0.20 - 0.05 - 0.03) / 3) < 1e-12
+    assert r5["aware_total"] == r5["book_total"]                        # no frames -> book
+    assert r5["winners_stopped"] == 0
+
+
+def test_loss_adjustment_price_aware():
+    """§6.73: the price-aware variant replays the stop on the trade's own bars. A winner
+    that dipped X first becomes a −X loss (the cost the book variant hides); a gap below
+    the stop fills at the open, worse than −X; the entry day's low is ignored (it may
+    predate the fill); a frame ending before the exit falls back to the book value; and
+    stop_floor_from_sweep picks the tightest grid stop (>= 3%) that keeps every winner."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import loss_adjustment_sweep, stop_floor_from_sweep
+
+    idx = pd.bdate_range("2026-06-01", "2026-06-12")
+    # W: bought 100 on Jun 1 (entry-day low 90 must NOT count), dipped to 96 on Jun 3,
+    # sold +20% on Jun 12.
+    w = pd.DataFrame({"Open": 100.0, "High": 121.0, "Low": 99.0, "Close": 110.0},
+                     index=idx)
+    w.loc["2026-06-01", "Low"] = 90.0
+    w.loc["2026-06-03", "Low"] = 96.0
+    # G: bought 50, gapped to open at 44 (-12%) on Jun 4, sold -15% that day.
+    g = pd.DataFrame({"Open": 50.0, "High": 51.0, "Low": 49.5, "Close": 50.0}, index=idx)
+    g.loc["2026-06-04", ["Open", "Low"]] = [44.0, 42.0]
+    closed = [_lae_trade("W", "2026-06-01 19:00", "2026-06-12 19:00", 100.0, 0.20),
+              _lae_trade("G", "2026-06-02 19:00", "2026-06-04 19:00", 50.0, -0.15),
+              _lae_trade("OLD", "2026-06-02 19:00", "2026-07-20 19:00", 10.0, -0.09)]
+    frames = {"W": w, "G": g, "OLD": w.iloc[:3]}                 # OLD's frame ends early
+    sw = loss_adjustment_sweep(closed, xs=(3.0, 4.0, 5.0, 10.0), frames=frames)
+    assert sw["n_price_aware"] == 2 and sw["wins_price_aware"] == 1
+    by = {r["x"]: r for r in sw["rows"]}
+    # 3%: W's Jun-3 dip to 96 (-4%) stops it at -3%; G gaps to -12% at the open; OLD is
+    # book-capped at -3%.
+    assert by[3.0]["winners_stopped"] == 1
+    assert abs(by[3.0]["aware_total"] - (0.97 * 0.88 * 0.97 - 1)) < 1e-12
+    assert abs(by[3.0]["book_total"] - (1.20 * 0.97 * 0.97 - 1)) < 1e-12
+    # 4%: the dip reaches exactly -4% -> still stopped; 5%: the winner survives
+    assert by[4.0]["winners_stopped"] == 1 and by[5.0]["winners_stopped"] == 0
+    # 10%: nothing but the gap trade (-12% open) hits the stop
+    assert abs(by[10.0]["aware_total"] - (1.20 * 0.88 * 0.91 - 1)) < 1e-12
+    assert stop_floor_from_sweep(sw) == 0.05
+    # no winner with bars to judge -> no floor (the caller keeps the default)
+    assert stop_floor_from_sweep(loss_adjustment_sweep(closed, xs=(3.0, 5.0))) is None
+
+
+def test_derived_stop_pct():
+    """§6.74 (audit #2): the book sizes the stop at no more than half the average gain.
+    Below 5 cockpit wins it stays off (the reason says how many there are); then ½ × the
+    average win, floored at DERIVED_STOP_FLOOR (a small average win must not put the stop
+    inside daily noise) and capped at the 10% max loss. Manual (untagged) trades are a
+    different trader and never count."""
+    from src.stock_screener.cockpit.doctrine import DERIVED_STOP_FLOOR
+    from src.stock_screener.cockpit.trade import derived_stop_pct
+
+    def T(pl_pct, tagged=True):
+        return {"pl": pl_pct * 1000.0, "pl_pct": pl_pct, "hold_days": 5, "tagged": tagged}
+
+    few = derived_stop_pct([T(0.12)] * 4 + [T(-0.05)] * 6 + [T(0.30, tagged=False)] * 3)
+    assert few["stop_pct"] is None and few["wins"] == 4 and "you have 4" in few["reason"]
+
+    ok = derived_stop_pct([T(0.12)] * 5 + [T(-0.05)] * 5)
+    assert abs(ok["stop_pct"] - 0.06) < 1e-12 and "6.0%" in ok["reason"]
+
+    cap = derived_stop_pct([T(0.30)] * 5)
+    assert cap["stop_pct"] == 0.10 and "capped at 10%" in cap["reason"]
+
+    floor = derived_stop_pct([T(0.05)] * 6)                  # half of 5% = 2.5%
+    assert floor["stop_pct"] == DERIVED_STOP_FLOOR and "floored" in floor["reason"]
+    assert derived_stop_pct([])["stop_pct"] is None
+
+
+def test_build_buy_plan_stop_pct():
+    """§6.74: with the derived stop active, a buy's stop sits stop_pct below its
+    worst-case fill; a tighter stop already on the name is kept; the same "stop above the
+    market" skip applies to a limit far above the price; held names and stop_pct=None are
+    untouched."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan
+
+    def _pl(price, stop):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        return {"df": df, "levels": {"pivot": 100.0, "buy_zone": (100.0, 105.0),
+                                     "stop": stop}}
+
+    base = {"A": _pl(100.0, 92.5)}
+    p, _ = build_buy_plan(["A"], base, mode="shares", amount=5, stop_pct=0.06)
+    assert p[0]["stop_price"] == 94.0 and p[0]["stop_derived"] is True
+    p, _ = build_buy_plan(["A"], base, mode="shares", amount=5)                  # off
+    assert p[0]["stop_price"] == 92.5 and p[0]["stop_derived"] is False
+    p, _ = build_buy_plan(["A"], {"A": _pl(100.0, 96.0)}, mode="shares", amount=5,
+                          stop_pct=0.06)                           # support is tighter
+    assert p[0]["stop_price"] == 96.0 and p[0]["stop_derived"] is False
+    p, _ = build_buy_plan(["A"], base, mode="shares", amount=5, stop_pct=0.10)
+    assert p[0]["stop_price"] == 92.5, "a looser derived stop never widens the default"
+    p, _ = build_buy_plan(["A"], base, mode="shares", amount=5, stop_pct=0.06,
+                          held={"A": 10})
+    assert p[0]["stop_price"] == 92.5, "held names keep their re-arm stop"
+
+    # limit 105 with a 4% derived stop -> 100.80; the name at 101 plans, at 100 it skips
+    p, _ = build_buy_plan(["A"], {"A": _pl(101.0, 92.5)}, mode="shares", amount=5,
+                          order_type="limit", stop_pct=0.04)
+    assert p[0]["stop_price"] == 100.8
+    p, s = build_buy_plan(["A"], {"A": _pl(100.0, 92.5)}, mode="shares", amount=5,
+                          order_type="limit", stop_pct=0.04)
+    assert not p and "average win" in s[0]["reason"], s
+
+
+def test_trade_path_tz_dates():
+    """§6.73: fill times are UTC, bars are exchange dates. An after-hours sell at 20:30 ET
+    is 00:30 UTC the NEXT day — the path must end on the ET date, and the entry day is
+    excluded."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import trade_path
+
+    idx = pd.bdate_range("2026-06-01", "2026-06-10")
+    df = pd.DataFrame({"Open": 1.0, "Low": 1.0}, index=idx)
+    t = {"entry_date": pd.Timestamp("2026-06-01 13:35", tz="UTC"),      # 09:35 ET Jun 1
+         "exit_date": pd.Timestamp("2026-06-05 00:30", tz="UTC")}       # 20:30 ET Jun 4
+    p = trade_path(t, df)
+    assert [d.day for d in p.index] == [2, 3, 4], list(p.index)
+    assert trade_path(t, None) is None
+    assert trade_path(t, df.iloc[:2]) is None                            # ends before exit
+    same = {"entry_date": t["entry_date"], "exit_date": pd.Timestamp("2026-06-01 19:00",
+                                                                     tz="UTC")}
+    assert len(trade_path(same, df)) == 0
+
+
 def test_fetch_order_fills_offline():
     """fetch_order_fills pages through the closed-order history with until= (exclusive),
     drops never-filled orders, normalizes sides/qty/price, and returns fills oldest-first —

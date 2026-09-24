@@ -7,8 +7,8 @@ into §5 and its standalone write-up was never committed.
 **Status (2026-09-23):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
 frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries, with sell
 automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). A SEPA-fidelity
-audit found nine gaps; §6.72 (max loss from the price paid) is the first fix in. Suite **161 cockpit
-+ 33 hunt**, offline, both gating deploys.
+audit found nine gaps; §6.72–§6.74 (max loss from the price paid, the Loss Adjustment Exercise, the
+derived stop) are in. Suite **167 cockpit + 33 hunt**, offline, both gating deploys.
 
 **Research verdict (2026-06-29) — no out-of-sample alpha.** A strong in-sample result (α t=2.49) was
 overfit; OOS collapsed it to t=0.47. Risk management is real; selection is not. The user trades this
@@ -154,7 +154,7 @@ the discipline.
 | `scan.py` / `vcp.py` / `indicators.py` | the funnel, the VCP tier detector, RMV/BBWP/squeeze |
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
-| `trade.py` | Alpaca paper submit path, stops, the exposure gate |
+| `trade.py` | Alpaca paper submit path, stops, the exposure gate, the journal + Loss Adjustment Exercise |
 | `sells.py` / `entries.py` | P1–P4 sell planner; armed-entry plans |
 | `refresh_job.py` / `sell_job.py` / `entry_job.py` | the three headless CLIs the timers invoke |
 | `runlog.py` | dated run logs, 14-day retention |
@@ -201,8 +201,9 @@ the discipline.
 **Entry.** Buy zone = pivot..pivot×1.05 (no chasing). Trigger = settled close above the frozen pivot
 on **≥1.5× the 50-day average volume**. Stop 7.5% below the pivot by default, and **never more than
 10% below the price paid** (§6.72): a buy's stop is raised to 10% below its worst-case fill (the
-limit, else the price), re-checked at submit and at arming. Target pivot×1.25.
-Skip inside ~21 days of earnings. Size for ~1% account risk (0.5% while probing); the
+limit, else the price), re-checked at submit and at arming. From the 5th cockpit win the default
+becomes the **derived stop**, ½ the average win from the fill, clamped 4–10% (§6.74). Target
+pivot×1.25. Skip inside ~21 days of earnings. Size for ~1% account risk (0.5% while probing); the
 10%-of-equity single-order cap clamps risk-mode quantities.
 
 **Sell — the four pillars (P1–P4).** A breakout buy's thesis is P1 resolution (closed above the pivot
@@ -360,10 +361,12 @@ Constants and API facts that are expensive to rediscover. Change these only with
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
 
-**Stops and the book's numbers (`doctrine.py`, §6.72):**
+**Stops and the book's numbers (`doctrine.py`, §6.72–§6.74):**
 - `fill_floor(fill)` = `ceil(round(fill × 0.9 × 100, 6)) / 100`: 10% below the fill, rounded UP to
   the cent (the inner `round` stops 42 × 0.9 = 37.800000000000004 ceiling to 37.81). The builder,
   submit and arming all use it, so a builder-made stop always passes the guards.
+- Derived stop: tagged closed trades, **≥5 wins**, ½ × average win, clamped [4%, 10%]; the 4% floor
+  came from the §6.73 pre-registered rule on ONE winner.
 
 **`suggest_stop` bases (Positions page, auto mode):** fresh (gain < `BREAKEVEN_GAIN` 0.16) → 8% below
 entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 50-day → trail
@@ -507,6 +510,18 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - **Tests (+5):** `test_connect_paper_installs_timeout`; `test_alpaca_timeout_ends_a_silent_connection`, which uses a real loopback socket that accepts and never answers and bounds the request with a thread join, so a regression fails instead of hanging the gate; `test_fetch_positions_timeout_is_trade_unavailable`; `test_positions_page_reads_account_per_session`; and `test_order_history_read_per_session`. Both per-session tests were run against `HEAD`'s code before the fix and **fail exactly at "session B"**: one fetch, and B shows A's snapshot.
   - **Correction: the likelier root cause of the hang is §6.79** (a logging lock held forever), which neither fix above touches.
 - **§6.72** **Max loss is measured from the price paid (SEPA fidelity audit #1).** The book: never more than 10% below *your purchase price*. The cockpit measured the 10% from the pivot, so a fill at the top of the zone (pivot×1.05) with a 7.5%-below-pivot stop risked 11.9%, and a clamped stop 14.3%. `build_buy_plan` now raises a non-held buy's stop to `fill_floor(worst-case fill)` — the limit for a limit plan, the last price for a market plan — **rounded UP to the cent** (a bare `ceil` turned 42×0.9 = 37.800000000000004 into 37.81). Paying more buys a tighter stop, never a wider loss. `submit_buy_plan` and `entries.build_entry_plan` re-check it (both levels are editable after Build; the 09:26 executor runs unattended), the trade panel flags a breaching edit in red, and the Positions page advises when a held stop sits >10% below cost (a market buy that gapped up). Held rows are exempt everywhere — flooring a re-arm stop would silently start a trailing stop. `MAX_STOP_FROM_PIVOT` became `doctrine.MAX_LOSS_FROM_FILL`; `DEFAULT_STOP_FROM_PIVOT` and `NO_CHASE_PCT` moved into `doctrine.py` (`triggers.EXTENDED_PCT` and the hunt's `BUY_ZONE_MAX_PCT` now alias it). **Consequence:** a zone-top limit now carries a stop ≥ pivot×0.945, and a name trading between pivot×0.925 and ×0.945 skips in limit mode (its floored stop would sit above the market). `r_multiple` is exact only when the in-force stop matches a level the builder could have attached.
+- **§6.73** **Loss Adjustment Exercise on the Journal page (audit #3).** `trade.loss_adjustment_sweep` replays a stop X% below cost (2–10%, step 0.5) over the closed trades two ways: **book** (every loss beyond X cut to −X — can only help) and **price-aware** (the stop replayed on the trade's own cached bars after the entry day: a winner that dipped X first becomes a loss, a gap fills at the open). Prices are cache-only (`allow_network=False`); a trade without bars through its exit falls back to book, and the caption says how many were replayed.
+  - **★ Pre-registered floor rule for the derived stop (§6.74), written BEFORE the first run on live data:** floor = the smallest grid X ≥ **3.0%** (the vendored engine's "too tight" minimum) at which the price-aware sweep turns **no closed winner into a loss** (`trade.stop_floor_from_sweep`). No winner with price history → floor = `DEFAULT_STOP_FROM_PIVOT` (7.5%). **Never the X that maximises return** — with one winner that is a fit to noise (§2). Re-apply the same rule when the 5th win activates the derived stop.
+  - **Evidence run, 2026-09-23** (read-only `docker exec` on the Pi at `29f6344`, the sweep's source piped in): 13 tagged closed trades, 1 win (ICCC +4.0%), **all 13 replayed** on cached bars. Actual compounded −22.7%, expectancy −1.9%.
+
+    | stop X | 3% | 3.5% | 4% | 5% | 6% | 7% | 7.5% | 8–10% |
+    |---|---|---|---|---|---|---|---|---|
+    | book | −18.5 | −19.8 | −20.9 | −21.9 | −22.7 | −22.7 | −22.7 | −22.7 |
+    | price-aware | −33.1 | −34.2 | −27.3 | −28.5 | −27.1 | −25.3 | −25.7 | −22.7 |
+    | winners stopped | 1 | 1 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+    **Rule result: floor = 4.0%** (ICCC's deepest post-entry low was −3.92% of cost) → `doctrine.DERIVED_STOP_FLOOR = 0.04`. It rests on ONE winner. **The shape is the finding:** every stop tighter than 8% does *worse* than what happened, price-aware. The losers dipped further intraday (TMP −7.5%, UNP −6.9%, FAF −6.1%) than where the close-based P1 exits took them out (−3.8%, −6.0%, −2.7%), so an intraday stop would have sold the low. The book variant, which cannot see that, says the opposite. Tighter stops are not a free improvement on this record.
+- **§6.74** **Derived stop — half your average win (audit #2).** The book sizes the stop from your own numbers: no more than half the average gain. `trade.derived_stop_pct` over the **tagged** closed trades → `clamp(avg_win × 0.5, DERIVED_STOP_FLOOR 4%, MAX_LOSS_FROM_FILL 10%)`, **off below 5 wins** (`DERIVED_STOP_MIN_WINS`; the record has 1). When on it is the default: `build_buy_plan(stop_pct=)` puts a non-held buy's stop that far below its worst-case fill, keeping a tighter stop already on the name (pivot default or support) — it can tighten the 7.5% default, never loosen it. The app computes it at Build from the journal the exposure gate already reads (no extra Alpaca call) and states the stop source above the rows; the Positions page uses it for the "initial" stop basis and the R reconstruction.
 - **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 
 ## 12. Open items
@@ -535,6 +550,9 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   private `client._session`, verified locally on **0.44.0**; the image pins **0.43.4**.
   `test_connect_paper_installs_timeout` settles it on the first deploy of §6.71 — if that deploy
   fails there, the hook moved and needs a version-specific path, not a skipped test.
+- **Re-apply the §6.73 floor rule at the 5th win.** The derived stop turns on by itself at 5 cockpit
+  wins, but its 4% floor rests on one. Re-run the sweep then (the Journal page shows it;
+  `trade.stop_floor_from_sweep`) and update `DERIVED_STOP_FLOOR` only by the pre-registered rule.
 - **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
   first time two threads log (a page's price read plus the background scan). `docker compose
   restart app` clears it for a while.

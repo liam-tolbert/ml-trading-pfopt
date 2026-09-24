@@ -786,8 +786,20 @@ def test_journal_page_renders():
              "client_order_id": "SEPAcockpit-BBB-3"},
         ],
     }
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed
+
+    seen = {}
+
+    def _cache_only(syms, **kw):
+        seen["syms"], seen["kw"] = list(syms), kw
+        idx = pd.bdate_range("2026-05-01", "2026-06-30")
+        return {"AAA": pd.DataFrame({"Open": 101.0, "High": 112.0, "Low": 99.0,
+                                     "Close": 110.0, "Volume": 1000}, index=idx)}
+
     page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "3_Journal.py")
-    with patch.object(trade, "fetch_order_fills", return_value=offline):
+    with patch.object(trade, "fetch_order_fills", return_value=offline), \
+            patch.object(data_feed, "get_many_prices", side_effect=_cache_only):
         at = AppTest.from_file(page, default_timeout=60)
         at.run()
     assert not at.exception, f"journal page raised: {at.exception}"
@@ -796,6 +808,13 @@ def test_journal_page_renders():
     # 1 closed winner out of 1 -> batting 100%; the open BBB episode must not enter the stats
     batting = [m for m in at.metric if "Batting" in str(getattr(m, "label", ""))][0]
     assert str(batting.value) == "100%", batting.value
+
+    # §6.73 Loss Adjustment Exercise: cache-only prices (this page must never download),
+    # only the closed trades' symbols, a chart, and the price-aware coverage caption.
+    assert seen.get("kw", {}).get("allow_network") is False, seen
+    assert seen["syms"] == ["AAA"], seen
+    assert at.get("plotly_chart"), "loss-adjustment chart missing"
+    assert "price-aware for 1 of 1" in _rendered_text(at)
 
 
 def test_trigger_report_sidebar_renders():
@@ -1029,6 +1048,72 @@ def test_trade_panel_gate_blocks_buys():
         assert submit and submit[0].disabled, \
             "submit must be disabled when the payload is exclusively gate-blocked buys"
 
+
+
+def test_trade_panel_stop_captions():
+    """§6.72/§6.74 in the panel: the stop source is stated above the rows (the default
+    stop until 5 wins, then the derived one); a row whose stop the builder raised says so;
+    a stop EDITED more than 10% below the fill turns red with the level to raise it to —
+    submit and arming would refuse it, so the panel says it before the click."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_panel_stop_captions (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+
+    def _entry(t, stop, **kw):
+        return {"ticker": t, "shares": 10, "price": 50.0, "pivot": 48.0,
+                "est_value": 500.0, "extended": False, "capped": False,
+                "stop_price": stop, "earnings_in": None, **kw}
+
+    _wl = [{"ticker": t, "judged_pivot": None, "date_added": None,
+            "pivot_source": None, "note": ""} for t in ("FLOOR", "WIDE", "DERIV")]
+    _acct = {"account_number": "PA000123", "equity": 100000.0, "using_dedicated": True}
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = list(_wl[:2])
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": [_entry("FLOOR", 45.0, stop_floored=True), _entry("WIDE", 44.0)],
+            "skipped": [], "account": dict(_acct), "held": {}, "build_ts": 1,
+            "order_type": "market",
+            "derived": {"stop_pct": None,
+                        "reason": "default stop (7.5% below the pivot) — the derived "
+                                  "stop (½ your average win) starts at 5 wins; you have 1"}}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        rendered = _rendered_text(at)
+        assert "Stops: default stop" in rendered and "you have 1" in rendered, rendered[-600:]
+        assert "default stop raised to 45.00" in rendered, "floored-stop row caption missing"
+        assert "raise to ≥ 45.00" in rendered, "the >10%-below-fill stop must turn red"
+
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = [dict(_wl[2])]
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": [_entry("DERIV", 47.0, stop_derived=True)], "skipped": [],
+            "account": dict(_acct), "held": {}, "build_ts": 1, "order_type": "market",
+            "derived": {"stop_pct": 0.06,
+                        "reason": "derived stop 6.0% below the fill — ½ × your 12.0% "
+                                  "average win over 5 wins"}}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        rendered = _rendered_text(at)
+        assert "Stops: derived stop 6.0%" in rendered
+        assert "derived stop 47.00 — 6.0% below the price" in rendered
 
 
 if __name__ == "__main__":

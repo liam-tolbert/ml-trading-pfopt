@@ -143,6 +143,52 @@ else:
     st.download_button("⬇️ Journal CSV", df.to_csv(index=False).encode(),
                        file_name="trade_journal.csv", mime="text/csv")
 
+    # --- Loss Adjustment Exercise ------------------------------------------------------------ #
+    st.markdown("#### Loss adjustment — what a tighter stop would have done")
+    # Cache-only prices: this page must never queue behind (or start) a download.
+    try:
+        from src.stock_screener.cockpit import data_feed
+        _frames = data_feed.get_many_prices(sorted({t["symbol"] for t in closed}),
+                                            allow_network=False) or {}
+    except Exception:
+        _frames = {}
+    _sw = trade.loss_adjustment_sweep(closed, frames=_frames)
+    import plotly.graph_objects as go
+    _xs = [r["x"] for r in _sw["rows"]]
+    _fig = go.Figure()
+    _fig.add_trace(go.Scatter(x=_xs, y=[r["book_total"] * 100 for r in _sw["rows"]],
+                              mode="lines+markers", name="Book — big losses cut to −X"))
+    _fig.add_trace(go.Scatter(x=_xs, y=[r["aware_total"] * 100 for r in _sw["rows"]],
+                              mode="lines+markers",
+                              name="Price-aware — the stop also hits dipping winners"))
+    _fig.add_hline(y=_sw["actual_total"] * 100, line_dash="dot",
+                   annotation_text="what you actually got")
+    _fig.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10),
+                       xaxis_title="Stop, % below your cost",
+                       yaxis_title="Total return, %", legend=dict(orientation="h"))
+    st.plotly_chart(_fig, width="stretch")
+    _pick = {3.0, 4.0, 5.0, 6.0, 7.0, 7.5, 8.0, 10.0}
+    _lrows = [{"stop": f"{r['x']:g}%", "book": r["book_total"] * 100,
+               "price_aware": r["aware_total"] * 100,
+               "winners_stopped": r["winners_stopped"]}
+              for r in _sw["rows"] if r["x"] in _pick]
+    st.dataframe(pd.DataFrame(_lrows), hide_index=True, width="stretch", column_config={
+        "stop": st.column_config.Column("Stop"),
+        "book": _num("Book", format="%+.1f%%"),
+        "price_aware": _num("Price-aware", format="%+.1f%%"),
+        "winners_stopped": _num("Winners stopped", format="%d",
+                                help="Winners this stop would have turned into losses — "
+                                     "they dipped that far below your cost first."),
+    })
+    st.caption(f"Minervini's Loss Adjustment Exercise on your {_sw['n']} closed trade(s): "
+               "cut every loss to X% and see what the record would have been. The book "
+               "line can only improve; the price-aware line replays the stop on each "
+               f"trade's own bars — price-aware for {_sw['n_price_aware']} of {_sw['n']} "
+               "trades (the rest have no cached price history for their holding period "
+               "and use the book value). Totals compound each trade as if it used the whole "
+               "account: a way to compare stops, not an account curve. With few wins this "
+               "is noise — read the shape, not the peak.")
+
 # --- Open trades (not in the stats) ----------------------------------------------------------- #
 if open_eps:
     st.markdown("#### Open trades — excluded from the stats until closed")

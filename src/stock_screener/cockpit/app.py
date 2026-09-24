@@ -813,11 +813,16 @@ with st.sidebar:
                 _gi = fetch_gate_inputs()
                 _gate = gate_status(_gi["positions"], _gi["open_episodes"],
                                     _gi["closed_episodes"])
+                # The derived stop (½ the average win) off the SAME journal read — no
+                # extra Alpaca call. Unknown journal → the default stop, said so below.
+                _derived = trade.derived_stop_pct(_gi["closed_episodes"])
             except Exception:
                 _gate = {"open": None,
                          "reason": "gate unknown (account/journal unreachable) — "
                                    "your judgment",
                          "probe_size_factor": 1.0, "consecutive_losses": 0}
+                _derived = {"stop_pct": None,
+                            "reason": "journal unreachable — default stop"}
             # Re-pull the watchlist names' latest bars so sizing/stops use CURRENT prices, not
             # the days-old closes frozen in the scan memo. The staleness guard then skips any
             # name the refresh couldn't freshen.
@@ -830,7 +835,8 @@ with st.sidebar:
                 _plan, _skip = build_buy_plan(
                     _watch_t, _fresh_payloads, mode=_mode, amount=_amount,
                     equity=_account.get("equity"), max_bar_age_days=STALE_PLAN_BARS,
-                    pivots=_pivots, held=_held, order_type=_order_type)
+                    pivots=_pivots, held=_held, order_type=_order_type,
+                    stop_pct=_derived.get("stop_pct"))
             # Bump a build counter used as a nonce in the per-ticker stop widget keys, so a fresh
             # Build re-seeds each stop to its computed default instead of retaining a stale edit.
             _bn = st.session_state.get("trade_build_n", 0) + 1
@@ -838,7 +844,7 @@ with st.sidebar:
             st.session_state["trade_plan"] = {"plan": _plan, "skipped": _skip,
                                               "account": _account, "held": _held,
                                               "build_ts": _bn, "order_type": _order_type,
-                                              "gate": _gate}
+                                              "gate": _gate, "derived": _derived}
             st.session_state.pop("trade_result", None)
 
         _tp = st.session_state.get("trade_plan")
@@ -862,6 +868,10 @@ with st.sidebar:
                 st.caption(f":orange[⚠︎ {_gate.get('reason')}]")
             elif _gate.get("probe_size_factor", 1.0) < 1.0:
                 st.caption(f":orange[⚠︎ Exposure gate open — {_gate.get('reason')}]")
+            _dv = _tp.get("derived") or {}
+            if _dv.get("reason"):
+                st.caption(f"🛑 Stops: {_dv['reason']}. Every buy's stop is at most "
+                           f"{MAX_LOSS_FROM_FILL * 100:.0f}% below its fill.")
             if _plan:
                 # build_buy_plan is holdings-blind; submit sends NO buy for a held name (re-arm
                 # only). So the est-value total counts only names that actually execute as buys.
@@ -972,7 +982,11 @@ with st.sidebar:
                         # re-scale shares on an edit).
                         _rusd = _o["shares"] * (_basis - _edstop)
                         _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
-                    if _o.get("stop_floored") and _on and _held_sh <= 0 and _attach:
+                    if _o.get("stop_derived") and _on and _held_sh <= 0 and _attach:
+                        _cA.caption(f"  ↳ derived stop {_o['stop_price']:,.2f} — "
+                                    f"{(_dv.get('stop_pct') or 0) * 100:.1f}% below the "
+                                    f"{'limit' if _is_lim else 'price'}")
+                    elif _o.get("stop_floored") and _on and _held_sh <= 0 and _attach:
                         _cA.caption(f"  ↳ default stop raised to {_o['stop_price']:,.2f} — "
                                     f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the "
                                     f"{'limit' if _is_lim else 'price'}, the most a fill "
