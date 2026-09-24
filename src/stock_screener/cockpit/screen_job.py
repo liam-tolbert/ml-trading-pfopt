@@ -1,26 +1,24 @@
-"""Scheduled universe screen — step 2 of ``cockpit-eod.timer`` (16:20 ET weekdays).
+"""Scheduled universe screen: step 2 of ``cockpit-eod.timer`` (16:20 ET weekdays).
 
     python src/stock_screener/cockpit/screen_job.py [--universe full_us] [--min-criteria 8]
 
-Runs the full SEPA funnel over the scan universe — 8/8 trend template, RS percentile, Step-2
-fundamentals for passers, VCP tiers, entry levels — and publishes the result through the
-process-wide store, which persists it to ``last_scan.pkl``. That file IS the scan table: the
-app renders it and only ever rewrites it from an explicit Re-scan.
+Runs the full SEPA funnel over the scan universe: the 8/8 trend template, RS percentile,
+Step-2 fundamentals for passers, VCP tiers and entry levels. The result is published
+through the process-wide store, which persists it to ``last_scan.pkl``. That file is the
+scan table: the app renders it and rewrites it only on an explicit Re-scan.
 
-**Why this exists.** Screening used to ride along on a thread inside the Streamlit container
-(an in-app scheduler thread). That thread was invisible to ``systemctl list-timers`` and died with
-the container, so a deploy landing after its slot silently cost that day's screen. It was
-removed when price refreshing moved to systemd; this job is the other half — the piece that
-advances the CANDIDATE LIST rather than the price cache.
+Screening runs under systemd, not on a thread inside the Streamlit container. Such a
+thread is invisible to ``systemctl list-timers`` and dies with the container, so a deploy
+landing after its slot costs that day's screen. ``refresh_job.py`` advances the price
+cache; this job advances the candidate list.
 
-**Ordering matters, and is now structural.** This is the second ``ExecStart`` of the
-``cockpit-eod`` oneshot unit: systemd starts it only once step 1
-(``refresh_job.py --scope universe``) has exited 0, however long that took, and skips it
-entirely if the sweep failed. With the sweep done every read here is served from cache
-(``_cache_settled``: no session has elapsed, so no new bar can exist) and the run costs CPU
-only — no network. Run it BEFORE the sweep and it screens yesterday's bars; run it DURING
-one and it re-fetches what the sweep has not reached yet while both containers hit
-yfinance — which is exactly what a 5-minute timer gap produced on 2026-08-28.
+This is the second ``ExecStart`` of the ``cockpit-eod`` oneshot unit. systemd starts it
+only after step 1 (``refresh_job.py --scope universe``) exits 0, however long that takes,
+and skips it if the sweep failed. After the sweep every read here is served from cache
+(``_cache_settled``: no session has elapsed, so no new bar can exist), so the run costs
+CPU only. It MUST NOT run before or during the sweep. Before, it screens yesterday's bars.
+During, it re-fetches what the sweep has not reached yet while both containers hit
+yfinance.
 
 Screening only: this places no orders and touches no watchlist state.
 """
@@ -46,22 +44,21 @@ _LOG = runlog.get_logger("screen")
 
 def run_screen(universe: str = DEFAULT_UNIVERSE,
                min_criteria: int = DEFAULT_MIN_CRITERIA, store=None) -> dict:
-    """Screen ``universe`` and publish the result. Returns a small summary dict.
+    """Screen ``universe`` and publish the result. Returns ``{scanned, passed, candidates,
+    errors, elapsed}``; a scan failure raises.
 
-    Published under the SAME key the app reads — ``(universe, min_criteria)`` — or the app
-    would never see it. ``store.put`` persists atomically (tmp + ``os.replace``), and the
-    app's ResultStore re-reads ``last_scan.pkl`` when its mtime advances, which is what
-    makes a result written from THIS one-shot container visible to the long-running
-    Streamlit process."""
+    The key MUST be the one the app reads, ``(universe, min_criteria)``, or the app never
+    sees the result. ``store.put`` persists atomically (tmp + ``os.replace``). The app's
+    ResultStore re-reads ``last_scan.pkl`` when its mtime advances: that is how a result
+    from this one-shot container reaches the long-running Streamlit process."""
     store = _STORE if store is None else store
     _LOG.info("screen starting: %s, min_criteria=%d", universe, min_criteria)
     t0 = time.time()
     res = scan.run_scan(universe=universe, cfg=scan.ScanConfig(min_criteria=min_criteria))
     store.put((universe, min_criteria), res)
-    # NB: `candidates` is a DataFrame -- never `or []` it. A DataFrame has no truth value,
-    # so `df or []` raises ValueError and (as on 2026-08-28) killed the job AFTER store.put
-    # had already persisted a perfectly good scan: the table was fine, the unit reported
-    # failure. len() alone is safe on both a frame and None-guarded default.
+    # `candidates` is a DataFrame and MUST NOT be `or []`-ed: it has no truth value, so
+    # that raises ValueError. The unit would then fail after store.put had already
+    # persisted a good scan.
     cand = getattr(res, "candidates", None)
     out = {"scanned": getattr(res, "n_scanned", None),
            "passed": getattr(res, "n_passed", None),

@@ -1,11 +1,13 @@
-"""Positions page — stop management + manual sells for the Minervini Trader Alpaca paper account.
+"""Positions page: stop management and manual sells for the Minervini Trader Alpaca paper
+account.
 
-Separate from the scan page so it loads instantly (no multi-minute scan) — the daily
-stop-management surface. Shows each holding's P&L, protective-stop status, stage on the stop
-ladder, next earnings date, and Minervini exit advisories (incl. the earnings-cushion rules);
-one-click "re-arm / raise all stops" via the GTC one-way ratchet (never lowers a stop); and a
-per-position manual market SELL with a two-step confirm — cancel stops → sell → re-place the
-stop for any remainder at the same level (the app never sells on its own).
+A page of its own, so it loads instantly without the multi-minute scan. It is the daily
+stop-management surface. It shows each holding's P&L, protective-stop status, stage on the
+stop ladder, next earnings date, sell pillars and Minervini exit advisories, including the
+earnings-cushion rules. One click re-arms or raises all stops via the GTC one-way ratchet,
+which never lowers a stop. Each position has a manual market SELL with a two-step confirm:
+cancel stops, sell, then re-place the stop for any remainder at the same level. The page
+never sells on its own.
 
 Run the app from the project root: ``streamlit run src/stock_screener/cockpit/app.py`` and pick
 "Positions" from the page nav.
@@ -15,8 +17,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# This page imports cockpit modules, so the repo ROOT must be on sys.path. From pages/:
-# pages=0, cockpit=1, stock_screener=2, src=3, root=4.
+# The cockpit imports need the repo root on sys.path. From pages/: pages=0, cockpit=1,
+# stock_screener=2, src=3, root=4.
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -32,8 +34,8 @@ from src.stock_screener.cockpit import trade  # noqa: E402 (module import → pa
 from src.stock_screener.cockpit import triggers  # noqa: E402 (latest report = SPY fallback)
 from src.stock_screener.cockpit.export import load_watchlist  # noqa: E402
 
-# Warm the universe scan in the background so it's already fetching/screening by the time
-# the user opens the scan page (inert under AppTest — see scan_worker.autostart).
+# Warm the universe scan in the background, so it is under way by the time the user opens
+# the scan page. Inert under AppTest.
 scan_worker.autostart()
 
 st.set_page_config(page_title="Positions", page_icon="📊", layout="wide")
@@ -56,15 +58,14 @@ POS_MAX_AGE_S = 60      # a memoized account read older than this is re-fetched 
 
 
 def _session_positions(nonce):
-    """The account read, memoized per browser session in session_state — never st.cache_data.
+    """The account read, memoized per browser session. Returns ``(data, read_at)``. A
+    ``TradeUnavailable`` propagates and is never memoized, so Refresh retries.
 
-    st.cache_data is ONE process-wide cache, and every session starts at nonce 1, so every
-    new visitor got the first visitor's snapshot (no expiry: a buy from the scan page or the
-    09:26 job, or an overnight stop-out, stayed invisible until someone pressed Refresh here)
-    and queued behind any fetch still in flight. Here each session reads the account itself;
-    widget reruns reuse the read for POS_MAX_AGE_S (session_state outlives page switches, so
-    age is what catches "came back after trading elsewhere"); Refresh / sell / re-arm bump the
-    nonce. A TradeUnavailable is never memoized, so Refresh retries. Returns (data, read_at)."""
+    The memo MUST live in session_state, never ``st.cache_data``. That cache is one per
+    process, and every session starts at nonce 1, so every visitor would get the first
+    visitor's snapshot with no expiry and queue behind its in-flight fetch. Widget reruns
+    reuse the read for ``POS_MAX_AGE_S``. session_state outlives page switches, so the age
+    limit is what catches trades placed elsewhere. Refresh, sell and re-arm bump the nonce."""
     import time
     memo = st.session_state.get("pos_memo")
     if (memo is not None and memo["nonce"] == nonce
@@ -80,8 +81,8 @@ def _session_positions(nonce):
 
 
 def _do_rearm(positions, nonce, basis):
-    """Re-arm button callback: read each row's edited stop from session_state, raise/place GTC
-    stops via the ratchet, then bust the cache so the next run reflects the new stops."""
+    """Re-arm button callback: raise or place GTC stops at each row's edited stop via the
+    ratchet, then bump the nonce so the next run reads the new stops."""
     targets = [{"ticker": p["symbol"],
                 "stop_price": st.session_state.get(f"posstop_{p['symbol']}_{nonce}_{basis}"),
                 "price": p["current_price"]}
@@ -94,7 +95,7 @@ def _do_rearm(positions, nonce, basis):
 
 
 def _set_sell_qty(sym, nonce, value):
-    """Preset (¼/½/All) callback — another widget's key may only be set inside a callback."""
+    """Preset (¼/½/All) callback. Streamlit lets another widget's key be set only in one."""
     st.session_state[f"sellqty_{sym}_{nonce}"] = int(value)
 
 
@@ -103,10 +104,10 @@ def _cancel_sell():
 
 
 def _do_sell(symbol, qty, remainder_stop=None):
-    """Confirm-sell callback: submits the FROZEN pending quantity (not the live qty
-    widget), then busts the cache so the next run shows the reduced position +
-    re-placed stop. ``remainder_stop`` (the free-roll's breakeven move) rides the
-    ratchet inside submit_position_sell — it can only ever raise the level."""
+    """Confirm-sell callback: submit the frozen pending quantity, not the live qty widget,
+    then bump the nonce so the next run shows the reduced position and re-placed stop.
+    ``remainder_stop`` (the free-roll's breakeven move) goes through the ratchet inside
+    ``submit_position_sell``, so it can only raise the level."""
     try:
         st.session_state["sell_result"] = trade.submit_position_sell(
             symbol, qty, remainder_stop=remainder_stop)
@@ -117,8 +118,8 @@ def _do_sell(symbol, qty, remainder_stop=None):
 
 
 def _do_veto(symbol):
-    """Veto callback: re-read the plan from disk (the evening CLI or another session may
-    have rewritten it since this render), mark the order vetoed, save atomically."""
+    """Veto callback: re-read the plan from disk, mark the order vetoed, save atomically.
+    The evening CLI or another session may have rewritten the plan since this render."""
     try:
         p = sells.load_latest_sell_plan()
         if p and sells.veto_order(p, symbol):
@@ -128,9 +129,9 @@ def _do_veto(symbol):
 
 
 def _earnings_cell(p) -> str:
-    """Earnings display for the table: 'YYYY-MM-DD (Nd)', ⚠-marked inside the ~21-day
-    no-cushion window. (Same wording convention as the app's trade panel — re-derived here;
-    importing app.py would execute the whole scan page.)"""
+    """Earnings cell for the table: 'YYYY-MM-DD (Nd)', ⚠-marked inside the ~21-day
+    no-cushion window; empty when unknown. It repeats the app's trade-panel wording here
+    because importing app.py would execute the whole scan page."""
     ne, ei = p.get("next_earnings"), p.get("earnings_in")
     if not ne and ei is None:
         return ""
@@ -158,7 +159,8 @@ except trade.TradeUnavailable as e:
 acct = data["account"]
 positions = data["positions"]
 
-# --- Account headline tiles (one '$' per metric value — two render as a LaTeX math span) ---- #
+# --- Account headline tiles ----------------------------------------------------------------- #
+# A metric value MUST hold at most one '$': two render as a LaTeX math span.
 m = st.columns(4)
 m[0].metric("Equity", f"${acct['equity']:,.0f}", border=True)
 m[1].metric("Cash", f"${acct['cash']:,.0f}", border=True)
@@ -181,12 +183,13 @@ _sp = st.session_state.get("sell_pending")
 if _sp and _sp.get("symbol") not in {p["symbol"] for p in positions}:
     st.session_state.pop("sell_pending", None)
 
-# --- Sell pillars (P1-P4): every input is best-effort; a pillar with no data reads "—" ------- #
+# --- Sell pillars (P1-P4) ------------------------------------------------------------------- #
+# Every input is best effort; a pillar with no data reads "—".
 _open_by_sym = {}
 _derived_pct = None
 try:
-    # Journal entry dates/prices for P1 — the shared fills cache (same jr_nonce as the
-    # Journal page's Refresh). Alpaca down => pillars degrade, the page still renders.
+    # Journal entry dates for P1, from the shared fills cache under the Journal page's
+    # jr_nonce. With Alpaca down the pillars degrade and the page still renders.
     _fills = journal_cache.cached_fills(st.session_state.get("jr_nonce", 1))["fills"]
     _journal = trade.build_trade_journal(_fills)
     _open_by_sym = {r["symbol"]: r for r in _journal["open"]}
@@ -201,7 +204,7 @@ except Exception:
     _wl_pivots = {}
 _regime = _spy = None
 try:
-    # Newest scan result if one exists — None on a true cold start and under AppTest.
+    # The newest scan result, if any: None on a true cold start and under AppTest.
     _regime = getattr(scan_worker.get_worker().latest(), "regime", None)
 except Exception:
     _regime = None
@@ -406,13 +409,14 @@ for p in positions:
         cA.caption(f"  ↳ risk to stop ≈ {(price - _ed) / price * 100:.1f}%"
                    + (f" · {advisories.stop_room_text(_room, _dr)}" if _room else ""))
 
-    # --- Manual sell (market, paper) — two-step confirm; the app never sells on its own --- #
+    # --- Manual sell (market, paper, two-step confirm) ------------------------------------ #
     _held = int(p["qty"] or 0)
     if _held >= 1:
         with st.expander(f"Sell {sym} (market, paper)"):
             sc = st.columns([2, 1, 1, 1])
-            # Seed the default via session_state (not value=) — the presets also write this
-            # key, and a widget with BOTH a default and a state-set value logs a warning.
+            # The default MUST be seeded via session_state, not value=: the presets also
+            # write this key, and a widget with both a default and a state-set value logs a
+            # warning.
             _qkey = f"sellqty_{sym}_{_nonce}"
             if _qkey not in st.session_state:
                 st.session_state[_qkey] = _held
@@ -424,8 +428,8 @@ for p in positions:
                          on_click=_set_sell_qty, args=(sym, _nonce, max(1, _held // 2)))
             sc[3].button("All", key=f"sellqa_{sym}_{_nonce}", width="stretch",
                          on_click=_set_sell_qty, args=(sym, _nonce, _held))
-            # Free-roll at >=2R while the stop still sits below breakeven: bank half,
-            # move the remainder's stop to the entry — the rest rides risk-free.
+            # Free-roll at >=2R while the stop is below breakeven: bank half and move the
+            # remainder's stop to the entry, so the rest rides risk-free.
             _rv, _rapprox = _rmults.get(sym, (None, True))
             if (_rv is not None and _rv >= trade.FREE_ROLL_R
                     and (p["current_stop"] is None
@@ -442,7 +446,7 @@ for p in positions:
                                "stop to breakeven instead (re-arm above).")
             if st.button(f"Sell (market) — {sym}", key=f"sell_{sym}_{_nonce}",
                          width="stretch"):
-                # FREEZE the quantity now — the confirm must submit what was shown, not a
+                # Freeze the quantity now: the confirm MUST submit what was shown, not a
                 # qty edited while the banner is open.
                 st.session_state["sell_pending"] = {
                     "symbol": sym, "qty": int(st.session_state.get(

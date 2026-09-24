@@ -1,36 +1,34 @@
-"""Scheduled data refresh — CLI wrapper for both refresh scopes.
+"""Scheduled data refresh: the CLI for both refresh scopes.
 
     python src/stock_screener/cockpit/refresh_job.py [--scope watchlist|universe]
                                                      [--max-age-days N]
                                                      [--date YYYY-MM-DD] [--no-write]
 
-Two scopes, two schedules, because they cost three orders of magnitude apart:
+Two scopes, two schedules, because their costs are three orders of magnitude apart:
 
-* ``watchlist`` (default) — ``cockpit-refresh.timer``: 09:30, then :00/:30 through 15:30,
+* ``watchlist`` (default): ``cockpit-refresh.timer``, 09:30, then :00/:30 through 15:30,
   then 16:10 ET (the settled-close run).
-  Tops up the watchlist PLUS any symbol held on the paper account that is not already
-  on it (a position that fell off the watchlist still has to be priceable, or the
-  Positions page and the sell pillars go blind on it). Tens of names; seconds per run.
-* ``universe`` — step 1 of ``cockpit-eod.timer``, 16:20 ET weekdays; the screen is step 2
-  of the same unit, so it cannot start until this exits 0. Tops up all ~4,100
-  scan-universe tickers ONCE, after the settled close. That run is the one that matters:
-  it writes post-settle, which arms ``data_feed._cache_settled`` so every later read —
-  evening, overnight, pre-open — is served from cache with zero network.
+  Tops up the watchlist plus any symbol held on the paper account that is not on it. A
+  held name MUST stay priceable after it leaves the watchlist, or the Positions page and
+  the sell pillars go blind on it. Tens of names; seconds per run.
+* ``universe``: step 1 of ``cockpit-eod.timer``, 16:20 ET weekdays. The screen is step 2
+  of the same unit, so it can't start until this exits 0. Tops up all ~4,100
+  scan-universe tickers once, after the settled close. This is the run that matters: it
+  writes post-settle, which arms ``data_feed._cache_settled``, so every later read
+  (evening, overnight, pre-open) is served from cache with zero network.
 
 Both scopes then run the watchlist trigger check, reusing the frames just fetched.
 
-**Why not the whole universe every 30 minutes** (what this did on 2026-08-26): during a
-live session ``_cache_settled`` is false by definition and ``max_age_days=0.0`` makes
-every name miss the freshness window too, so all ~4,100 names re-download every fire —
-~12 minutes of continuous yfinance traffic per run, ~2.8 hours a day, which started
-returning ``YFRateLimitError``. Intraday you only look at the watchlist and your
-positions; the rest of the universe is not read until you screen, and screening only
-happens on the app's explicit Re-scan.
+The whole universe MUST NOT be refreshed intraday. During a live session
+``_cache_settled`` is false by definition and every name is older than the max age, so
+all ~4,100 names re-download on every fire. That is ~12 minutes of continuous yfinance
+traffic per run, ~2.8 hours a day, and draws ``YFRateLimitError``. Intraday only the
+watchlist and positions are read; the rest of the universe is read only by a screen.
 
-The FULL SCAN (screening: template chain, VCP, RS) is never here — Re-scan owns it.
+The full scan (template chain, VCP, RS) is never here: ``screen_job.py`` and the app's
+Re-scan own it.
 
-NEVER places orders: a trigger means YOU judge it and buy via the trade panel
-(HANDOFF §6.11/§6.14/§6.18).
+Never places orders: a trigger means you judge it and buy via the trade panel.
 """
 from __future__ import annotations
 
@@ -55,28 +53,26 @@ SCOPE_WATCHLIST = "watchlist"
 SCOPE_UNIVERSE = "universe"
 SCOPES = (SCOPE_WATCHLIST, SCOPE_UNIVERSE)
 
-# A safety valve against DUPLICATE work, not a freshness policy: anything re-run inside
-# this window (a hand invocation, a fire landing on a slow predecessor's heels) is served
-# from cache instead of re-downloading. 0.0 — the old value — made the freshness branch in
-# _classify_cached unreachable, since no existing file is ever <= 0 days old, which is why
-# every intraday sweep re-fetched all ~4,100 names.
+# A safety valve against duplicate work, not a freshness policy: a re-run inside this
+# window (a hand invocation, a fire on a slow predecessor's heels) is served from cache.
+# It MUST be above 0: no existing file is ever <= 0 days old, so 0 makes the freshness
+# branch in _classify_cached unreachable.
 #
-# Deliberately well under HALF the 30-minute cadence. The age is measured from when a file
-# was WRITTEN, not when its run started, so the real gap to the next fire is the interval
-# minus the run's duration minus AccuracySec. At ~29 minutes that margin was under a
-# minute and a single slow run would have made the next scheduled fire serve its own last
-# sweep from cache and silently skip refreshing.
+# It MUST stay well under half the 30-minute cadence. Age is measured from when a file
+# was written, not when its run started, so the real gap to the next fire is the interval
+# minus the run's duration minus AccuracySec. Near 29 minutes, one slow run makes the next
+# fire serve the last sweep from cache and silently skip the refresh.
 REFRESH_MAX_AGE_DAYS = 0.01         # ~14.4 minutes
 
 
 def refresh_targets(scope: str) -> List[str]:
-    """The tickers this run should top up. Never raises.
+    """The tickers this run tops up. Never raises.
 
-    ``universe`` is the scan universe. ``watchlist`` is the watchlist UNION the paper
-    account's open positions — the union matters because those two drift apart: a name
-    sells out of the watchlist but is still held, or is held but was never watchlisted.
-    An unreachable broker (no credentials, network down) degrades to watchlist-only
-    rather than failing the refresh; the watchlist is the half with a deadline."""
+    ``universe`` is the scan universe, or empty when it is unavailable. ``watchlist`` is
+    the watchlist plus the paper account's open positions. The two drift apart: a name
+    leaves the watchlist but is still held, or is held but was never watchlisted. An
+    unreachable broker (no credentials, network down) degrades to watchlist-only rather
+    than failing the refresh; the watchlist is the half with a deadline."""
     if scope == SCOPE_UNIVERSE:
         try:
             return list(data_feed.get_universe(DEFAULT_UNIVERSE))
@@ -106,12 +102,11 @@ def refresh_targets(scope: str) -> List[str]:
 
 def refresh_prices(tickers: Sequence[str], *, scope: str,
                    max_age_days: float = REFRESH_MAX_AGE_DAYS) -> dict:
-    """Top up ``tickers``; return ``{ticker: DataFrame}``.
+    """Top up ``tickers``; return ``{ticker: DataFrame}``, empty for no tickers.
 
-    Failures degrade per name inside ``get_many_prices`` (a name with no data is simply
-    absent) and the sweep's own summary — requested / cached / topup / full / wrote /
-    failed — lands in the run log, so a zero-network sweep stays distinguishable from one
-    that never ran."""
+    Failures degrade per name inside ``get_many_prices``: a name with no data is absent.
+    The sweep's summary (requested, cached, topup, full, wrote, failed) lands in the run
+    log, so a zero-network sweep is distinguishable from one that never ran."""
     if not tickers:
         return {}
     _LOG.info("%s top-up starting: %d tickers", scope, len(tickers))
@@ -125,14 +120,14 @@ def refresh_prices(tickers: Sequence[str], *, scope: str,
 def build_report(today=None, write_watchlist: bool = True,
                  prefetched: Optional[dict] = None,
                  max_age_days: float = REFRESH_MAX_AGE_DAYS) -> dict:
-    """Fetch -> auto-freeze -> evaluate. Returns the report dict (see triggers.py).
+    """Fetch, auto-freeze pivots, evaluate. Returns the report dict (see triggers.py).
 
-    ``prefetched`` is the sweep's result: any watchlisted name already in it is reused
-    rather than re-fetched. Names outside that set — plus SPY, which is never in the scan
-    universe — are fetched here. Auto-frozen pivots are persisted BEFORE the evaluation
-    (skipped under ``--no-write``) so tomorrow's run checks the same level; the write-back
-    merges into a fresh read of the file so a concurrent app-session save is never
-    clobbered. Every per-name data problem degrades to that name's row, never a crash."""
+    ``prefetched`` is the sweep's result; a watchlisted name already in it is reused.
+    Other names, and always SPY (never in the scan universe), are fetched here.
+    Auto-frozen pivots are persisted before the evaluation, unless ``write_watchlist`` is
+    False, so tomorrow's run checks the same level. The write-back merges into a fresh
+    read of the file, so a concurrent app-session save is never clobbered. A per-name
+    data problem degrades to that name's row, never a crash."""
     entries = export.load_watchlist(cache.WATCHLIST_JSON)
     syms = export.watchlist_tickers(entries)
 
@@ -147,10 +142,10 @@ def build_report(today=None, write_watchlist: bool = True,
 
     entries, frozen = triggers.freeze_missing_pivots(entries, frames, today=today)
     if frozen and write_watchlist:
-        # Merge into the file's CURRENT state, not the copy loaded before the slow price
-        # fetch: an app-session save during that window (remove / 📌 re-freeze / add)
-        # would otherwise be clobbered. Disk wins membership and any pivot it has; our
-        # auto pivots land only on entries still unfrozen on disk.
+        # MUST merge into the file's current state, not the copy loaded before the slow
+        # price fetch: an app-session save in that window (remove, 📌 re-freeze, add)
+        # would be clobbered. Disk wins membership and any pivot it has; auto pivots land
+        # only on entries still unfrozen on disk.
         disk = export.load_watchlist(cache.WATCHLIST_JSON)
         export.save_watchlist(cache.WATCHLIST_JSON,
                               export.merge_frozen_pivots(disk, entries))

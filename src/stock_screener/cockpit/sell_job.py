@@ -1,16 +1,18 @@
-"""Auto-sell CLI — the two scheduled halves of the P1-P4 sell automation.
+"""Auto-sell CLI: the two scheduled halves of the P1-P4 sell automation.
 
     python src/stock_screener/cockpit/sell_job.py plan    [--date YYYY-MM-DD] [--no-write]
     python src/stock_screener/cockpit/sell_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
-``plan`` runs after the settled close (16:15 ET): reads the paper account, evaluates
-the sell pillars per holding exactly as the Positions page does (journal entry dates,
-watchlist frozen pivots, trigger-report SPY note), and writes the dated sell plan the
-page renders for overnight veto. ``execute`` runs pre-open (~09:25 ET): submits a
-market SELL for every still-planned order via the stop-aware flow — pre-open orders
-queue for the opening print. Execution requires ``AUTOSELL=1`` in the environment
-(.env); without it the run reports "disabled" and exits clean, so the timer can ship
-before the feature is armed. Paper account only.
+``plan`` runs after the settled close (16:15 ET). It reads the paper account, evaluates
+the sell pillars per holding as the Positions page does (journal entry dates, watchlist
+frozen pivots, trigger-report SPY note) and writes the dated sell plan the page renders
+for the overnight veto.
+
+``execute`` runs pre-open (~09:25 ET). It submits a market SELL for every still-planned
+order via the stop-aware flow; pre-open orders queue for the opening print. Execution
+requires ``AUTOSELL=1`` in the environment (.env). Without it the run leaves the plan
+untouched and exits 0, so the timer can ship before the feature is armed. Paper account
+only.
 """
 from __future__ import annotations
 
@@ -29,10 +31,13 @@ from src.stock_screener.cockpit import (cache, export, plan_store, sells,  # noq
 
 
 def _positions_and_pillars(today=None):
-    """The Positions page's pillar wiring, headless. Every side input is best-effort —
-    a missing journal/watchlist/report degrades pillars to unknown, and unknown never
-    trades. The scan-store regime isn't available in a fresh process; P3 falls back to
-    the trigger report's SPY note (and P3 is report-only in the plan anyway)."""
+    """The Positions page's pillar wiring, headless. Returns ``(data, positions, pillars,
+    spy_note)``; a failed positions read raises.
+
+    Every side input is best effort: a missing journal, watchlist or report degrades
+    pillars to unknown, and unknown never trades. The scan-store regime isn't available
+    in a fresh process, so P3 falls back to the trigger report's SPY note. P3 is
+    report-only in the plan."""
     data = trade.fetch_positions()
     positions = data["positions"]
     try:
@@ -111,19 +116,19 @@ def cmd_execute(date: Optional[str], dry_run: bool) -> int:
           f"vetoed={summary['vetoed']}  skipped={summary['skipped']}  "
           f"failed={summary['failed']}")
     print(sells.format_plan(plan))
-    # A disabled or stale run returns before touching the plan, so saving would only
-    # rewrite identical bytes and move the file's mtime — matching entry_job.
+    # A disabled or stale run returns before touching the plan; saving it would only
+    # move the file's mtime.
     if not dry_run and summary["status"] not in ("disabled", "stale"):
         sells.save_sell_plan(plan)
-    # "stale" is a NORMAL outcome (a holiday, or a morning fire with no plan from the
-    # night before) and the exit-code contract reserves 1 for real failures — a red
-    # systemd unit on an ordinary skip trains you to ignore the one that matters.
+    # "stale" is normal: a holiday, or a morning with no plan from the night before.
+    # Exit 1 MUST be reserved for real failures. A red systemd unit on an ordinary skip
+    # trains you to ignore the one that matters.
     return 1 if summary["status"] in ("failed", "partial") else 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    # AUTOSELL lives in .env on the Pi; the compose service passes it, but a hand-run
-    # laptop invocation has to load it the same way entry_job does.
+    # AUTOSELL lives in .env. The compose service passes it, but a hand run on the
+    # laptop needs it loaded here.
     try:
         from dotenv import load_dotenv
         load_dotenv()

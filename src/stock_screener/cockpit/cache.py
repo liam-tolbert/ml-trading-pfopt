@@ -1,8 +1,8 @@
-"""On-disk cache locations + staleness helpers for the cockpit.
+"""On-disk cache locations and staleness helpers for the cockpit.
 
-Everything lives under ``data/cockpit/`` (gitignored like the rest of ``data/``).
-Prices are cached one parquet per ticker so the daily scan is fast after the first
-run; staleness is measured by file mtime in days.
+Everything lives under ``data/cockpit/``, gitignored like the rest of ``data/``. Prices
+are cached one parquet per ticker, so the daily scan is fast after the first run.
+Staleness is file mtime age in days.
 """
 from __future__ import annotations
 
@@ -19,10 +19,9 @@ TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports + entry/sell p
 LOGS_DIR = CACHE_DIR / "logs"                   # dated run logs, pruned by runlog.RETENTION_DAYS
 LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"     # newest completed ScanResult (scan_worker)
 
-# Bump whenever the persisted scan dict changes shape. It lives here, not in
-# scan_worker, because the weekend hunt reads that same pickle: two copies of the
-# number meant a writer could be bumped while the reader silently kept accepting the
-# old shape.
+# MUST be bumped whenever the persisted scan dict changes shape. It lives here, not in
+# scan_worker, because the weekend hunt reads the same pickle. With two copies, the writer
+# could be bumped while the reader still accepted the old shape.
 SCAN_PERSIST_VERSION = 1
 
 

@@ -73,9 +73,9 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
     import pandas as pd
     diag_df = pd.DataFrame(diag_rows)
 
-    # The buckets come from pipeline.gates so the HTML and the `gates` CLI can never
-    # disagree about the same run; min_fund=0 here because the report SHOWS every PASS
-    # name and applies the fundamental gate only to the summary line below.
+    # The buckets MUST come from pipeline.gates, so the HTML and the `gates` CLI agree.
+    # min_fund=0 because the report shows every PASS name; the fundamental gate applies
+    # only to the summary line.
     passing = [r for r in diag_rows if (verdicts.get(r["ticker"]) or {}).get("verdict") == "PASS"]
     g = pl.gates(diag_df, verdicts, min_fund=0)
     by_ticker = {r["ticker"]: r for r in diag_rows}

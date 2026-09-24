@@ -1,8 +1,8 @@
-"""Trade journal page — "know your numbers" for the Minervini Trader Alpaca paper account.
+"""Trade journal page: "know your numbers" for the Minervini Trader Alpaca paper account.
 
-Separate from the scan page so it loads instantly. Reconstructs closed round trips from the
-account's order history — every cockpit order is tagged via client_order_id
-(SEPAoto-/SEPAstop-/SEPAcockpit-), so no separate bookkeeping is needed — and shows the
+A page of its own, so it loads instantly. Closed round trips are rebuilt from the
+account's order history. Every cockpit order is tagged via client_order_id
+(SEPAoto-/SEPAstop-/SEPAcockpit-), so no separate bookkeeping is needed. The page shows the
 numbers Minervini says drive progressive exposure (*Think & Trade Like a Champion*): batting
 average, average win vs average loss, and per-trade expectancy.
 
@@ -14,8 +14,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-# This page imports cockpit modules, so the repo ROOT must be on sys.path. From pages/:
-# pages=0, cockpit=1, stock_screener=2, src=3, root=4.
+# The cockpit imports need the repo root on sys.path. From pages/: pages=0, cockpit=1,
+# stock_screener=2, src=3, root=4.
 ROOT = Path(__file__).resolve().parents[4]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -26,8 +26,8 @@ from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
 
-# Warm the universe scan in the background so it's already fetching/screening by the time
-# the user opens the scan page (inert under AppTest — see scan_worker.autostart).
+# Warm the universe scan in the background, so it is under way by the time the user opens
+# the scan page. Inert under AppTest.
 scan_worker.autostart()
 
 st.set_page_config(page_title="Journal", page_icon="🧾", layout="wide")
@@ -85,7 +85,8 @@ closed = [t for t in journal["closed"] if t["tagged"] or not only_tagged]
 open_eps = [t for t in journal["open"] if t["tagged"] or not only_tagged]
 stats = trade.journal_stats(closed)
 
-# --- Headline stats (one '$' per metric value — two render as a LaTeX math span) ------------ #
+# --- Headline stats -------------------------------------------------------------------------- #
+# A metric value MUST hold at most one '$': two render as a LaTeX math span.
 m = st.columns(5)
 m[0].metric("Closed trades", str(stats["n"]), border=True)
 m[1].metric("Batting avg", _pct(stats["batting_avg"], digits=0), border=True,

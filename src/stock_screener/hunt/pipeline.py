@@ -1,17 +1,16 @@
 """Deterministic core of the weekend hunt.
 
-Reads the cockpit's last completed scan (READ-ONLY — scan freshness is
-scan_worker's job; cockpit-eod rebuilds it every weekday evening) and turns it
-into the reviewable state the /weekend-hunt skill works from: candidate
-diagnostics, verdict bookkeeping, and the mechanical gates.
+Turns the cockpit's last completed scan into the state the /weekend-hunt skill works
+from: candidate diagnostics, verdict bookkeeping and the mechanical gates. The scan is
+read-only here. Keeping it fresh is scan_worker's job; cockpit-eod rebuilds it every
+weekday evening.
 
-The entry rules live here as named constants with their sources, because this
-is exactly what got fumbled when the process was ad hoc:
+The entry rules are named constants. Their sources:
 
-- Buy zone is pivot to +5% (scan.py ``buy_zone`` — "no chasing > +5%"; SEPA doc
-  "Entry within 5% of pivot"). The +10% in vcp.BUY_ZONE_PCT is only the Tier-A
-  *screening* tolerance and is never an entry bound.
-- The RS floor is 70 (Step-1 checklist; the app's Min-RS default).
+- The buy zone is the pivot to +5% (scan.py ``buy_zone``; SEPA doc "Entry within 5%
+  of pivot"). The +10% in vcp.BUY_ZONE_PCT is only the Tier-A screening tolerance and
+  MUST NOT be used as an entry bound.
+- The RS floor is 70 (the Step-1 checklist; the app's Min-RS default).
 """
 from __future__ import annotations
 
@@ -37,10 +36,9 @@ from src.stock_screener.cockpit.indicators import prior_volume_average, volume_r
 MIN_RS = 70                    # Step-1 floor / app Min-RS default
 BUY_ZONE_MAX_PCT = NO_CHASE_PCT * 100.0   # pivot .. +5% = the entry range (scan.py buy_zone)
 APPROACH_MIN_PCT = -3.0        # within 3% below pivot = "approaching"
-MAX_SCAN_AGE_DAYS = 3.0        # hunt must run off a weekend-fresh scan
-# VOL_CONFIRM_RATIO / VOL_AVG_DAYS / EARNINGS_BLOCK_DAYS are imported from cockpit.doctrine:
-# the hunt and the daily trigger job enforce the SAME entry rules, and while each kept its
-# own copy the hunt confirmed breakouts at a looser ratio over a shorter window.
+MAX_SCAN_AGE_DAYS = 3.0        # the hunt MUST run off a weekend-fresh scan
+# VOL_CONFIRM_RATIO, VOL_AVG_DAYS and EARNINGS_BLOCK_DAYS come from cockpit.doctrine: the
+# hunt MUST enforce the same entry rules as the daily trigger job.
 HUNT_DIR = CACHE_DIR / "hunt"
 
 VERDICTS = ("PASS", "PASS-", "FAIL")
@@ -59,7 +57,10 @@ class ScanBundle:
 
 # --------------------------------------------------------------------------- #
 def load_scan(path: Optional[Path] = None) -> ScanBundle:
-    """Load the persisted last scan, refusing stale/missing/foreign pickles."""
+    """Load the persisted last scan from ``path`` (default: the cockpit's last-scan pickle).
+
+    Raises HuntError when the file is missing, has the wrong shape or version, or is
+    older than ``MAX_SCAN_AGE_DAYS``."""
     path = Path(path) if path else _LAST_SCAN_PKL
     if not path.exists():
         raise HuntError(f"{path} not found — run a scan from the cockpit first "
@@ -95,7 +96,7 @@ def status(bundle: ScanBundle) -> dict:
 
 
 def candidates(bundle: ScanBundle, min_rs: int = MIN_RS) -> pd.DataFrame:
-    """Tier A ∩ RS floor, in scan order (tier, quality, fund, rs)."""
+    """Tier-A rows with ``rs >= min_rs``, in scan order (tier, quality, fund, rs)."""
     cand = bundle.result.candidates
     out = cand[(cand["tier"] == "A") & (cand["rs"] >= min_rs)].reset_index(drop=True)
     return out
@@ -112,9 +113,9 @@ def _watchlist_tickers() -> List[str]:
 
 
 def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
-    """One row per candidate: everything the review + gates + report need.
+    """One row per candidate in ``cand``, with every column the review, gates and report read.
 
-    Purely derived from the scan payloads — nothing here refetches prices.
+    Derived from the scan payloads alone; nothing is fetched.
     """
     wl = set(_watchlist_tickers())
     rows = []
@@ -160,11 +161,10 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "stop_room": round(room["room_days"], 1) if room else None,
             "earnings_in": p.get("earnings_in"),
             "breakout_today": int(bool(lev.get("breakout_today"))),
-            # Computed here, NOT read from lev["volume_ratio"]: that field is the
-            # vendored detector's 20-day context read, so confirming against it applied a
-            # different rule than the daily trigger job to the same doctrine.
+            # MUST NOT come from lev["volume_ratio"]: that is the vendored detector's
+            # 20-day context read, a different rule from the daily trigger job's.
             "volume_ratio": round(volume_ratio(df, VOL_AVG_DAYS) or 0.0, 2),
-            # step-2 detail (booleans as 0/1 so the CSV round-trips cleanly)
+            # Step-2 checks as 0/1 so the CSV round-trips
             "f_rev": int(bool(checks.get("revenue_growth"))),
             "f_eps": int(bool(checks.get("eps_growth"))),
             "f_accel": int(bool(checks.get("eps_accelerating"))),
@@ -176,7 +176,9 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
 
 # --------------------------------------------------------------------------- #
 def bucket(vs_pivot_pct: float) -> str:
-    """Position vs the ENTRY rules (not the Tier-A screening tolerance)."""
+    """Bucket a close's % from its pivot by the entry rules, not the Tier-A tolerance.
+
+    Returns ``"past_entry"``, ``"buy_zone"``, ``"approaching"`` or ``"below"``."""
     if vs_pivot_pct > BUY_ZONE_MAX_PCT:
         return "past_entry"
     if vs_pivot_pct >= 0.0:
@@ -194,8 +196,13 @@ def _earnings_blocked(earnings_in) -> bool:
 
 
 def gates(diag: pd.DataFrame, verdicts: Dict[str, dict], min_fund: int = 0) -> dict:
-    """Mechanical gates over the PASS names. min_fund is a *parameter* the user
-    chooses per run — never silently applied to the review itself."""
+    """Mechanical gates over the names ``verdicts`` marks PASS.
+
+    ``min_fund`` is chosen per run. It filters the gates only and MUST NOT be applied to
+    the review. Returns row lists keyed ``buy_zone``, ``approaching``, ``below``,
+    ``past_entry``, ``earnings_blocked`` and ``volume_confirmed``, plus ``min_fund``. An
+    earnings-blocked name is in no other list. The four zone lists are sorted by quality,
+    best first."""
     out = {"buy_zone": [], "approaching": [], "below": [], "past_entry": [],
            "earnings_blocked": [], "volume_confirmed": [], "min_fund": min_fund}
     for _, r in diag.iterrows():
@@ -208,12 +215,11 @@ def gates(diag: pd.DataFrame, verdicts: Dict[str, dict], min_fund: int = 0) -> d
                "fund": int(r["fund"]), "q": float(r["q"]), "rs": int(r["rs"])}
         if _earnings_blocked(r["earnings_in"]):
             out["earnings_blocked"].append({**row, "earnings_in": int(float(r["earnings_in"]))})
-            continue                      # blocked names appear nowhere else
+            continue
         b = bucket(row["vs_pivot_pct"])
         out[b].append(row)
-        # Confirmation is a BUY-ZONE verdict, not a price observation: a name that closed
-        # more than +5% past its pivot is chasing however heavy the volume was, and
-        # listing it as "confirmed" invites exactly the entry the doctrine forbids.
+        # Only a buy-zone name MAY be listed as confirmed. Past +5% it is a chase, however
+        # heavy the volume.
         if (b == "buy_zone" and bool(r["breakout_today"])
                 and float(r["volume_ratio"]) >= VOL_CONFIRM_RATIO):
             out["volume_confirmed"].append({**row, "volume_ratio": float(r["volume_ratio"])})
@@ -223,7 +229,8 @@ def gates(diag: pd.DataFrame, verdicts: Dict[str, dict], min_fund: int = 0) -> d
 
 
 def watchlist_audit(diag: pd.DataFrame, verdicts: Dict[str, dict]) -> List[dict]:
-    """Status card per pinned name — including the not-Tier-A / sub-RS states."""
+    """One status card per watchlist name. A name not in ``diag`` (not Tier A, or under
+    the RS floor) gets state ``not_eligible``."""
     by_t = {r["ticker"]: r for _, r in diag.iterrows()}
     cards = []
     for t in _watchlist_tickers():
@@ -247,7 +254,10 @@ def hunt_dir(date: Optional[str] = None) -> Path:
 
 
 def append_verdicts(path: Path, rows: List[dict]) -> int:
-    """Append a reviewed batch. rows: {ticker, verdict, notes}."""
+    """Append ``rows`` ({ticker, verdict, notes}) to the verdict CSV at ``path``.
+
+    Raises HuntError, before writing anything, when a verdict is not in ``VERDICTS``.
+    Returns the number of rows appended."""
     for r in rows:
         if r.get("verdict") not in VERDICTS:
             raise HuntError(f"bad verdict {r.get('verdict')!r} for {r.get('ticker')!r} "
@@ -270,7 +280,9 @@ def read_verdicts(path: Path) -> Dict[str, dict]:
 
 
 def validate_verdicts(path: Path, diag: pd.DataFrame) -> List[str]:
-    """Every candidate exactly once; no strays; no bad labels. [] == clean."""
+    """Check that ``path`` holds exactly one valid verdict per candidate in ``diag``.
+
+    Returns the problems found; an empty list means clean."""
     problems: List[str] = []
     seen: Dict[str, int] = {}
     if path.exists():

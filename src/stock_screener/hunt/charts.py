@@ -68,10 +68,10 @@ def _panel(fig, gs, j, bundle: ScanBundle, r: dict, bars: int) -> None:
         axp.plot(x, full_c.rolling(win).mean().tail(bars).to_numpy(), color=col, lw=1.0)
 
     piv = float(lev["pivot"])
-    axp.axhline(piv, color=_UP, ls="--", lw=1.2)                                  # pivot
-    axp.axhline(piv * (1 + BUY_ZONE_MAX_PCT / 100), color=_UP, ls=":", lw=0.8,    # entry ceiling
+    axp.axhline(piv, color=_UP, ls="--", lw=1.2)
+    axp.axhline(piv * (1 + BUY_ZONE_MAX_PCT / 100), color=_UP, ls=":", lw=0.8,
                 alpha=0.6)
-    axp.axhline(float(lev["stop"]), color=_DN, ls=":", lw=1.0)                    # stop
+    axp.axhline(float(lev["stop"]), color=_DN, ls=":", lw=1.0)
 
     idx = df.index
     for cn in v["contractions"]:
@@ -92,8 +92,8 @@ def _panel(fig, gs, j, bundle: ScanBundle, r: dict, bars: int) -> None:
     axp.set_xticks(mk)
     axp.set_xticklabels([idx[i].strftime("%b") for i in mk], fontsize=7)
 
-    # The gate's own denominator (prior N bars, today excluded), so the plotted line is
-    # the one a confirmation is actually measured against.
+    # The gate's own average (prior N bars, today excluded): the line a confirmation is
+    # measured against.
     vs50 = prior_volume_average(pd.Series(vol), VOL_AVG_DAYS).to_numpy()
     axv.bar(x, vol, color=color, width=0.8, alpha=0.8)
     axv.plot(x, vs50, color="#1f78b4", lw=1.0)

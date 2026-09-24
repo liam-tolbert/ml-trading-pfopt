@@ -18,8 +18,8 @@ import json
 import sys
 from pathlib import Path
 
-# `python -m src.stock_screener.hunt` from the repo root already has ROOT on
-# sys.path; this insert covers being launched from elsewhere (test style).
+# `python -m src.stock_screener.hunt` from the repo root already has ROOT on sys.path.
+# The insert covers a launch from anywhere else.
 _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
