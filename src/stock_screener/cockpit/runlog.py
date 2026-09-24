@@ -117,13 +117,18 @@ class DatedFileHandler(logging.Handler):
         self._stream = None
         self._key = None                # (day, resolved dir) the open stream belongs to
 
-    def release(self) -> None:
+    def release_file(self) -> None:
         """Drop the open file handle WITHOUT tearing the handler down — it re-opens
         lazily on the next record, so this is safe to call at any time.
 
         Exists because Windows refuses to unlink a file that is still open: a test whose
         ``TemporaryDirectory`` holds today's log fails its cleanup with ``WinError 32``.
-        POSIX allows the unlink, which is why the Pi's gate and CI never see it."""
+        POSIX allows the unlink, which is why the Pi's gate and CI never see it.
+
+        NOT named ``release``: that is ``logging.Handler``'s lock-release, which
+        ``Handler.handle`` calls after every emit. Overriding it leaves the handler lock held
+        by the first thread that logs, and every other thread that logs — a page's price
+        read in the app, the background scan — blocks forever."""
         try:
             if self._stream is not None:
                 self._stream.close()
@@ -137,7 +142,7 @@ class DatedFileHandler(logging.Handler):
         key = (_today(), _logs_dir())
         if self._stream is not None and key == self._key:
             return
-        self.release()
+        self.release_file()
         day, directory = key
         directory.mkdir(parents=True, exist_ok=True)
         self._stream = open(log_path(day), "a", encoding="utf-8")
@@ -153,7 +158,7 @@ class DatedFileHandler(logging.Handler):
             self.handleError(record)
 
     def close(self) -> None:
-        self.release()
+        self.release_file()
         super().close()
 
 
@@ -195,4 +200,4 @@ def release_files() -> None:
     and aborts the run mid-suite. Harmless everywhere else."""
     for h in logging.getLogger(_ROOT_NAME).handlers:
         if isinstance(h, DatedFileHandler):
-            h.release()
+            h.release_file()

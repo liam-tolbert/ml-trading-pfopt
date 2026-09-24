@@ -99,6 +99,49 @@ def test_runlog_logger_is_isolated_from_the_stdlib_root():
     assert any(isinstance(h, runlog.DatedFileHandler) for h in root.handlers), root.handlers
 
 
+def test_runlog_second_thread_can_log():
+    """§6.79: a record from one thread must not lock out every other thread.
+
+    ``DatedFileHandler`` used to define ``release()`` to drop its file handle — the name of
+    ``logging.Handler``'s LOCK release, which ``Handler.handle`` calls after each emit. So
+    the handler lock was acquired and never released: the first thread to log owned it
+    forever and the next one blocked. In the app that is a page's price read (Positions,
+    Build plan, Journal) against the background scan — found 2026-09-23 when the Journal's
+    new cache-only read hung the gate at exit, and the likeliest cause of the Positions
+    page spinning on "Reading the paper account…" with its Alpaca socket idle. Threads
+    and a join bound, so a regression fails here instead of hanging the gate."""
+    import logging
+    import tempfile
+    import threading
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import cache as cachemod
+    from src.stock_screener.cockpit import runlog
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with patch.object(cachemod, "LOGS_DIR", Path(tmp) / "logs"):
+            handler = runlog.DatedFileHandler()
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            log = logging.getLogger("cockpit_test_second_thread")
+            log.propagate = False
+            log.addHandler(handler)
+            try:
+                done = []
+                for name in ("A", "B", "C"):
+                    th = threading.Thread(target=lambda n=name: (log.warning(n),
+                                                                 done.append(n)),
+                                          daemon=True)
+                    th.start()
+                    th.join(5)
+                    assert not th.is_alive(), (f"thread {name} blocked on the handler lock "
+                                               f"after {done} logged")
+                assert done == ["A", "B", "C"], done
+                assert handler.lock.acquire(blocking=False), "handler lock left held"
+                handler.lock.release()
+            finally:
+                log.removeHandler(handler)
+                handler.close()
+
 
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "runlog"))
