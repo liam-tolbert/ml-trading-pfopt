@@ -173,6 +173,13 @@ the discipline.
 - **yfinance races.** Concurrent single-ticker `yf.download` calls corrupt each other's results via
   shared global state. Use the batch download; `_YF_LOCK` serializes in-process. Never reintroduce a
   ThreadPool over per-ticker `yf.download`.
+- **Account and order-history reads are per browser session** (§6.71). The Positions page's account
+  read (`_session_positions`) and the shared order history (`journal_cache.cached_fills`) live in
+  `st.session_state`, keyed by the page's nonce (`pos_nonce` / `jr_nonce`) and reused for at most
+  **60 s** (`POS_MAX_AGE_S` / `FILLS_MAX_AGE_S`). Widget reruns reuse the read; Refresh, sell and
+  re-arm bump the nonce; age catches "came back after trading on another page", because session
+  state outlives page switches. Failures are never memoized, so Refresh always retries. The
+  Positions caption shows `as of HH:MM:SS ET`.
 
 ## 7. Doctrine — how it is traded
 
@@ -269,6 +276,20 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 
 **Health check one-liner:** `journalctl -u 'cockpit-*' --since -7d | grep -c 'Failed with result'`
 
+**App hung?** (a page spins forever and Refresh does nothing). Separate "the account is unreachable"
+from "the app process is wedged" by running the page's read in a **fresh** process inside the same
+container. `-i` is required or the heredoc never reaches Python and the call silently does nothing:
+
+    docker exec -i -w /app cockpit-app python - <<'PY'
+    from src.stock_screener.cockpit import trade; print(trade.fetch_positions()["account"])
+    PY
+
+If that answers in seconds while the page still spins, the long-running app is stuck:
+`docker compose restart app` (no sudo; safe in market hours — every timer job runs in its own
+`oneshot` container, and the watchlist, scan and plans are on disk). Since §6.71 every Alpaca call
+times out, so a true hang should no longer happen. If one does, check the app's sockets before
+restarting: the §6.71 signature was one ESTABLISHED, empty-queue socket to `paper-api.alpaca.markets`.
+
 ## 9. Conventions
 
 - **Source comments say WHY the code must be this way, never which bug/review/date produced it**
@@ -281,6 +302,14 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
   is a glob so new category files need no second edit.
 - **Tests must not depend on wall-clock or market state.** Time-coupled features need an explicit
   bypass (e.g. the negative-`max_age_days` sentinel).
+- **Never `st.cache_data` per-account or per-visitor state.** It is ONE cache per server process,
+  and a key built from a per-session counter that starts at 1 is shared by every visitor. They get
+  the first visitor's snapshot with no expiry and queue behind its in-flight fetch (§6.71). Memoize
+  in `st.session_state` with a nonce plus a max age instead. `st.cache_data` stays right only for
+  data that is genuinely the same for everyone.
+- **Every outbound network call carries a timeout**, and a timed-out *read* raises
+  (`TradeUnavailable`). It never degrades to an empty result that looks like a real answer: an empty
+  stops list reads as "unprotected" (§6.71).
 - **The user commits all code themselves.** Claude leaves the tree dirty for review — their push is
   the human gate in front of the Pi's auto-deploy.
 - **Don't edit tracked files inside the Pi's checkout** — a modified tracked file trips the
@@ -288,6 +317,8 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 - **AppTest gotchas:** `at.session_state` has no `.get()`/`.setdefault()`; widget refs go stale after
   each `.run()`; there is no `at.download_button`/`at.file_uploader` accessor — test pure helpers
   directly instead, which is why sizing/parsing live in `export.py`/`trade.py`, not inline in `app.py`.
+  Two `AppTest` instances are two *sessions* that share one process's `st.cache_data`, which makes
+  them a faithful model of two browsers on the Pi. That is how the §6.71 tests prove isolation.
 
 ## 10. Reference — hard-won specifics
 
@@ -336,6 +367,16 @@ entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 
   buy). Millisecond timestamps avoid duplicate-id rejects on fast resubmit.
 - **Protective stops are exempt** from the $50 floor and the 10%-equity cap — risk-reducing actions
   must never be blocked by a size guard.
+- **alpaca-py sends no request timeout**, so a silently dropped connection blocks forever. Every
+  cockpit client comes from `trade._connect_paper()`, which calls `_with_timeout`: an adapter
+  mounted on the SDK's private `client._session` that fills in **`ALPACA_TIMEOUT_S = (5, 15)`** s
+  (connect, read) unless the caller set one. `test_connect_paper_installs_timeout` pins that hook
+  against the image's alpaca-py pin, so an upgrade that drops `_session` fails the deploy gate
+  instead of shipping without a timeout. (`alpaca_trader.connect()`, the All-Weather mirror, is not
+  covered.)
+- **A timeout on a submit is ambiguous** — the order may have reached Alpaca and only the response
+  been lost. Check the account before retrying a buy/sell that timed out. `execute_sell_plan`
+  already refuses to auto-retry a failed order for this reason.
 
 **Universe filter (`full_us`).** Built from NASDAQ Trader `nasdaqlisted.txt` + `otherlisted.txt` over
 **HTTPS** (upstream's `ftp://` is commonly blocked). The warrant/right/unit drop **must stay anchored
@@ -444,7 +485,12 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - Dead members removed: `FREE_ROLL_FRACTION`, `cache.TICKERS_TXT` (the file never existed, so the "offline fallback" was always `[]`), and the vcp payload's `breakout_volume_ratio`/`near_52w_high`/`distance_from_52w_high_pct` — the first computed per ticker on a ~4,100-name hot path for no reader. `run_scan`/`get_universe` no longer DEFAULT to `sp500`: the argument is required, so a bare call fails at the call site instead of silently screening a different universe.
 - **§6.68** **Test suite split.** 6,411 lines / 144 tests → a 70-line runner plus 12 category suites under `tests/cockpit/`. Split by an AST script that aborts unless every test is assigned exactly once. `_common.py` holds the 12 shared fixtures and must re-export them via `__all__` (`import *` skips underscore names). Two path traps: `ROOT` moved to `parents[2]`, and `vcp_labels` is imported *bare*, which only resolved while the suite ran as a script from `tests/`.
 - **§6.69** **The two EOD units became one.** The first-ever `cockpit-screen-eod` run (2026-08-28) exposed both halves of the problem at once. (a) It crashed at the last line with `ValueError: The truth value of a DataFrame is ambiguous` — `screen_job.py` did `getattr(res, "candidates", []) or []`, and `candidates` is a DataFrame. The crash landed *after* `store.put`, so the scan table was correct and only the exit code lied; **never `or []` a DataFrame**. (b) The sweep ran 16:20:20→16:35:43 (15m23s) while the screen fired at 16:25, so the two contended for yfinance and the screen re-fetched what the sweep had not reached — 30 minutes against the ~5 a warm cache costs. A clock gap cannot enforce ordering against a job whose runtime varies 11–18 min, so `cockpit-refresh-eod` + `cockpit-screen-eod` collapsed into `cockpit-eod`: `Type=oneshot` with two `ExecStart=` lines, which systemd runs serially and abandons if the first fails. `TimeoutStartSec` is **per-unit, not per-ExecStart** — hence 6000, the sum of the old two. `install-units.sh` removes installed `cockpit-*` units the repo no longer ships, so the old pair disappears on the next `sudo deploy/install-units.sh` with no manual cleanup.
-
+- **§6.71** **The Positions page hung for every visitor, then turned out to serve stale data to all of them.** 2026-09-23, ~10:20 ET: the page spun on "Reading the paper account…" indefinitely and Refresh did nothing. The account was fine — a fresh `docker exec` read returned HALO (422 sh, stop armed) in 2.7 s. The app container had been up 20 days. Inside it, 30 threads were parked on futexes, there was **one ESTABLISHED, empty-queue socket to `paper-api.alpaca.markets`**, and ~15 CLOSE_WAIT sockets to Yahoo. Stopgap: `docker compose restart app` at 10:36.
+  - **Why one call took everyone down.** alpaca-py sends no timeout, so the dropped connection blocked its call forever. That call was inside `@st.cache_data def _cached_positions(nonce)`, and `pos_nonce` starts at 1 in *every* session. So every visitor asked for the same process-wide key, and Streamlit's per-key compute lock queued them all behind the stuck fetch. Refresh can't help: Streamlit only interrupts a script between its own API calls, never mid-socket-read.
+  - **★ The same key served stale data after the restart.** A fresh visit at 11:03 showed equity $984,735 / P&L −$588 — the 10:37 snapshot — while the live account read $984,612 / −$710. The cache had no expiry, and only the Positions page's own buttons cleared it. A buy from the scan page or the 09:26 job, or an overnight stop-out, was therefore invisible to every new visitor until someone pressed Refresh there. `journal_cache.cached_fills` (keyed on `jr_nonce`, also starting at 1) had the identical flaw, feeding the Positions P1 entry dates, the Journal, and the trade panel's risk sizing. Its docstring even promised "one network fetch per session".
+  - **Fix 1 — timeouts.** `ALPACA_TIMEOUT_S = (5, 15)` via `trade._with_timeout` inside `_connect_paper`, so every cockpit Alpaca call is covered (§10). `fetch_positions` turns a `Timeout` into `TradeUnavailable` — the page's retry warning, never memoized. `_open_sell_stops_by_symbol` still returns `{}` on ordinary errors, **but raises on a timeout**: "no answer" is not "no stops", and `{}` would have shown HALO's armed stop as "⚠ No protective stop" and let `rearm_stops` stack a second stop on the same shares.
+  - **Fix 2 — per-session reads** (§6 Key data semantics). `_session_positions` and `journal_cache.cached_fills` now memoize in `st.session_state` by nonce with a 60 s max age. `app._risk_guidance`'s memo ages on the same clock, and still costs one fetch attempt per window during an outage. The Journal's Refresh just bumps the nonce. Eleven `cached_fills.clear()` calls were deleted from the tests; their only job had been stopping one test's cached result leaking into the next.
+  - **Tests (+5):** `test_connect_paper_installs_timeout`; `test_alpaca_timeout_ends_a_silent_connection`, which uses a real loopback socket that accepts and never answers and bounds the request with a thread join, so a regression fails instead of hanging the gate; `test_fetch_positions_timeout_is_trade_unavailable`; `test_positions_page_reads_account_per_session`; and `test_order_history_read_per_session`. Both per-session tests were run against `HEAD`'s code before the fix and **fail exactly at "session B"**: one fetch, and B shows A's snapshot.
 
 ## 12. Open items
 
@@ -468,6 +514,14 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   either. The interesting question is the opposite one: why `ACN`/`BRK-B` fall out of
   `_filter_us_symbols` at all.
 - **`AUTOBUY` / `AUTOSELL` unset** on both boxes — no automation is armed.
+- **Confirm the timeout hook on the image's alpaca-py (§6.71).** `_with_timeout` relies on the SDK's
+  private `client._session`, verified locally on **0.44.0**; the image pins **0.43.4**.
+  `test_connect_paper_installs_timeout` settles it on the first deploy of §6.71 — if that deploy
+  fails there, the hook moved and needs a version-specific path, not a skipped test.
+- **Leaked Yahoo connections.** After 20 days up, the app held ~15 CLOSE_WAIT sockets to
+  `query1/2.finance.yahoo.com` (the server closed them; the process never did). It's harmless at that
+  count and was not addressed in §6.71. If the app is ever up for months, count them
+  (`/proc/1/net/tcp`, remote port `01BB`) before suspecting anything else.
 
 ## Files (this venture)
 
