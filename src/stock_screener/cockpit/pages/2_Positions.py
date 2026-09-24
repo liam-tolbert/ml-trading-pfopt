@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from src.stock_screener.cockpit import advisories  # noqa: E402 (display-only SEPA reads)
 from src.stock_screener.cockpit import cache  # noqa: E402
 from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
@@ -362,7 +363,12 @@ for p in positions:
     if not trade.stop_is_valid(_ed, price):
         cB.caption(":red[stop must be < price — set manually]")
     elif price:
-        cA.caption(f"  ↳ risk to stop ≈ {(price - _ed) / price * 100:.1f}%")
+        # How many ORDINARY days of movement the stop sits below the price — a stop inside
+        # ~2 of them is shaken out by noise, not by the trade failing.
+        _dr = advisories.typical_day_range(p.get("df"))
+        _room = advisories.stop_room(_dr, _ed, price)
+        cA.caption(f"  ↳ risk to stop ≈ {(price - _ed) / price * 100:.1f}%"
+                   + (f" · {advisories.stop_room_text(_room, _dr)}" if _room else ""))
 
     # --- Manual sell (market, paper) — two-step confirm; the app never sells on its own --- #
     _held = int(p["qty"] or 0)

@@ -897,6 +897,8 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "stop_derived": stop_derived,
             "limit_price": round(limit, 2) if limit else None,
             "earnings_in": payload.get("earnings_in"),
+            # the name's typical day (%), so the panel can judge the stop against noise
+            "day_range_pct": (payload.get("vcp") or {}).get("median_tr_pct"),
         })
     return plan, skipped
 

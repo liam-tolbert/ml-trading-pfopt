@@ -7,8 +7,9 @@ into §5 and its standalone write-up was never committed.
 **Status (2026-09-23):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
 frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries, with sell
 automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). A SEPA-fidelity
-audit found nine gaps; §6.72–§6.74 (max loss from the price paid, the Loss Adjustment Exercise, the
-derived stop) are in. Suite **167 cockpit + 33 hunt**, offline, both gating deploys.
+audit found nine gaps; §6.72–§6.75 (max loss from the price paid, the Loss Adjustment Exercise, the
+derived stop, stop room) are in; the base count (§6.76) failed its own acceptance test and did not
+ship. Suite **169 cockpit + 35 hunt**, offline, both gating deploys.
 
 **Research verdict (2026-06-29) — no out-of-sample alpha.** A strong in-sample result (α t=2.49) was
 overfit; OOS collapsed it to t=0.47. Risk management is real; selection is not. The user trades this
@@ -155,6 +156,8 @@ the discipline.
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
 | `trade.py` | Alpaca paper submit path, stops, the exposure gate, the journal + Loss Adjustment Exercise |
+| `advisories.py` | display-only SEPA reads: stop room |
+| `doctrine.py` | the shared rule numbers (imports nothing) |
 | `sells.py` / `entries.py` | P1–P4 sell planner; armed-entry plans |
 | `refresh_job.py` / `sell_job.py` / `entry_job.py` | the three headless CLIs the timers invoke |
 | `runlog.py` | dated run logs, 14-day retention |
@@ -202,8 +205,9 @@ the discipline.
 on **≥1.5× the 50-day average volume**. Stop 7.5% below the pivot by default, and **never more than
 10% below the price paid** (§6.72): a buy's stop is raised to 10% below its worst-case fill (the
 limit, else the price), re-checked at submit and at arming. From the 5th cockpit win the default
-becomes the **derived stop**, ½ the average win from the fill, clamped 4–10% (§6.74). Target
-pivot×1.25. Skip inside ~21 days of earnings. Size for ~1% account risk (0.5% while probing); the
+becomes the **derived stop**, ½ the average win from the fill, clamped 4–10% (§6.74). Judge the
+stop against the name's **typical day**. Under 2 of them is inside noise (§6.75). Target pivot×1.25.
+Skip inside ~21 days of earnings. Size for ~1% account risk (0.5% while probing); the
 10%-of-equity single-order cap clamps risk-mode quantities.
 
 **Sell — the four pillars (P1–P4).** A breakout buy's thesis is P1 resolution (closed above the pivot
@@ -361,10 +365,13 @@ Constants and API facts that are expensive to rediscover. Change these only with
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
 
-**Stops and the book's numbers (`doctrine.py`, §6.72–§6.74):**
+**Stops and the book's numbers (`doctrine.py`, §6.72–§6.75):**
 - `fill_floor(fill)` = `ceil(round(fill × 0.9 × 100, 6)) / 100`: 10% below the fill, rounded UP to
   the cent (the inner `round` stops 42 × 0.9 = 37.800000000000004 ceiling to 37.81). The builder,
   submit and arming all use it, so a builder-made stop always passes the guards.
+- Typical day = median true range over the last **42** sessions (the dead-tape window), as % of
+  price. Room = (fill − stop) / fill ÷ typical day; under **2.0** = inside noise. The benchmark's
+  quietest real setup runs 1.64%/day and its wildest (IMUX) 7.73%.
 - Derived stop: tagged closed trades, **≥5 wins**, ½ × average win, clamped [4%, 10%]; the 4% floor
   came from the §6.73 pre-registered rule on ONE winner.
 
@@ -522,6 +529,11 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 
     **Rule result: floor = 4.0%** (ICCC's deepest post-entry low was −3.92% of cost) → `doctrine.DERIVED_STOP_FLOOR = 0.04`. It rests on ONE winner. **The shape is the finding:** every stop tighter than 8% does *worse* than what happened, price-aware. The losers dipped further intraday (TMP −7.5%, UNP −6.9%, FAF −6.1%) than where the close-based P1 exits took them out (−3.8%, −6.0%, −2.7%), so an intraday stop would have sold the low. The book variant, which cannot see that, says the opposite. Tighter stops are not a free improvement on this record.
 - **§6.74** **Derived stop — half your average win (audit #2).** The book sizes the stop from your own numbers: no more than half the average gain. `trade.derived_stop_pct` over the **tagged** closed trades → `clamp(avg_win × 0.5, DERIVED_STOP_FLOOR 4%, MAX_LOSS_FROM_FILL 10%)`, **off below 5 wins** (`DERIVED_STOP_MIN_WINS`; the record has 1). When on it is the default: `build_buy_plan(stop_pct=)` puts a non-held buy's stop that far below its worst-case fill, keeping a tighter stop already on the name (pivot default or support) — it can tighten the 7.5% default, never loosen it. The app computes it at Build from the journal the exposure gate already reads (no extra Alpaca call) and states the stop source above the rows; the Positions page uses it for the "initial" stop basis and the R reconstruction.
+- **§6.75** **Typical day and stop room (audit #5).** `detect_vcp` now exports the median daily true range it already measured for the dead-tape gate (`median_tr_pct`, last 42 bars, on every path including the dead-tape exclusion). It becomes the Scan table's **Typical day (%)** column, a Step-4 caption ("the stop is N ordinary days below the pivot"), a ⚠ on trade-plan rows, and the Positions stop-row caption, through `advisories.stop_room`. Under `doctrine.STOP_ROOM_MIN_DAYS = 2.0` ordinary days, the stop is inside normal noise — the book's bucking bronco. Advisory only. The hunt's diagnostics compute `day_range`/`stop_room` from the frame, so old pickles report the same. The benchmark line stayed byte-identical. **Deferred:** a hard tier-C exclusion for wild movers (≥8%/day). The wildest real setup in the benchmark (IMUX, tier A) runs 7.73%, so any cutoff would be fitted to it, and it would only move ~12 tier-B names that the stop-room flag already marks.
+- **§6.76** **Base count (audit #4) — NOT shipped; its pre-registered acceptance failed.** The rule, set before looking: on the 200 fixtures, no chart with VCP contractions whose last close sits above a rising 200-day may count 0 bases. Try "Stage 2 starts after the last close below a FALLING 200-day", then "…after the last run of 5 closes below it" as the only fallback; if neither passes, stop. **Falling-200: 9 violations. Run-of-5: 14.** Stopped. No tuning, and nothing reached the scan or the tiers. Two mechanisms, recorded for the next attempt (which needs its own pre-registration):
+  - **(a) Single-threshold blindness** (CNC, TRNS, BZH). The counter walked ONE adaptive ZigZag threshold over the whole Stage-2 segment. The rally out of the start inflated it, so 8–10% legs vanished. This is the exact failure the VCP detector's multi-threshold read exists for.
+  - **(b) The transition base** (GRBK, AVBC, GEO). The base formed *before* the last close under a still-falling 200-day. The first base of a new Stage 2 often forms while the stock emerges from Stage 1, so "count only after the start" drops it.
+  - **The demotion was moot anyway:** zero tier-A fixtures had ≥5 bases under either rule, so "demote 5th+ bases" would have changed no benchmark tier. The prototype and the acceptance script are not in the tree.
 - **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 
 ## 12. Open items
@@ -553,6 +565,10 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **Re-apply the §6.73 floor rule at the 5th win.** The derived stop turns on by itself at 5 cockpit
   wins, but its 4% floor rests on one. Re-run the sweep then (the Journal page shows it;
   `trade.stop_floor_from_sweep`) and update `DERIVED_STOP_FLOOR` only by the pre-registered rule.
+- **Base count (§6.76) needs a new, pre-registered design** before any code: the two failure
+  mechanisms (single-threshold blindness, the transition base) are written up there. The demotion
+  would have changed no benchmark tier, so recall is not what is at stake.
+- **Deferred: a tier-C exclusion for wild movers (≥8%/day typical range)** — see §6.75 for why.
 - **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
   first time two threads log (a page's price read plus the background scan). `docker compose
   restart app` clears it for a while.
@@ -567,5 +583,5 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (12 suites, 151 tests) · `tests/test_hunt.py` (33 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 169 tests) · `tests/test_hunt.py` (35 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
 - **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.

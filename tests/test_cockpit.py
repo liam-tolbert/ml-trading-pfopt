@@ -21,6 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tests.cockpit import (  # noqa: E402
+    test_advisories,
     test_app,
     test_data_feed,
     test_entries,
@@ -47,7 +48,8 @@ SUITES = (
     test_app,
     test_scan_worker,
     test_journal,
-    test_runlog)
+    test_runlog,
+    test_advisories)
 
 
 def _run_all() -> int:

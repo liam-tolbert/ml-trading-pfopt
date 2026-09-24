@@ -282,6 +282,8 @@ def test_vcp_benchmark_200_charts():
         df = pd.read_parquet(fdir / fixture_filename(t))
         r = detect_vcp(df, float(df["Close"].iloc[-1]), {})
         tiers[t] = r["tier"]
+        # §6.75: every result, C included, carries the typical day the stop is judged by
+        assert r.get("median_tr_pct") is not None, (t, r["tier"], r["pattern_details"])
         if lab["label"] == "YES" and r["tier"] == "C":
             misses.append((t, r["pattern_details"]))
 

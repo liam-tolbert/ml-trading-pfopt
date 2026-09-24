@@ -112,6 +112,11 @@ def test_diagnostics_and_gates():
     ok("one diag row per candidate", len(diag) == 4)
     a = diag[diag.ticker == "AAA"].iloc[0]
     ok("vs_pivot computed from close/pivot", abs(a["vs_pivot_pct"] - 2.0) < 0.01)
+    # §6.75: the typical day comes from the frame (H/L = ±1% -> a 2% true range), not the
+    # vcp payload, so a pickle written before the payload carried it reads the same; the
+    # 3%-below-pivot stop is 1.5 ordinary days away.
+    ok("typical day computed from df", abs(a["day_range"] - 2.0) < 0.01)
+    ok("stop room = pivot-to-stop over the typical day", abs(a["stop_room"] - 1.5) < 0.05)
 
     verdicts = {t: {"ticker": t, "verdict": "PASS", "notes": ""} for t in diag.ticker}
     g = pl.gates(diag, verdicts, min_fund=0)

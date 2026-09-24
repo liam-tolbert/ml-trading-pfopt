@@ -44,6 +44,11 @@ DERIVED_STOP_MIN_WINS = 5
 DERIVED_STOP_WIN_FRACTION = 0.5
 DERIVED_STOP_FLOOR = 0.04
 
+# A stop fewer than this many ORDINARY days of movement (median daily true range) below the
+# fill is inside normal noise — the book's "bucking bronco": the stock shakes you out on an
+# ordinary day before the trade can work. Advisory: the caption says so, the stop is yours.
+STOP_ROOM_MIN_DAYS = 2.0
+
 # Breakout confirmation: the close must come on >=1.5x the average of the PRIOR
 # VOL_AVG_DAYS bars. Excluding the current bar is the point — including it dilutes the
 # very spike being tested, and the dilution grows with the size of the spike.

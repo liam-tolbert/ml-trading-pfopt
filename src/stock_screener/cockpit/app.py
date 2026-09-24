@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:                       # so `from src.X import ...`
 import streamlit as st  # noqa: E402
 from streamlit.errors import StreamlitAPIException  # noqa: E402
 
+from src.stock_screener.cockpit import advisories  # noqa: E402 (display-only SEPA reads)
 from src.stock_screener.cockpit import cache  # noqa: E402 (path read at call time → patchable)
 from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
@@ -151,6 +152,7 @@ READABLE_COLS = {
     "breakout_today": "Breakout today",
     "vol_confirmed": "Vol confirmed",
     "pct_to_pivot": "Distance to pivot (%)",
+    "day_range": "Typical day (%)",
     "pivot": "Pivot ($)",
     "stop": "Stop ($)",
     "target": "Target ($)",
@@ -195,6 +197,10 @@ COL_HELP = {
                      "hint, the trigger report is the decision.",
     "pct_to_pivot": "Distance from price to the pivot. Positive = below pivot (needs to rise); "
                     "negative = already above/extended.",
+    "day_range": "How far this stock ordinarily moves in a day: the median daily true range "
+                 "over the last ~2 months, as % of price. A stop only one or two of these "
+                 "below your buy gets hit by normal noise before the trade can work — a "
+                 "wild mover needs a wider stop (and so a smaller position), or a pass.",
     "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
     "stop": "Advisory stop-loss, ~7–8% below the pivot. The 10% maximum loss is measured "
             "from the price you PAY, so a trade plan raises this stop for a fill higher in "
@@ -211,7 +217,7 @@ COL_GROUPS = [
                                     "op_margin"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
-                               "pct_to_pivot", "pivot", "stop", "target"]),
+                               "pct_to_pivot", "day_range", "pivot", "stop", "target"]),
 ]
 DISPLAY_ORDER = [c for _, cols in COL_GROUPS for c in cols]
 
@@ -982,6 +988,12 @@ with st.sidebar:
                         # re-scale shares on an edit).
                         _rusd = _o["shares"] * (_basis - _edstop)
                         _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
+                    _rroom = (advisories.stop_room(_o["day_range_pct"] / 100.0, _edstop, _paid)
+                              if _o.get("day_range_pct") and _on and _held_sh <= 0
+                              and _attach else None)
+                    if _rroom and _rroom["warn"]:
+                        _cA.caption("  ↳ " + advisories.stop_room_text(
+                            _rroom, _o["day_range_pct"] / 100.0))
                     if _o.get("stop_derived") and _on and _held_sh <= 0 and _attach:
                         _cA.caption(f"  ↳ derived stop {_o['stop_price']:,.2f} — "
                                     f"{(_dv.get('stop_pct') or 0) * 100:.1f}% below the "
@@ -1319,8 +1331,10 @@ table_box.caption(f"Showing {len(view)} of {len(cand)} — click a row to chart 
 with table_box:
     col_config = {c: st.column_config.Column(READABLE_COLS.get(c, c), help=COL_HELP.get(c))
                   for c in view.columns}
+    # Only columns the frame has: a scan persisted before a column existed still renders.
     event = st.dataframe(view, width="stretch", hide_index=True, height=380,
-                         column_config=col_config, column_order=DISPLAY_ORDER,
+                         column_config=col_config,
+                         column_order=[c for c in DISPLAY_ORDER if c in view.columns],
                          on_select="rerun", selection_mode="single-row", key="cand_table")
 
 # selection.rows are positional indices into the displayed (filtered) frame
@@ -1511,6 +1525,14 @@ with st.container(border=True):
                    f"(Minervini: 7–8% ideal, 10% hard max){_clamp}")
     # The 10% max is from the price PAID: past this fill the stop above loses more than
     # 10%, so a trade plan raises it (a tighter stop, never a wider loss).
+    # Stop vs this stock's ordinary daily movement, from the buy point.
+    _dr = (payload.get("vcp") or {}).get("median_tr_pct")
+    _room = advisories.stop_room((_dr or 0) / 100.0, lv.get("stop"), lv.get("pivot"))
+    if _room:
+        st.caption(("⚠️ " if _room["warn"] else "") + f"Typical day **{_dr:.1f}%** — the stop "
+                   f"is **{_room['room_days']:.1f}** ordinary days below the pivot"
+                   + (": inside normal noise, so an ordinary day can shake you out. Wider "
+                      "stop and a smaller position, or pass." if _room["warn"] else "."))
     _mfs = lv.get("max_fill_for_stop")
     if _mfs and bz_hi and _mfs < bz_hi:
         # No '$' here: two in one markdown string parse as a LaTeX span.

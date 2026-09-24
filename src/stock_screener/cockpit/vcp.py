@@ -149,7 +149,7 @@ def _empty(reason: str) -> Dict[str, any]:
         'is_vcp': False, 'vcp_quality': 0.0, 'contractions': [], 'contraction_count': 0,
         'contraction_quality': 0.0, 'volume_quality': 0.0, 'base_length_weeks': 0.0,
         'rmv': 100.0, 'pattern_details': reason,
-        'tier': 'C', 'zz_threshold': None,
+        'tier': 'C', 'zz_threshold': None, 'median_tr_pct': None,
     }
 
 
@@ -354,8 +354,10 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     ``detect_vcp_pattern`` — same return schema (``is_vcp``, ``vcp_quality``,
     ``contractions`` with number/peak_date/trough_date/peak_price/trough_price/
     drawdown_pct/volume_ratio/duration_days, ``contraction_count`` …) plus the review
-    ``tier`` ('A'/'B'/'C') and ``zz_threshold``. (The pivot is computed internally for the
-    buy-zone/extended tier split but not exported; see ``_detect_at``.)
+    ``tier`` ('A'/'B'/'C'), ``zz_threshold`` and ``median_tr_pct`` (the median daily
+    true range over the last ``DEAD_TAPE_BARS``, in percent — the name's typical day;
+    None with too little data). (The pivot is computed internally for the buy-zone/extended
+    tier split but not exported; see ``_detect_at``.)
 
     ``thr`` is the ZigZag reversal size. Leave it ``None`` (default) to run at up to four
     thresholds — long-history, recent-window (~2 months), an extra-tight 0.7× recent, and
@@ -367,6 +369,13 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
 
     base = price_data.tail(min(len(price_data), LOOKBACK_BARS))
 
+    # Median daily true-range% over the last DEAD_TAPE_BARS: the dead-tape gate below, and
+    # exported as the name's "typical day" so a stop can be judged against ordinary noise.
+    # Computed on every path; only the adaptive path gates on it.
+    _tr = true_range_pct(base).tail(DEAD_TAPE_BARS).to_numpy()
+    med_tr = float(np.nanmedian(_tr)) if np.isfinite(_tr).any() else float('nan')
+    med_tr_pct = round(med_tr * 100.0, 2) if np.isfinite(med_tr) else None
+
     if thr is not None:
         # Pinned threshold = a raw single-threshold read (tests pin this for deterministic
         # pivot counts); the dead-tape guard is skipped so synthetic H=L=C frames (which
@@ -375,10 +384,10 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
     else:
         # Dead tape (threshold-independent): a stock pinned flat for months has no swings to
         # contract. Median daily true-range% below DEAD_TAPE_MEDIAN_TR can't be a live setup.
-        med_tr = float(np.nanmedian(true_range_pct(base).tail(DEAD_TAPE_BARS).to_numpy()))
         if np.isfinite(med_tr) and med_tr < DEAD_TAPE_MEDIAN_TR:
-            return _empty(f'Dead tape: median daily range {med_tr * 100:.2f}% '
-                          f'over the last {DEAD_TAPE_BARS} sessions')
+            return {**_empty(f'Dead tape: median daily range {med_tr * 100:.2f}% '
+                             f'over the last {DEAD_TAPE_BARS} sessions'),
+                    'median_tr_pct': med_tr_pct}
         thr_long = _adaptive_threshold(base)
         thr_recent = _adaptive_threshold(base.tail(RECENT_WINDOW_BARS))
         thr_tight = max(RECENT_THR_SHRINK * thr_recent, THR_MIN_TIGHT)
@@ -396,5 +405,6 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
                           min_contractions, max_contractions, rmv_now=rmv_now,
                           week_52_high=week_52_high)
                for t in candidates]
-    return min(results, key=lambda r: (0 if r['is_vcp'] else 1,
+    best = min(results, key=lambda r: (0 if r['is_vcp'] else 1,
                                        _TIER_RANK[r['tier']], -r['vcp_quality']))
+    return {**best, 'median_tr_pct': med_tr_pct}
