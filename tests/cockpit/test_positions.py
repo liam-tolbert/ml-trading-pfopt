@@ -150,6 +150,15 @@ def test_position_advisories():
                   {**base, "gain_pct": None, "earnings_in": 7}):     # gain unknown
         assert not any("Earnings" in a for a in position_advisories(quiet)), quiet
 
+    # §6.72: a stop more than 10% below the cost (a market buy that gapped up at the
+    # open) says what to raise it to; within 10%, or already above cost, stays silent.
+    wide = position_advisories({**base, "gain_pct": 0.01, "avg_entry": 110.0,
+                                "current_stop": 92.5})
+    assert any("15.9% below your cost" in a and "≥ $99.00" in a for a in wide), wide
+    for ok_stop in (99.0, 115.0):
+        assert not any("below your cost" in a for a in position_advisories(
+            {**base, "gain_pct": 0.01, "avg_entry": 110.0, "current_stop": ok_stop}))
+
 
 def test_sell_pillars():
     """§6.52: the Step-E doctrine as per-position P1-P4 statuses (pure, pinned today).
@@ -792,8 +801,9 @@ def test_submit_position_sell_remainder_stop():
 
 
 def test_positions_page_free_roll():
-    """#19 page surface: the R column renders pivot-derived (no '~') for a watchlisted
-    name, the free-roll button seeds a HALF-size pending sell carrying
+    """#19 page surface: the R column renders exact (no '~') for a watchlisted name whose
+    in-force stop is the pivot-derived one the plan attached (§6.72: the page passes the
+    current stop), the free-roll button seeds a HALF-size pending sell carrying
     remainder_stop=avg_entry, the banner explains the breakeven ratchet, and confirm
     passes remainder_stop through to submit_position_sell."""
     try:
@@ -809,7 +819,7 @@ def test_positions_page_free_roll():
     offline = _positions_offline(current_price=116.0, market_value=1160.0,
                                  unrealized_pl=160.0, unrealized_plpc=0.16,
                                  lastday_price=115.0, sma_50=105.0, last_close=116.0,
-                                 gain_pct=0.16, stage="working")
+                                 gain_pct=0.16, stage="working", current_stop=92.5)
     calls = {}
 
     def _fake_sell(symbol, qty, remainder_stop=None):

@@ -29,12 +29,12 @@ from src.stock_screener.cockpit.cache import (CACHE_DIR, LAST_SCAN_PKL as _LAST_
                                               SCAN_PERSIST_VERSION as _PERSIST_VERSION,
                                               WATCHLIST_JSON)
 from src.stock_screener.cockpit.doctrine import (EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
-                                                 VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
+                                                 NO_CHASE_PCT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 from src.stock_screener.cockpit.indicators import prior_volume_average, volume_ratio
 
 # ---- rules (sources in the module docstring) ------------------------------ #
 MIN_RS = 70                    # Step-1 floor / app Min-RS default
-BUY_ZONE_MAX_PCT = 5.0         # pivot .. +5% = the entry range (scan.py buy_zone)
+BUY_ZONE_MAX_PCT = NO_CHASE_PCT * 100.0   # pivot .. +5% = the entry range (scan.py buy_zone)
 APPROACH_MIN_PCT = -3.0        # within 3% below pivot = "approaching"
 MAX_SCAN_AGE_DAYS = 3.0        # hunt must run off a weekend-fresh scan
 # VOL_CONFIRM_RATIO / VOL_AVG_DAYS / EARNINGS_BLOCK_DAYS are imported from cockpit.doctrine:

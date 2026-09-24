@@ -143,6 +143,11 @@ def test_entry_levels_stop_clamped_to_pivot():
     assert default["stop"] == 92.5 and default["stop_clamped"] is False
     assert default["stop"] < default["pivot"]               # never at/above the pivot
 
+    # §6.72: the max loss is from the price PAID — 92.5 covers fills up to 102.78; the
+    # zone runs to 105, so a plan filling higher raises the stop
+    assert abs(default["max_fill_for_stop"] - 92.5 / 0.9) < 1e-9
+    assert default["max_fill_for_stop"] < default["buy_zone"][1]
+
 
 def test_entry_levels_ignores_50sma_breakout_pivot():
     """A '50 SMA Breakout' level is the 50-day SMA (a routine pullback recovery), not a base

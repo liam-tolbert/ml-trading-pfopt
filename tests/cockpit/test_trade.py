@@ -180,7 +180,7 @@ def test_build_buy_plan_uses_frozen_pivot():
     frozen level, not the current payload's levels. Names absent from ``pivots`` are unchanged."""
     import pandas as pd
     from src.stock_screener.cockpit.trade import (
-        build_buy_plan, DEFAULT_STOP_FROM_PIVOT, MAX_STOP_FROM_PIVOT)
+        build_buy_plan, DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL)
 
     def _pl(price, scan_pivot, stop=None):
         idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
@@ -196,7 +196,7 @@ def test_build_buy_plan_uses_frozen_pivot():
     # floored at 10% below (here 111.0 = 120×0.925, above the 108.0 floor).
     pl = {"AAA": _pl(100.0, 95.0)}
     expect_stop = round(max(120.0 * (1.0 - DEFAULT_STOP_FROM_PIVOT),
-                            120.0 * (1.0 - MAX_STOP_FROM_PIVOT)), 2)   # 111.0
+                            120.0 * (1.0 - MAX_LOSS_FROM_FILL)), 2)   # 111.0
 
     frozen, _ = build_buy_plan(["AAA"], pl, mode="shares", amount=5, pivots={"AAA": 120.0})
     o = frozen[0]
@@ -404,10 +404,12 @@ def test_build_buy_plan_limit_orders():
     p_mkt, _ = build_buy_plan(["AAA"], pl, mode="dollars", amount=1000.0)
     assert p_mkt[0]["shares"] == 10 and p_mkt[0]["limit_price"] is None
 
-    # risk: $500 budget / (limit 105 − stop 90) = 33 sh (a market basis: 500/10 = 50)
+    # risk: the payload's stop 90 is 14.3% below the 105 limit, so the max-loss floor
+    # raises it to 94.5 (10% below the limit): $500 / (105 − 94.5) = 47 sh
     p_risk, _ = build_buy_plan(["AAA"], pl, mode="risk", amount=0.5, equity=100_000.0,
                                order_type="limit")
-    assert p_risk[0]["shares"] == int(500 / 15.0)            # 33
+    assert p_risk[0]["stop_price"] == 94.5 and p_risk[0]["stop_floored"] is True
+    assert p_risk[0]["shares"] == int(500 / 10.5)            # 47
 
     # stop 106 ≥ price 100 -> the R2-3 broken-base gate fires first (it outranks the
     # risk gate: a stop above the market is wrong in EVERY sizing mode)
@@ -871,14 +873,29 @@ def test_gate_status_matrix():
 
 
 def test_r_multiple_reconstruction():
-    """#19: R = gain / reconstructed initial risk. A frozen pivot below the entry
-    reproduces the OTO's actual stop (exact); no pivot, or a pivot at/above the entry
-    (derived risk <= 0), falls back to INITIAL_STOP_PCT off the entry (approximate);
-    degenerate inputs -> (None, True)."""
+    """#19 + §6.72: R = gain / reconstructed initial risk. The entry stop is one of the
+    levels the plan builder could have attached for the frozen pivot — the pivot stop
+    raised to the max-loss floor of a market fill (~the entry) or of a zone-top limit, or
+    the bare pivot stop older entries carried. An in-force stop matching one is exact;
+    anything else (a ratcheted stop, none readable) estimates with the market-fill level
+    (approximate). No pivot, or a pivot at/above the entry, falls back to INITIAL_STOP_PCT
+    off the entry (approximate); degenerate inputs -> (None, True)."""
     from src.stock_screener.cockpit import trade
 
-    r, approx = trade.r_multiple(100.0, 115.0, pivot=100.0)
-    assert approx is False and abs(r - 2.0) < 1e-9        # risk = 100 - 92.5 = 7.5
+    # pivot 100, entry 100: market-fill level max(92.5, 90.0) = 92.5 -> risk 7.5
+    r, approx = trade.r_multiple(100.0, 115.0, pivot=100.0, current_stop=92.5)
+    assert approx is False and abs(r - 2.0) < 1e-9
+    # ...a zone-top limit plan attached max(92.5, 105 × 0.9) = 94.5 -> risk 5.5, exact
+    r, approx = trade.r_multiple(100.0, 111.0, pivot=100.0, current_stop=94.5)
+    assert approx is False and abs(r - 2.0) < 1e-9
+    # ...the stop has since been raised to breakeven-ish: no match -> estimate at 92.5
+    r, approx = trade.r_multiple(100.0, 115.0, pivot=100.0, current_stop=99.0)
+    assert approx is True and abs(r - 2.0) < 1e-9
+    r, approx = trade.r_multiple(100.0, 115.0, pivot=100.0)            # no stop readable
+    assert approx is True and abs(r - 2.0) < 1e-9
+    # a market fill far above the pivot: the floor (10% below the entry) is the stop
+    r, approx = trade.r_multiple(110.0, 132.0, pivot=100.0, current_stop=99.0)
+    assert approx is False and abs(r - 2.0) < 1e-9                    # risk = 11.0
 
     r, approx = trade.r_multiple(100.0, 116.0, pivot=None)
     assert approx is True and abs(r - 2.0) < 1e-9         # risk = 8.0
@@ -888,6 +905,124 @@ def test_r_multiple_reconstruction():
 
     assert trade.r_multiple(None, 100.0) == (None, True)
     assert trade.r_multiple(0.0, 100.0) == (None, True)
+
+
+def test_fill_floor_rounds_up_to_the_cent():
+    """§6.72: the floor is 10% below the fill rounded UP to the cent, so a stop the builder
+    places at it always passes its own guard. Float noise must not add a cent: 42 × 0.9 is
+    37.800000000000004 in binary, and a bare ceil turned it into 37.81."""
+    from src.stock_screener.cockpit.trade import fill_floor, stop_within_max_loss
+
+    assert fill_floor(42.0) == 37.8                       # not 37.81
+    assert fill_floor(105.0) == 94.5
+    assert fill_floor(99.75) == 89.78                     # 89.775 rounds UP
+    for f in (42.0, 99.75, 71.4, 107.1, 13.37, 1234.56):
+        assert stop_within_max_loss(fill_floor(f), f), f
+        assert not stop_within_max_loss(fill_floor(f) - 0.01, f), f
+    assert stop_within_max_loss(None, 100.0) is False
+    assert stop_within_max_loss(95.0, None) is False
+
+
+def test_build_buy_plan_fill_floor():
+    """§6.72 (audit #1): Minervini's 10% maximum is measured from the price PAID. The
+    builder raises a buy's stop to 10% below its worst-case fill — the limit for a limit
+    plan, the last price for a market plan — so buying higher in the zone buys a tighter
+    stop. A tighter stop is kept; a held name's re-arm stop is never touched (that would
+    quietly start a trailing stop); a raised stop above the current price skips the name;
+    a name with no stop is left without one."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan
+
+    def _payload(price, pivot, stop):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=3)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": 1000}, index=idx)
+        return {"df": df, "levels": {"pivot": pivot, "buy_zone": (pivot, pivot * 1.05),
+                                     "stop": stop}}
+
+    # extended market name: 108 is 8% above the pivot; the pivot stop 92.5 would lose
+    # 14.4% of the fill -> raised to 97.2 (108 × 0.9)
+    ext = {"EXT": _payload(108.0, 100.0, 92.5)}
+    p, s = build_buy_plan(["EXT"], ext, mode="shares", amount=5)
+    assert not s and p[0]["stop_price"] == 97.2 and p[0]["stop_floored"] is True
+
+    # in-zone market name at the pivot: 92.5 is within 10% of 100 -> kept, not floored
+    at = {"AT": _payload(100.0, 100.0, 92.5)}
+    p, _ = build_buy_plan(["AT"], at, mode="shares", amount=5)
+    assert p[0]["stop_price"] == 92.5 and p[0]["stop_floored"] is False
+
+    # limit plan: the OTO stop is fixed at submit, so it carries the floor for the LIMIT
+    # (the zone top, 105 -> 94.5) even though the name trades at 101
+    lim = {"LIM": _payload(101.0, 100.0, 92.5)}
+    p, _ = build_buy_plan(["LIM"], lim, mode="shares", amount=5, order_type="limit")
+    assert p[0]["limit_price"] == 105.0 and p[0]["stop_price"] == 94.5
+
+    # a tighter engine stop is never lowered
+    tight = {"TIGHT": _payload(104.0, 100.0, 98.0)}
+    p, _ = build_buy_plan(["TIGHT"], tight, mode="shares", amount=5, order_type="limit")
+    assert p[0]["stop_price"] == 98.0 and p[0]["stop_floored"] is False
+
+    # held: re-arm stop untouched (and a stop-only fallback row carries it too)
+    p, _ = build_buy_plan(["EXT"], ext, mode="shares", amount=5, held={"EXT": 10})
+    assert p[0]["stop_price"] == 92.5 and p[0]["stop_floored"] is False
+
+    # cent rounding: limit 42 -> floor 37.80, never 37.81
+    cents = {"C": _payload(40.5, 40.0, 30.0)}
+    p, _ = build_buy_plan(["C"], cents, mode="shares", amount=5, order_type="limit")
+    assert p[0]["limit_price"] == 42.0 and p[0]["stop_price"] == 37.8
+
+    # below the pivot: the zone-top limit (105) needs a stop >= 94.5, but the name
+    # trades at 94 — the stop would sit above the market -> skipped, named rule
+    under = {"UNDER": _payload(94.0, 100.0, 92.5)}
+    p, s = build_buy_plan(["UNDER"], under, mode="shares", amount=5, order_type="limit")
+    assert not p and "10% below the price paid" in s[0]["reason"], s
+    # ...the same name as a market plan is sized normally (the fill is ~94)
+    p, s = build_buy_plan(["UNDER"], under, mode="shares", amount=5)
+    assert p and p[0]["stop_price"] == 92.5
+
+    # no stop at all stays no stop (submit refuses it with Attach stop on)
+    nostop = {"N": {"df": _payload(100.0, 100.0, None)["df"],
+                    "levels": {"pivot": 100.0, "buy_zone": (100.0, 105.0)}}}
+    p, _ = build_buy_plan(["N"], nostop, mode="shares", amount=5, order_type="limit")
+    assert p[0]["stop_price"] is None
+
+
+def test_submit_buy_plan_max_loss_guard():
+    """§6.72: submit re-checks the max loss against the HIGHEST possible fill (the edited
+    limit, else the price) — both levels are editable after Build, and the unattended
+    entry executor submits through this path. Held re-arm rows are exempt; attach off has
+    no stop to judge."""
+    from alpaca.trading.enums import OrderType
+
+    FakeClient, _Order = _submit_fakes()
+    _entry, _run = _submit_entry, _run_submit
+
+    # limit edited up to 110 with the stop left at 94.5: 14.1% below the limit -> skipped
+    fa = FakeClient()
+    outA = _run([_entry("NEW", 5, 100.0, 94.5, limit=110.0)], fa)["results"][0]
+    assert outA["status"] == "skipped" and not fa.submitted
+    assert "10% below the limit" in outA["detail"] and "≥ 99.00" in outA["detail"]
+
+    # market row, stop edited down to 85 on a 100 price -> skipped
+    fb = FakeClient()
+    outB = _run([_entry("MKT", 5, 100.0, 85.0)], fb)["results"][0]
+    assert outB["status"] == "skipped" and "price" in outB["detail"] and not fb.submitted
+
+    # exactly at the floor -> submitted
+    fc = FakeClient()
+    assert _run([_entry("OK", 5, 100.0, 94.5, limit=105.0)], fc)["results"][0]["status"] \
+        == "submitted"
+
+    # held: the re-arm path never applies the buy rule
+    fd = FakeClient(positions={"HELD": "40"},
+                    open_orders=[_Order("lo-1", "HELD", OrderType.STOP, stop_price=80.0)])
+    outD = _run([_entry("HELD", 10, 100.0, 85.0)], fd)["results"][0]
+    assert outD["status"] == "stop_only"
+
+    # attach off: no stop to judge -> the naked buy goes through
+    fe = FakeClient()
+    assert _run([_entry("NAKED", 5, 100.0, 85.0)], fe, False)["results"][0]["status"] \
+        == "submitted"
 
 
 def test_submit_buy_plan_skips_gate_blocked():

@@ -34,8 +34,8 @@ from src.stock_screener.cockpit.export import (  # noqa: E402
 from src.stock_screener.cockpit.scan import filter_candidates  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, cancel_pending_buys,
-    fetch_account_summary, fetch_gate_inputs, fetch_held_shares, freshen_prices,
-    gate_status, stop_is_valid, submit_buy_plan)
+    fetch_account_summary, fetch_gate_inputs, fetch_held_shares, fill_floor, freshen_prices,
+    gate_status, stop_is_valid, stop_within_max_loss, submit_buy_plan)
 from src.stock_screener.cockpit.triggers import (load_latest_trigger_report,  # noqa: E402
                                                  save_trigger_report)
 
@@ -118,14 +118,16 @@ two axes flip from quiet to loud:
 - **Check the calendar:** don't open a fresh position within ~2–3 weeks of a
   scheduled **earnings report** — with no profit cushion, an earnings gap can blow
   straight through the stop. (Minervini holds through earnings only with a cushion.)
-- Set the **7–8% stop immediately** and never lower it.
+- Set the **stop immediately** — 7–8% below the price you pay, **never more than 10%** —
+  and never lower it. The loss is measured from your fill, not the pivot: buying higher in
+  the zone means a tighter stop (the trade plan raises it for you).
 - First target **+25%** above the pivot; trail with the 50-day SMA once well in profit.
 - **Size** so a stop-out costs ~1% of the account (set Account $ / Risk %).
 
 These levels are advisory — place the order in your broker.
 """
 
-from src.stock_screener.cockpit.doctrine import EARNINGS_SOON_DAYS
+from src.stock_screener.cockpit.doctrine import EARNINGS_SOON_DAYS, MAX_LOSS_FROM_FILL
 
 
 
@@ -194,7 +196,9 @@ COL_HELP = {
     "pct_to_pivot": "Distance from price to the pivot. Positive = below pivot (needs to rise); "
                     "negative = already above/extended.",
     "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
-    "stop": "Advisory stop-loss, ~7–8% below the pivot.",
+    "stop": "Advisory stop-loss, ~7–8% below the pivot. The 10% maximum loss is measured "
+            "from the price you PAY, so a trade plan raises this stop for a fill higher in "
+            "the buy zone.",
     "target": "First objective, +25% above the pivot.",
 }
 
@@ -948,6 +952,7 @@ with st.sidebar:
                     # and the live risk read key off min(edited limit, price).
                     _basis = (min(_edlim, _o["price"]) if (_is_lim and _edlim)
                               else _o["price"])
+                    _paid = _edlim if (_is_lim and _edlim) else _o["price"]
                     if _held_sh > 0 or not _on:
                         pass          # held: stop is a re-arm target; unchecked: not submitted
                     elif _is_lim and (not _edlim or _edlim <= 0):
@@ -955,12 +960,23 @@ with st.sidebar:
                     elif _attach and not stop_is_valid(_edstop, _basis):
                         _cB.caption(":red[stop must be below both limit and price]"
                                     if _is_lim else ":red[stop must be < price]")
+                    elif _attach and not stop_within_max_loss(_edstop, _paid):
+                        # Max loss binds on the HIGHEST fill (the limit, else the price);
+                        # submit and arming refuse the row, so say so before the click.
+                        _cB.caption(f":red[> {MAX_LOSS_FROM_FILL * 100:.0f}% below the "
+                                    f"{'limit' if _is_lim else 'price'} — raise to ≥ "
+                                    f"{fill_floor(_paid):,.2f}]")
                     elif _attach and _eq and _edstop and _basis > _edstop:
                         # Live risk-to-stop for the CURRENT shares + (possibly edited) stop, so a
                         # risk-sized position stays honest after the stop is nudged (build doesn't
                         # re-scale shares on an edit).
                         _rusd = _o["shares"] * (_basis - _edstop)
                         _cA.caption(f"  ↳ risk to stop ≈ {_rusd / _eq * 100:.2f}% (${_rusd:,.0f})")
+                    if _o.get("stop_floored") and _on and _held_sh <= 0 and _attach:
+                        _cA.caption(f"  ↳ default stop raised to {_o['stop_price']:,.2f} — "
+                                    f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the "
+                                    f"{'limit' if _is_lim else 'price'}, the most a fill "
+                                    "up there may lose")
                     if (_is_lim and _on and _held_sh <= 0 and _edlim
                             and _edlim < _o["price"]):
                         _cA.caption(f"  ↳ limit {_edlim:,.2f} < last close {_o['price']:,.2f} "
@@ -1479,6 +1495,14 @@ with st.container(border=True):
         _mark = "✅" if spp <= 8.0 + 1e-9 else "⚠️"
         st.caption(f"{_mark} Risk pivot → stop: **{spp:.1f}%** "
                    f"(Minervini: 7–8% ideal, 10% hard max){_clamp}")
+    # The 10% max is from the price PAID: past this fill the stop above loses more than
+    # 10%, so a trade plan raises it (a tighter stop, never a wider loss).
+    _mfs = lv.get("max_fill_for_stop")
+    if _mfs and bz_hi and _mfs < bz_hi:
+        # No '$' here: two in one markdown string parse as a LaTeX span.
+        st.caption(f"Fills above **{_mfs:,.2f}** raise the stop — the max loss is "
+                   f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the price you pay, and the zone "
+                   f"runs to {bz_hi:,.2f}.")
 
     # Step 4 has two OPPOSITE states, one after the other in time. The SAME two axes —
     # volume and volatility — flip from quiet to loud:

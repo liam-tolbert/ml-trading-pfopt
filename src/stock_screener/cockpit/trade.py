@@ -15,12 +15,14 @@ imported lazily (so the cockpit still loads when ``alpaca-py`` isn't installed).
 """
 from __future__ import annotations
 
+import math
 import os
 import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # doctrine is constants-only and imports nothing, so this module stays import-light.
-from .doctrine import EARNINGS_SOON_DAYS, MAX_STOP_FROM_PIVOT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO
+from .doctrine import (DEFAULT_STOP_FROM_PIVOT, EARNINGS_SOON_DAYS, MAX_LOSS_FROM_FILL,
+                       NO_CHASE_PCT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 
 MIN_TRADE_USD = 50.0        # mirrors alpaca_trader.MIN_TRADE_USD (kept here so the pure
                             # plan builder needn't import alpaca-py)
@@ -33,9 +35,6 @@ ALPACA_TIMEOUT_S = (5.0, 15.0)  # (connect, read) seconds on every Alpaca reques
                                 # none, so a silently dropped connection blocks the caller forever
                                 # — and behind the Positions page's st.cache_data, every later
                                 # visit queues on that same stuck call. Alpaca answers in < 1 s.
-# When a frozen judged_pivot drives the plan, mirror scan._entry_levels: default stop 7.5% below
-# the pivot, hard-floored at MAX_STOP_FROM_PIVOT (Minervini's 7-8% ideal / 10% max).
-DEFAULT_STOP_FROM_PIVOT = 0.075
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
@@ -315,6 +314,25 @@ def stop_is_valid(stop_price, price) -> bool:
     return bool(stop_price and price and stop_price > 0 and stop_price < price)
 
 
+def fill_floor(fill) -> float:
+    """The lowest stop the max-loss rule allows for a buy that fills at ``fill``:
+    ``MAX_LOSS_FROM_FILL`` below it, rounded UP to the cent — rounding down would let the
+    builder emit a stop its own guard (:func:`stop_within_max_loss`) then refuses. The inner
+    ``round`` absorbs float noise (42 × 0.9 × 100 = 3780.0000000000005 must not ceil to 3781)."""
+    return math.ceil(round(float(fill) * (1.0 - MAX_LOSS_FROM_FILL) * 100.0, 6)) / 100.0
+
+
+def stop_within_max_loss(stop, fill) -> bool:
+    """True when a stop at ``stop`` loses no more than ``MAX_LOSS_FROM_FILL`` of a buy filled
+    at ``fill`` (Minervini: never more than 10% below the price you pay). Missing inputs read
+    False — the callers only ask about a real stop on a real fill."""
+    try:
+        s, f = float(stop), float(fill)
+    except (TypeError, ValueError):
+        return False
+    return s > 0 and f > 0 and s >= f * (1.0 - MAX_LOSS_FROM_FILL) - 1e-6
+
+
 def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
                  sma_50: Optional[float], current_stop: Optional[float],
                  gain_pct: Optional[float], basis: str = "auto"
@@ -374,32 +392,47 @@ def position_stage(gain_pct: Optional[float]) -> Optional[str]:
     return "well in profit"
 
 
-def r_multiple(avg_entry, current_price, pivot=None) -> Tuple[Optional[float], bool]:
+def r_multiple(avg_entry, current_price, pivot=None,
+               current_stop=None) -> Tuple[Optional[float], bool]:
     """The position's gain as a multiple of its reconstructed initial risk. Pure.
 
-    The entry-time stop is not persisted anywhere, so risk is reconstructed: a frozen
-    pivot whose derived stop (``pivot × (1 - DEFAULT_STOP_FROM_PIVOT)``) sits below the
-    entry reproduces the level the OTO actually attached — exact, ``approximate=False``.
-    Otherwise ``INITIAL_STOP_PCT`` off the entry (``approximate=True`` — also the path
-    when the pivot sits at/above the entry, where pivot-derived risk would be <= 0).
-    Returns ``(r, approximate)``; ``(None, True)`` on missing/degenerate inputs."""
+    The entry-time stop is not persisted anywhere, so risk is reconstructed from the levels
+    the plan builder could have attached for a frozen ``pivot``: the pivot-derived stop
+    (``pivot × (1 - DEFAULT_STOP_FROM_PIVOT)``) raised to the max-loss floor of a market
+    fill (~the entry) or of a zone-top limit (``pivot × (1 + NO_CHASE_PCT)``), plus the
+    bare pivot-derived stop that entries before the floor carried. When the in-force
+    ``current_stop`` is one of them (to the cent) that is the stop the OTO attached — exact,
+    ``approximate=False``. Otherwise (the stop has been ratcheted, or none is readable) the
+    market-fill candidate is the estimate, ``approximate=True``; no usable pivot falls back to
+    ``INITIAL_STOP_PCT`` off the entry, also approximate. Returns ``(r, approximate)``;
+    ``(None, True)`` on missing/degenerate inputs."""
     try:
         e, c = float(avg_entry), float(current_price)
     except (TypeError, ValueError):
         return None, True
     if e <= 0:
         return None, True
-    risk = None
-    approx = True
+    cands: List[float] = []
     if pivot:
         try:
-            stop = float(pivot) * (1.0 - DEFAULT_STOP_FROM_PIVOT)
-            if 0.0 < stop < e:
-                risk, approx = e - stop, False
+            ps = float(pivot) * (1.0 - DEFAULT_STOP_FROM_PIVOT)
+            cands = [max(ps, fill_floor(e)),
+                     max(ps, fill_floor(float(pivot) * (1.0 + NO_CHASE_PCT))), ps]
+            cands = [s for s in cands if 0.0 < s < e]
         except (TypeError, ValueError):
-            pass
+            cands = []
+    risk, approx = None, True
+    try:
+        cs = float(current_stop) if current_stop is not None else None
+    except (TypeError, ValueError):
+        cs = None
+    if cs is not None:
+        for s in cands:
+            if abs(s - cs) <= 0.01:
+                risk, approx = e - s, False
+                break
     if risk is None:
-        risk = e * INITIAL_STOP_PCT
+        risk = e - cands[0] if cands else e * INITIAL_STOP_PCT
     if risk <= 0:
         return None, True
     return (c - e) / risk, approx
@@ -419,6 +452,13 @@ def position_advisories(pos: dict) -> List[str]:
 
     if not pos.get("has_stop"):
         out.append("⚠ No protective stop armed — arm one.")
+    elif (cur_stop and avg_entry and cur_stop < avg_entry
+            and not stop_within_max_loss(cur_stop, avg_entry)):
+        # A market buy that gapped up at the open fills above the price its stop was set
+        # for; the plan builder can only floor the stop for the fill it expects.
+        out.append(f"⚠ Stop {(1 - cur_stop / avg_entry) * 100:.1f}% below your cost "
+                   f"(max {MAX_LOSS_FROM_FILL * 100:.0f}%) — raise it to ≥ "
+                   f"${fill_floor(avg_entry):,.2f}.")
     ei = pos.get("earnings_in")
     if ei is not None and 0 <= ei <= EARNINGS_SOON_DAYS and gain is not None:
         # A stop can't protect against an earnings gap — the exit decision must come BEFORE
@@ -660,6 +700,15 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     kept). Each plan entry carries ``pivot_frozen`` (True when its pivot came from ``pivots``).
     Omit ``pivots`` and every name uses its scan-derived levels as before.
 
+    **Max loss from the fill.** For a name NOT held, the stop is then raised to
+    :func:`fill_floor` of the worst-case fill (the limit for a limit plan, the last price for
+    a market plan): Minervini's 10% maximum is measured from the price paid, and a
+    pivot-based stop under a fill near the top of the zone would otherwise risk up to 14.3%.
+    Paying more therefore buys a TIGHTER stop. A raised stop at/above the current price
+    (a limit far above a name still under its pivot) skips the name. Held names are exempt —
+    their stop is a re-arm target, and raising it there would silently start a trailing stop.
+    A name with no stop at all is left without one (submit refuses it with the stop attached).
+
     ``held`` (optional ``{ticker: shares}``) closes the build-time stop gap: a HELD
     name whose buy fails a sizing gate (rounds < 1 share, or under the $50 floor) is
     emitted as a zero-share ``stop_only=True`` row instead of skipped, so submit's held
@@ -716,11 +765,11 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             _fp = pivots.get(t)
             frozen = float(_fp) if _fp and _fp > 0 else None
         if frozen:
-            pivot, buy_hi = frozen, frozen * 1.05
+            pivot, buy_hi = frozen, frozen * (1.0 + NO_CHASE_PCT)
             _eng = lv.get("stop")                        # keep a tighter engine stop below the pivot
             _raw = (_eng if (_eng and _eng > 0 and _eng < frozen)
                     else frozen * (1.0 - DEFAULT_STOP_FROM_PIVOT))
-            stop = max(_raw, frozen * (1.0 - MAX_STOP_FROM_PIVOT))
+            stop = max(_raw, frozen * (1.0 - MAX_LOSS_FROM_FILL))
         else:
             bz = lv.get("buy_zone") or (None, None)
             pivot, buy_hi = bz[0], bz[1]
@@ -744,6 +793,22 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                 continue
             limit = float(buy_hi) if buy_hi and buy_hi > 0 else price
             basis = limit
+
+        # Max loss is measured from the price paid: raise a buy's stop to 10% below its
+        # worst-case fill. The OTO stop is fixed at submit, so a limit order carries the
+        # floor for its LIMIT even if it fills lower.
+        stop_floored = False
+        if stop and stop > 0 and not (held and held.get(t, 0) > 0):
+            _floor = fill_floor(basis)
+            if stop < _floor:
+                stop, stop_floored = _floor, True
+                if stop >= price:
+                    skipped.append({"ticker": t, "reason":
+                                    f"a limit at {basis:,.2f} needs a stop ≥ {stop:,.2f} "
+                                    f"(max {MAX_LOSS_FROM_FILL * 100:.0f}% below the price "
+                                    f"paid), above the current price {price:,.2f} — lower "
+                                    "the limit or wait for the name to reach its zone"})
+                    continue
 
         if mode == "pct":
             if not equity or equity <= 0:
@@ -800,6 +865,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "extended": bool(buy_hi and price > buy_hi),
             "capped": capped,
             "stop_price": round(float(stop), 2) if stop and stop > 0 else None,
+            "stop_floored": stop_floored,
             "limit_price": round(limit, 2) if limit else None,
             "earnings_in": payload.get("earnings_in"),
         })
@@ -1098,6 +1164,10 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       the close. Stop validity is checked against the worst-case fill. No ``limit_price``
       → the market behavior above, unchanged.
 
+      With ``attach_stop``, a buy whose stop sits more than ``MAX_LOSS_FROM_FILL`` below its
+      highest possible fill (the limit, else the last price) is skipped — the same rule
+      :func:`build_buy_plan` applies, re-checked because both levels are editable.
+
       **Build-time intent is binding:** an entry stamped ``rearm_only`` (held when the plan
       was built — the preview showed it with no checkbox and "no buy") or ``stop_only``
       (zero-share stop carrier), whose position has since closed, is SKIPPED — never
@@ -1212,6 +1282,18 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                     results.append({**o, "status": "skipped",
                                     "detail": "stop not below entry — fix stop or turn off "
                                               "Attach stop"})
+                    continue
+                # ...and the max loss binds on the HIGHEST fill: the limit, or the price.
+                # Re-checked here because the stop and the limit are both editable after
+                # Build, and the unattended entry executor submits through this path too.
+                _paid = limit if limit else o["price"]
+                if not stop_within_max_loss(stop, _paid):
+                    results.append({**o, "status": "skipped",
+                                    "detail": f"stop {float(stop):,.2f} is more than "
+                                              f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the "
+                                              f"{'limit' if limit else 'price'} "
+                                              f"{float(_paid):,.2f} — raise it to ≥ "
+                                              f"{fill_floor(_paid):,.2f}"})
                     continue
                 # GTC OTO: the stop leg inherits GTC ("held" until the fill), so the
                 # protective stop persists past the close — a DAY leg expires AT the

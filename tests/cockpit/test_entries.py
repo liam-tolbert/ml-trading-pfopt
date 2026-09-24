@@ -49,7 +49,7 @@ def test_entry_job_execute_stale_exits_zero():
 
     stale = {"date": "2026-08-14",          # a Friday; executing on the 20th is stale
              "rows": [{"ticker": "AAA", "shares": 10, "limit_price": 52.5,
-                       "stop_price": 46.0, "status": entries.ROW_ARMED, "detail": ""}],
+                       "stop_price": 47.5, "status": entries.ROW_ARMED, "detail": ""}],
              "notes": [], "executed_at": None}
     with tempfile.TemporaryDirectory() as tmp, \
             patch.object(cache, "TRIGGERS_DIR", Path(tmp)), \
@@ -75,18 +75,18 @@ def test_build_entry_plan_filters_and_coercion():
     rows = [
         {"ticker": "AAA", "shares": np.int64(10), "price": np.float64(50.0),
          "pivot": np.float64(50.0), "limit_price": np.float64(52.5),
-         "stop_price": np.float64(46.0), "est_value": np.float64(525.0),
+         "stop_price": np.float64(47.5), "est_value": np.float64(525.0),
          "earnings_in": np.int64(30)},
         {"ticker": "HELD", "shares": 5, "rearm_only": True, "limit_price": 52.5,
-         "stop_price": 46.0},
+         "stop_price": 47.5},
         {"ticker": "ZERO", "shares": 0, "stop_only": True, "limit_price": 52.5,
-         "stop_price": 46.0},
+         "stop_price": 47.5},
         {"ticker": "MKT", "shares": 5, "price": 50.0, "limit_price": None,
-         "stop_price": 46.0},
+         "stop_price": 47.5},
         {"ticker": "BADSTOP", "shares": 5, "price": 50.0, "limit_price": 52.0,
          "stop_price": 60.0},
         {"ticker": "BBB", "shares": 7, "price": 40.0, "pivot": 40.0,
-         "limit_price": 42.0, "stop_price": 37.0, "est_value": 294.0,
+         "limit_price": 42.0, "stop_price": 38.0, "est_value": 294.0,
          "earnings_in": None},
     ]
     plan = entries.build_entry_plan(rows, today="2026-08-20")
@@ -102,6 +102,24 @@ def test_build_entry_plan_filters_and_coercion():
     assert plan["date"] == "2026-08-20"
 
 
+def test_build_entry_plan_rejects_over_max_loss():
+    """§6.72: arming refuses a row whose stop sits more than 10% below its limit — the
+    limit is the worst fill, and the 09:26 executor runs unattended, so the refusal
+    belongs at arming time with a note that says what to raise it to. A stop exactly at
+    the cent-rounded floor arms."""
+    from src.stock_screener.cockpit import entries
+
+    rows = [
+        {"ticker": "WIDE", "shares": 5, "price": 50.0, "limit_price": 52.5,
+         "stop_price": 46.0},                                # 12.4% below the limit
+        {"ticker": "EDGE", "shares": 5, "price": 50.0, "limit_price": 52.5,
+         "stop_price": 47.25},                               # exactly 10%
+    ]
+    plan = entries.build_entry_plan(rows, today="2026-08-20")
+    assert [r["ticker"] for r in plan["rows"]] == ["EDGE"]
+    assert any("WIDE" in n and "≥ 47.25" in n for n in plan["notes"]), plan["notes"]
+
+
 def test_entry_plan_persistence_freshness_and_disarm():
     """#24 plan files + the weekend-safe freshness rule (NOT the sells version): a
     Friday/Saturday/Sunday plan executes Monday — exactly one business day inside
@@ -113,7 +131,7 @@ def test_entry_plan_persistence_freshness_and_disarm():
     def plan_for(date):
         return {"date": date, "generated_at": "x",
                 "rows": [{"ticker": "AAA", "shares": 5, "price": 50.0, "pivot": 50.0,
-                          "limit_price": 52.5, "stop_price": 46.0, "est_value": 262.5,
+                          "limit_price": 52.5, "stop_price": 47.5, "est_value": 262.5,
                           "earnings_in": None, "status": "armed", "detail": ""}],
                 "notes": [], "executed_at": None}
 
@@ -151,7 +169,7 @@ def test_execute_entry_plan_matrix():
 
     def row(t):
         return {"ticker": t, "shares": 5, "price": 50.0, "pivot": 50.0,
-                "limit_price": 52.5, "stop_price": 46.0, "est_value": 262.5,
+                "limit_price": 52.5, "stop_price": 47.5, "est_value": 262.5,
                 "earnings_in": None, "status": "armed", "detail": ""}
 
     def mkplan(*ts, date="2026-08-19"):
@@ -236,7 +254,7 @@ def test_trade_panel_arm_and_disarm():
     def _entry(t, limit=52.5):
         return {"ticker": t, "shares": 10, "price": 50.0, "pivot": 50.0,
                 "est_value": 525.0, "extended": False, "capped": False,
-                "stop_price": 46.0, "limit_price": limit, "earnings_in": None}
+                "stop_price": 47.5, "limit_price": limit, "earnings_in": None}
 
     _wl = [{"ticker": t, "judged_pivot": None, "date_added": None,
             "pivot_source": None, "note": ""} for t in ("CLEAN", "HELDX")]
@@ -262,14 +280,14 @@ def test_trade_panel_arm_and_disarm():
 
         # Edit the widgets, then arm — the plan file must carry the EDITED values.
         [n for n in at.number_input if n.key == "lim_CLEAN_1"][0].set_value(53.0)
-        [n for n in at.number_input if n.key == "stop_CLEAN_1"][0].set_value(47.0)
+        [n for n in at.number_input if n.key == "stop_CLEAN_1"][0].set_value(48.0)
         arm[0].click().run()
         assert not at.exception, f"app raised on arm: {at.exception}"
         saved = entries.load_latest_entry_plan(trg)
         assert saved and [r["ticker"] for r in saved["rows"]] == ["CLEAN"], \
             "held rows must not arm"
         assert saved["rows"][0]["limit_price"] == 53.0
-        assert saved["rows"][0]["stop_price"] == 47.0
+        assert saved["rows"][0]["stop_price"] == 48.0
         assert saved["rows"][0]["status"] == "armed"
         rendered = _rendered_text(at)
         assert "Armed for next open" in rendered, "armed section missing after arming"

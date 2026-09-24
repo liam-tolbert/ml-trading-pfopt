@@ -18,9 +18,21 @@ from __future__ import annotations
 # setup, however good the base looks. Advisory in the app, a hard block in the hunt.
 EARNINGS_SOON_DAYS = 21
 
-# Minervini's hard maximum, measured from the PIVOT, not from the fill: a stop further
-# away than this is not a tighter risk budget, it is a different trade.
-MAX_STOP_FROM_PIVOT = 0.10
+# Minervini's hard maximum loss, measured from the PRICE PAID ("never more than 10% below
+# your purchase price"), not from the pivot: a buy near the top of the zone with a
+# pivot-based stop would otherwise risk up to 14.3%. The plan builder raises a stop to
+# this floor for the worst-case fill; paying more therefore buys a tighter stop, never a
+# wider loss. A stop further away is not a looser risk budget, it is a different trade.
+MAX_LOSS_FROM_FILL = 0.10
+
+# The default stop when no tighter support exists: 7.5% below the pivot, the middle of the
+# book's 7-8%. Every consumer (scan levels, frozen-pivot plans, R reconstruction) reads it
+# here so a stop quoted on the Scan page is the stop the order carries.
+DEFAULT_STOP_FROM_PIVOT = 0.075
+
+# No chasing: the buy zone is the pivot to 5% above it. Past that the name is "extended" —
+# the stop from a fill up there is too far below the base for the risk to be the setup's.
+NO_CHASE_PCT = 0.05
 
 # Breakout confirmation: the close must come on >=1.5x the average of the PRIOR
 # VOL_AVG_DAYS bars. Excluding the current bar is the point — including it dilutes the

@@ -30,7 +30,7 @@ import pandas as pd
 from src.stock_screener.minervini_screener.screening import (
     analyze_spy_trend, calculate_stop_loss, classify_phase)
 from . import cache
-from .doctrine import EARNINGS_SOON_DAYS, VOL_AVG_DAYS, VOL_CONFIRM_RATIO
+from .doctrine import EARNINGS_SOON_DAYS, NO_CHASE_PCT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO
 from .export import make_entry
 from .indicators import volume_ratio as _volume_ratio
 from .scan import (_days_to_earnings, _entry_levels, detect_breakout_prior_high,
@@ -40,7 +40,7 @@ from .vcp import detect_vcp
 TRIGGER_VOL_RATIO = VOL_CONFIRM_RATIO   # breakout confirmation, vs the average of the
                                         # prior VOL_AVG_DAYS bars (today's bar excluded)
 VOL_CONTEXT_DAYS = 20       # the scan's window — reported as context, never the gate
-EXTENDED_PCT = 0.05         # close > pivot * 1.05 = past the buy zone ("don't chase")
+EXTENDED_PCT = NO_CHASE_PCT  # close > pivot * 1.05 = past the buy zone ("don't chase")
 PULLBACK_BAND = 0.02        # +/-2% of pivot = the low-risk secondary-entry zone; below
                             # -2% the base is failing, not pulling back
 DRY_VOL_RATIO = 0.8         # "dry" = clearly below the 50-day average volume -- the

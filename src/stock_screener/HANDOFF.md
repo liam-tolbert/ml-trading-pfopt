@@ -4,9 +4,10 @@
 cross-sectional track). The momentum-*factor* experiment is closed; its essentials are folded
 into §5 and its standalone write-up was never committed.
 
-**Status (2026-08-26):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
+**Status (2026-09-23):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
 frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries, with sell
-automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). Suite **151 cockpit
+automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). A SEPA-fidelity
+audit found nine gaps; §6.72 (max loss from the price paid) is the first fix in. Suite **161 cockpit
 + 33 hunt**, offline, both gating deploys.
 
 **Research verdict (2026-06-29) — no out-of-sample alpha.** A strong in-sample result (α t=2.49) was
@@ -198,9 +199,11 @@ the discipline.
 5. **Pilot size (0.5% risk)** until the last-10 numbers improve.
 
 **Entry.** Buy zone = pivot..pivot×1.05 (no chasing). Trigger = settled close above the frozen pivot
-on **≥1.5× the 50-day average volume**. Stop 7–8% below the *pivot*, **10% hard max** (clamped in
-`_entry_levels`). Target pivot×1.25. Skip inside ~21 days of earnings. Size for ~1% account risk
-(0.5% while probing); the 10%-of-equity single-order cap clamps risk-mode quantities.
+on **≥1.5× the 50-day average volume**. Stop 7.5% below the pivot by default, and **never more than
+10% below the price paid** (§6.72): a buy's stop is raised to 10% below its worst-case fill (the
+limit, else the price), re-checked at submit and at arming. Target pivot×1.25.
+Skip inside ~21 days of earnings. Size for ~1% account risk (0.5% while probing); the
+10%-of-equity single-order cap clamps risk-mode quantities.
 
 **Sell — the four pillars (P1–P4).** A breakout buy's thesis is P1 resolution (closed above the pivot
 on volume and STAYS above) ∧ P2 Stage-2 structure (8/8, rising 50-SMA) ∧ P3 risk-on tape ∧ P4 no
@@ -357,6 +360,11 @@ Constants and API facts that are expensive to rediscover. Change these only with
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
 
+**Stops and the book's numbers (`doctrine.py`, §6.72):**
+- `fill_floor(fill)` = `ceil(round(fill × 0.9 × 100, 6)) / 100`: 10% below the fill, rounded UP to
+  the cent (the inner `round` stops 42 × 0.9 = 37.800000000000004 ceiling to 37.81). The builder,
+  submit and arming all use it, so a builder-made stop always passes the guards.
+
 **`suggest_stop` bases (Positions page, auto mode):** fresh (gain < `BREAKEVEN_GAIN` 0.16) → 8% below
 entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 50-day → trail
 `sma_50 × 0.99`. Floored at the in-force stop (ratchet-safe). `None` = underwater → manual row.
@@ -498,6 +506,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - **Fix 2 — per-session reads** (§6 Key data semantics). `_session_positions` and `journal_cache.cached_fills` now memoize in `st.session_state` by nonce with a 60 s max age. `app._risk_guidance`'s memo ages on the same clock, and still costs one fetch attempt per window during an outage. The Journal's Refresh just bumps the nonce. Eleven `cached_fills.clear()` calls were deleted from the tests; their only job had been stopping one test's cached result leaking into the next.
   - **Tests (+5):** `test_connect_paper_installs_timeout`; `test_alpaca_timeout_ends_a_silent_connection`, which uses a real loopback socket that accepts and never answers and bounds the request with a thread join, so a regression fails instead of hanging the gate; `test_fetch_positions_timeout_is_trade_unavailable`; `test_positions_page_reads_account_per_session`; and `test_order_history_read_per_session`. Both per-session tests were run against `HEAD`'s code before the fix and **fail exactly at "session B"**: one fetch, and B shows A's snapshot.
   - **Correction: the likelier root cause of the hang is §6.79** (a logging lock held forever), which neither fix above touches.
+- **§6.72** **Max loss is measured from the price paid (SEPA fidelity audit #1).** The book: never more than 10% below *your purchase price*. The cockpit measured the 10% from the pivot, so a fill at the top of the zone (pivot×1.05) with a 7.5%-below-pivot stop risked 11.9%, and a clamped stop 14.3%. `build_buy_plan` now raises a non-held buy's stop to `fill_floor(worst-case fill)` — the limit for a limit plan, the last price for a market plan — **rounded UP to the cent** (a bare `ceil` turned 42×0.9 = 37.800000000000004 into 37.81). Paying more buys a tighter stop, never a wider loss. `submit_buy_plan` and `entries.build_entry_plan` re-check it (both levels are editable after Build; the 09:26 executor runs unattended), the trade panel flags a breaching edit in red, and the Positions page advises when a held stop sits >10% below cost (a market buy that gapped up). Held rows are exempt everywhere — flooring a re-arm stop would silently start a trailing stop. `MAX_STOP_FROM_PIVOT` became `doctrine.MAX_LOSS_FROM_FILL`; `DEFAULT_STOP_FROM_PIVOT` and `NO_CHASE_PCT` moved into `doctrine.py` (`triggers.EXTENDED_PCT` and the hunt's `BUY_ZONE_MAX_PCT` now alias it). **Consequence:** a zone-top limit now carries a stop ≥ pivot×0.945, and a name trading between pivot×0.925 and ×0.945 skips in limit mode (its floored stop would sit above the market). `r_multiple` is exact only when the in-force stop matches a level the builder could have attached.
 - **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 
 ## 12. Open items

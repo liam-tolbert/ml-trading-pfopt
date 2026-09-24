@@ -30,15 +30,13 @@ from src.stock_screener.minervini_screener.screening import (
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
-from .doctrine import MAX_STOP_FROM_PIVOT
+from .doctrine import DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL, NO_CHASE_PCT
 from .indicators import (relative_measured_volatility,
                          bollinger_bandwidth_percentile_last, ttm_squeeze)
 # Cockpit VCP detector: the vendored detect_vcp_pattern starves strong uptrends
 # (cc=0 for ~84% of candidates on full_us). Same dict schema = drop-in.
 from .vcp import detect_vcp
 
-# Minervini's stop is measured from the pivot: 7-8% ideal, 10% hard max. Floors the advisory
-# stop this far below the pivot so a price-anchored engine stop can't breach max-loss.
 
 @dataclass
 class ScanConfig:
@@ -132,11 +130,13 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
     """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else the
     52-week high (the line a breakout would clear).
 
-    The stop is measured from the PIVOT (the intended buy point): Minervini's 7-8% ideal, 10%
-    hard max. The engine's ``calculate_stop_loss`` anchors to the *current* price and swing-low/
-    50-SMA support, which for a name below its pivot can sit well past 10% below it. We floor the
-    advisory stop at ``MAX_STOP_FROM_PIVOT`` below the pivot so the max-loss rule holds (a tighter
-    engine stop is kept; ``stop_clamped`` records whether the floor bound). Advisory only — never
+    The stop defaults to ``DEFAULT_STOP_FROM_PIVOT`` below the PIVOT (the intended buy point).
+    The engine's ``calculate_stop_loss`` anchors to the *current* price and swing-low/50-SMA
+    support, which for a name below its pivot can sit well past 10% below it, so the advisory
+    stop is floored at ``MAX_LOSS_FROM_FILL`` below the pivot — the lowest fill the zone allows
+    (a tighter engine stop is kept; ``stop_clamped`` records whether the floor bound). The max
+    loss is measured from the price PAID, so ``max_fill_for_stop`` is the highest fill this stop
+    still covers; the plan builder raises the stop for a fill above it. Advisory only — never
     moves a real order."""
     pivot = breakout.get("breakout_level")
     # A '50 SMA Breakout' level IS the 50-day SMA (a routine pullback-to-50-day recovery), not a
@@ -146,16 +146,18 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
         pivot = None
     if not pivot or pivot <= 0:
         pivot = phase_info.get("week_52_high") or cp
-    raw_stop = stop if (stop and stop > 0 and stop < pivot) else pivot * 0.925
-    floor = pivot * (1.0 - MAX_STOP_FROM_PIVOT)             # 10% below pivot = the hard max
+    raw_stop = (stop if (stop and stop > 0 and stop < pivot)
+                else pivot * (1.0 - DEFAULT_STOP_FROM_PIVOT))
+    floor = pivot * (1.0 - MAX_LOSS_FROM_FILL)              # 10% below the lowest fill
     stop_price = max(raw_stop, floor)
     stop_clamped = raw_stop < floor
     pct_to_pivot = ((pivot - cp) / cp * 100.0) if cp else None
     return {
         "pivot": float(pivot),
-        "buy_zone": (float(pivot), float(pivot) * 1.05),   # no chasing > +5%
+        "buy_zone": (float(pivot), float(pivot) * (1.0 + NO_CHASE_PCT)),   # no chasing
         "stop": float(stop_price),                          # 7-8% below pivot, 10% hard floor
         "stop_pct_from_pivot": ((pivot - stop_price) / pivot * 100.0) if pivot else None,
+        "max_fill_for_stop": float(stop_price) / (1.0 - MAX_LOSS_FROM_FILL),
         "stop_clamped": bool(stop_clamped),
         "target": float(pivot) * 1.25,                      # +25% objective (user-locked)
         "breakout_today": bool(breakout.get("is_breakout")),

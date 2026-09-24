@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from src.stock_screener.cockpit import plan_store
+from src.stock_screener.cockpit.doctrine import MAX_LOSS_FROM_FILL
+from src.stock_screener.cockpit.trade import fill_floor, stop_within_max_loss
 
 AUTOBUY_ENV = "AUTOBUY"
 _PREFIX = "entry_plan"
@@ -49,9 +51,10 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
 
     Only genuine BUY rows arm: ``shares >= 1``, not ``rearm_only``/``stop_only``, and
     both a positive ``limit_price`` (the no-chase cap IS the entry mechanic — a market
-    row must never arm) and a positive ``stop_price`` below it (the OTO leg). Order is
-    preserved — the executor walks rows top-down, so the panel's ordering is the
-    ranking."""
+    row must never arm) and a positive ``stop_price`` below it (the OTO leg) and no more
+    than ``MAX_LOSS_FROM_FILL`` below it (the limit is the worst fill, and the executor
+    runs unattended — refuse at arming, not at 09:26). Order is preserved — the executor
+    walks rows top-down, so the panel's ordering is the ranking."""
     rows = []
     skipped = []
     for o in final_rows or []:
@@ -66,6 +69,11 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
             continue
         if not stop or not (0 < float(stop) < float(lim)):
             skipped.append(f"{t}: stop must sit below the limit")
+            continue
+        if not stop_within_max_loss(stop, lim):
+            skipped.append(f"{t}: stop {float(stop):,.2f} is more than "
+                           f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the limit "
+                           f"{float(lim):,.2f} — raise it to ≥ {fill_floor(lim):,.2f}")
             continue
         rows.append(_row(o))
 

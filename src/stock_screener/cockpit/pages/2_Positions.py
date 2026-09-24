@@ -210,9 +210,11 @@ _pillars = {p["symbol"]: trade.sell_pillars(
                 pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy)
             for p in positions}
 _PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
-# R-multiples off the frozen pivot's reconstructed stop ('~' = 8% approximation).
+# R-multiples off the reconstructed entry stop ('~' = the in-force stop isn't one the plan
+# builder would have attached, so the initial risk is an estimate).
 _rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
-                                         _wl_pivots.get(p["symbol"]))
+                                         _wl_pivots.get(p["symbol"]),
+                                         current_stop=p.get("current_stop"))
            for p in positions}
 
 
@@ -246,10 +248,12 @@ col_config = {
     "current_price": _num("Price", format="$%.2f"),
     "gain_pct": _num("Gain", format="%.1f%%", help="Unrealized gain/loss on the position."),
     "R": st.column_config.Column(
-        "R", help="Gain as a multiple of the initial risk — reconstructed from the "
-                  "frozen pivot's stop when the name is watchlisted ('~' = 8% "
-                  "approximation off the entry). At ≥2R the free-roll applies: sell "
-                  "half, move the stop to breakeven, and the rest rides risk-free."),
+        "R", help="Gain as a multiple of the initial risk. Exact when the stop in force "
+                  "is the one the trade plan attached (from the watchlist's frozen pivot, "
+                  "raised to 10% below the fill); '~' = an estimate — the stop has been "
+                  "raised since, or the name isn't watchlisted (8% off the entry). At ≥2R "
+                  "the free-roll applies: sell half, move the stop to breakeven, and the "
+                  "rest rides risk-free."),
     "stage": st.column_config.Column(
         "Stage", help="The stop ladder by gain: underwater · fresh (<16%) · working "
                       "(16-20%, stop → breakeven) · well in profit (≥20%, trail 50-day)."),
