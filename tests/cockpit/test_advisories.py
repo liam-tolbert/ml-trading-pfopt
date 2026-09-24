@@ -216,5 +216,99 @@ def test_violations_switch_and_plan_notes():
     assert [o["symbol"] for o in plan["orders"]] == ["AAA"]
 
 
+def test_regime_tier_prefix():
+    """§6.78 (audit #8): tiers by label PREFIX. "TRANSITIONAL / Uncertain" contains "on",
+    and the old substring test painted it green (risk-on); a Weak/Mixed risk-on is not a
+    strong tape either."""
+    from src.stock_screener.cockpit.advisories import regime_tier
+
+    assert regime_tier("RISK-ON (Strong)") == "strong"
+    assert regime_tier("RISK-ON (Moderate)") == "strong"
+    assert regime_tier("RISK-ON (Weak) / Mixed") == "weak"
+    assert regime_tier("TRANSITIONAL / Uncertain") == "weak"
+    assert regime_tier("RISK-OFF") == "off"
+    assert regime_tier(None) == "unknown" and regime_tier("") == "unknown"
+
+
+def test_weak_market_advice():
+    """§6.78: in a weak or risk-off tape the book tightens (5-6% stops, 10-12% profits,
+    smaller size) — stated beside the plan's own numbers, never applied. Silent in a
+    strong or unknown tape; falls back to the trigger report's SPY-only read."""
+    from src.stock_screener.cockpit import advisories
+
+    strong = {"regime": "RISK-ON (Strong)", "should_generate_buys": True}
+    assert advisories.weak_market_advice(strong, stop_pct=0.075) is None
+    assert advisories.weak_market_advice(None, None) is None
+
+    txt = advisories.weak_market_advice({"regime": "TRANSITIONAL / Uncertain"},
+                                        stop_pct=0.075, target_pct=0.25, risk_pct=1.0)
+    assert txt.startswith("TRANSITIONAL / Uncertain")
+    assert "stops 5–6% below the buy (plan: 7.5%)" in txt, txt
+    assert "profits taken at 10–12% (plan target +25%)" in txt, txt
+    assert "(plan: 1.00% risk per trade)" in txt, txt
+
+    assert advisories.weak_market_advice(None, {"trend": "Bullish"}) is None
+    assert advisories.weak_market_advice(None, {"trend": "Bearish"}).startswith("SPY Bearish")
+    assert advisories.in_weak_take_profit_band(0.11)
+    assert not advisories.in_weak_take_profit_band(0.08)
+    assert not advisories.in_weak_take_profit_band(None)
+
+
+def test_spy_confirm_streak():
+    """§6.78 (audit #9): the re-entry lag counts consecutive settled sessions, newest
+    first, with SPY in Stage 1-2, stopping at REGIME_CONFIRM_DAYS (satisfied) — so SPY is
+    classified at most 15 times. A Stage 3/4 session breaks the streak."""
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import advisories
+    from src.stock_screener.cockpit.doctrine import REGIME_CONFIRM_DAYS
+    from src.stock_screener.minervini_screener import screening
+
+    spy = pd.DataFrame({"Close": 100.0}, index=pd.bdate_range("2025-01-01", periods=300))
+    calls = []
+
+    def fake_phase(phases_by_age):
+        def _f(sub, cp):
+            age = len(spy) - len(sub)                     # 0 = today, 1 = yesterday ...
+            calls.append(age)
+            return {"phase": phases_by_age(age)}
+        return _f
+
+    with patch.object(screening, "classify_phase", fake_phase(lambda a: 2 if a < 6 else 4)):
+        r = advisories.spy_confirm_streak(spy)
+    assert r == {"streak": 6, "satisfied": False, "phase_now": 2}, r
+
+    calls.clear()
+    with patch.object(screening, "classify_phase", fake_phase(lambda a: 1 if a % 2 else 2)):
+        r = advisories.spy_confirm_streak(spy)
+    assert r["streak"] == REGIME_CONFIRM_DAYS and r["satisfied"] is True
+    assert len(calls) == REGIME_CONFIRM_DAYS, "classified more often than the lag needs"
+
+    with patch.object(screening, "classify_phase", fake_phase(lambda a: 4)):
+        r = advisories.spy_confirm_streak(spy)
+    assert r["streak"] == 0 and r["phase_now"] == 4
+    assert advisories.spy_confirm_streak(spy.iloc[:150]) is None
+
+
+def test_market_turn_transition_only():
+    """§6.78: the market turn fires on the evening SPY ENTERS Stage 4 — not every evening
+    it stays there (a "reduce" rule would halve the book night after night). With no prior
+    plan to date it against, Stage 4 is reported unconfirmed, never as a turn."""
+    from src.stock_screener.cockpit.advisories import market_turn
+
+    s4, s2 = {"phase": 4, "trend": "Bearish"}, {"phase": 2, "trend": "Bullish"}
+    t = market_turn(s4, {"spy_phase": 2})
+    assert t["turn"] is True and t["stage4"] is True and t["unconfirmed"] is False
+    stay = market_turn(s4, {"spy_phase": 4})
+    assert stay["turn"] is False and stay["stage4"] is True and stay["unconfirmed"] is False
+    first = market_turn(s4, None, has_prior_plan=False)
+    assert first["turn"] is False and first["unconfirmed"] is True
+    old = market_turn(s4, None, has_prior_plan=True)      # a plan from before "market"
+    assert old["turn"] is False and old["unconfirmed"] is True
+    assert market_turn(s2, {"spy_phase": 4})["turn"] is False
+    assert market_turn(None, {"spy_phase": 2}) == {"spy_phase": None, "stage4": False,
+                                                    "turn": False, "unconfirmed": False}
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "advisories"))

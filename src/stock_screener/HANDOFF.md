@@ -9,8 +9,9 @@ frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped 
 automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). A SEPA-fidelity
 audit found nine gaps; §6.72–§6.75 (max loss from the price paid, the Loss Adjustment Exercise, the
 derived stop, stop room) are in; the base count (§6.76) failed its own acceptance test and did not
-ship. §6.77 (post-breakout violations/follow-through) is in too. Suite **175 cockpit + 35 hunt**,
-offline, both gating deploys.
+ship. §6.72–§6.78 (stops from the fill, the Loss Adjustment Exercise, the derived stop, stop
+room, the post-breakout reads, the tape) are in; the base count (§6.76) failed its own acceptance
+test and did not ship. Suite **186 cockpit + 35 hunt**, offline, both gating deploys.
 
 **Research verdict (2026-06-29) — no out-of-sample alpha.** A strong in-sample result (α t=2.49) was
 overfit; OOS collapsed it to t=0.47. Risk management is real; selection is not. The user trades this
@@ -157,8 +158,8 @@ the discipline.
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
 | `trade.py` | Alpaca paper submit path, stops, the exposure gate, the journal + Loss Adjustment Exercise |
-| `advisories.py` | display-only SEPA reads: stop room, post-breakout violations/follow-through |
-| `doctrine.py` | the shared rule numbers (imports nothing) |
+| `advisories.py` | display-only SEPA reads: stop room, post-breakout violations/follow-through, regime tier, weak-tape advice, market turn, SPY re-entry streak |
+| `doctrine.py` | the shared rule numbers and the two promotion switches (imports nothing) |
 | `sells.py` / `entries.py` | P1–P4 sell planner; armed-entry plans |
 | `refresh_job.py` / `sell_job.py` / `entry_job.py` | the three headless CLIs the timers invoke |
 | `runlog.py` | dated run logs, 14-day retention |
@@ -224,6 +225,10 @@ between checks, never the sell signal.** Decisions on settled closes only; execu
 - **Post-breakout violations** warn in P1 (§6.77): a close under the 20-day line in the first
   month, a heavy down day after a light-volume breakout, lower lows, more down or lower-half
   closes, a gain given back. `VIOLATIONS_CAN_FAIL` (off) would make 3 of them a P1 fail.
+- **The tape** (§6.78): SPY entering Stage 4 → the plan notes "reduce"; `MARKET_TURN_CAN_TRADE`
+  (off) would also order half of each position sold. After a break, no new buys until SPY has
+  been back in Stage 1–2 for 15 sessions. In a weak tape the book's 5–6% stops / 10–12%
+  profits are shown beside the plan's, never applied.
 
 **Progressive exposure.** Gate is open when flat, or when every position in the newest-day cohort is
 at breakeven-or-better AND tagged net open P&L ≥ 0. Scope is cockpit-**tagged** positions only, so
@@ -369,7 +374,7 @@ Constants and API facts that are expensive to rediscover. Change these only with
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
 
-**Stops and the book's numbers (`doctrine.py`, §6.72–§6.77):**
+**Stops and the book's numbers (`doctrine.py`, §6.72–§6.78):**
 - `fill_floor(fill)` = `ceil(round(fill × 0.9 × 100, 6)) / 100`: 10% below the fill, rounded UP to
   the cent (the inner `round` stops 42 × 0.9 = 37.800000000000004 ceiling to 37.81). The builder,
   submit and arming all use it, so a builder-made stop always passes the guards.
@@ -379,6 +384,9 @@ positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negat
 - Derived stop: tagged closed trades, **≥5 wins**, ½ × average win, clamped [4%, 10%]; the 4% floor
   came from the §6.73 pre-registered rule on ONE winner.
 - Post-breakout window: **20** sessions for the 20-day line; violation cluster for the switch = **3**.
+- Re-entry lag: **15** sessions of SPY in Stage 1–2 (the OOS-validated value; SPY-only, no breadth).
+- **Promotion switches, both OFF:** `VIOLATIONS_CAN_FAIL` and `MARKET_TURN_CAN_TRADE`. Read at call
+  time (`doctrine.X`), so tests patch the module attribute.
 
 **`suggest_stop` bases (Positions page, auto mode):** fresh (gain < `BREAKEVEN_GAIN` 0.16) → 8% below
 entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 50-day → trail
@@ -540,6 +548,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - **(b) The transition base** (GRBK, AVBC, GEO). The base formed *before* the last close under a still-falling 200-day. The first base of a new Stage 2 often forms while the stock emerges from Stage 1, so "count only after the start" drops it.
   - **The demotion was moot anyway:** zero tier-A fixtures had ≥5 bases under either rule, so "demote 5th+ bases" would have changed no benchmark tier. The prototype and the acceptance script are not in the tree.
 - **§6.77** **After the buy: the 20-day line, violations and follow-through (audits #6, #7).** `advisories.post_breakout_read` reads the settled bars from the entry day on. **Violations:** a close under the 20-day SMA within the first 20 sessions (`POST_BREAKOUT_DAYS`; strict `<`, so a flat tape never trips it); a heavy (≥1.5×) down day after a light-volume breakout day; 3 lower lows in a row with no above-average-volume up close; more down closes than up (3+ sessions); more lower-half closes than upper-half (bars with H=L skipped); a close under the 50-day on heavy volume; a +5% gain fully given back. **Follow-through:** up closes on rising volume, 3 of the first 4 / 6 of the first 8 sessions up, more upper-half closes, every dip recovered within 2 sessions. Violations become **P1 warnings**, so they reach the Positions captions and the evening plan's notes, never an order. `doctrine.VIOLATIONS_CAN_FAIL` (off) turns `VIOLATION_FAIL_COUNT = 3` of them into a P1 fail, which *is* an automatic full exit. It is read at call time. A live read drops today's bar while its session is open (`triggers.bar_is_provisional`), because an intraday dip under the line is not a close under it. `fetch_positions` carries `sma_20`, and the Positions table has a 20-day column.
+- **§6.78** **The tape (audits #8, #9).** **(a) Colour bug:** `app._regime_color` tested `"on" in label`, so **"TRANSITIONAL / Uncertain" rendered risk-on green**, and so did "RISK-ON (Weak) / Mixed". `advisories.regime_tier` reads the label by prefix; only Strong/Moderate risk-on is green. **(b) Weak-tape advice:** in a weak or risk-off tape, the trade panel and the Positions page state the book's numbers beside the plan's: stops 5–6% (`WEAK_TAPE_STOP_PCT`), profits at 10–12% (`WEAK_TAPE_TARGET_PCT`), smaller size. A position inside that profit band gets a row hint. **Advice only**: §6.73 says tighter stops cost money on this record. **(c) Market turn:** the backtest's one validated exit is SPY in Stage 4. The evening plan reads it from the trigger report's SPY note (the settled 16:10 close) and records `plan["market"] = {spy_phase, turn, streak}`. It notes a **turn** only on the evening SPY *enters* Stage 4, dated against yesterday's plan; with no dated prior plan it says "unconfirmed". Otherwise "reduce half every evening" would empty the book in five days. `MARKET_TURN_CAN_TRADE` (off) adds one partial sell (`MARKET_TURN_REDUCE_FRACTION = 0.5`) per position without a full exit; a full exit wins, so there is still one order per symbol and a Veto keeps its meaning. **(d) Re-entry lag:** `advisories.spy_confirm_streak` counts consecutive sessions with SPY in Stage 1–2 up to `REGIME_CONFIRM_DAYS = 15`, the train-period value the out-of-sample test validated (25 is tainted, §1). The scan's regime dict carries it; below 15 the trade panel says "don't add yet". It approximates the backtest, which also required 15% breadth. **(e) Latent executor bug:** `execute_sell_plan` did `min(qty, held) or held`, which turns a 0-share order into "sell everything". It was harmless while every order was a full exit. A `partial` order now sells exactly its clamped quantity and skips at 0, and `remainder_stop` is passed through only when set. **(f)** The Positions page renders the plan's notes **even with no orders**. Before, it rendered only orders, so every advisory above would have been invisible on a quiet evening.
 - **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 
 ## 12. Open items
@@ -568,6 +577,10 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   private `client._session`, verified locally on **0.44.0**; the image pins **0.43.4**.
   `test_connect_paper_installs_timeout` settles it on the first deploy of §6.71 — if that deploy
   fails there, the hook moved and needs a version-specific path, not a skipped test.
+- **When to flip the two switches.** `VIOLATIONS_CAN_FAIL`: after a few weeks of watching the P1
+  violation warnings on live positions. Would 3-at-once have exited earlier than the existing P1
+  rules, and at a better price? `MARKET_TURN_CAN_TRADE`: only once a turn has been seen and
+  handled by hand at least once. Both are one-line changes in `doctrine.py`.
 - **Re-apply the §6.73 floor rule at the 5th win.** The derived stop turns on by itself at 5 cockpit
   wins, but its 4% floor rests on one. Re-run the sweep then (the Journal page shows it;
   `trade.stop_floor_from_sweep`) and update `DERIVED_STOP_FLOOR` only by the pre-registered rule.
@@ -579,6 +592,8 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   the decisive close, the second close and the breakout-bar low use `last_close`. Only the §6.77
   reads drop an unsettled bar. The evening plan runs after the settle, so the automation is
   unaffected; the Positions page mid-session can show a P1 ❌ that the close then clears.
+- **The re-entry streak has no breadth.** The backtest's lag also required 15% of the universe in
+  Stage 2. The scan has today's breadth but not its history.
 - **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
   first time two threads log (a page's price read plus the background scan). `docker compose
   restart app` clears it for a while.
@@ -593,5 +608,5 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 175 tests) · `tests/test_hunt.py` (35 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 186 tests) · `tests/test_hunt.py` (35 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
 - **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.

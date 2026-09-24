@@ -184,6 +184,98 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
             "sma20": sma20_note, "provisional_dropped": dropped}
 
 
+def regime_tier(label) -> str:
+    """The scan regime label's tier, by PREFIX: ``strong`` (RISK-ON Strong/Moderate),
+    ``weak`` (RISK-ON Weak/Mixed, TRANSITIONAL), ``off`` (RISK-OFF), else ``unknown``.
+    A substring test is wrong here — "TRANSITIONAL" contains "on" and read as risk-on."""
+    s = str(label or "").strip().upper()
+    if s.startswith("RISK-ON (STRONG)") or s.startswith("RISK-ON (MODERATE)"):
+        return "strong"
+    if s.startswith("RISK-OFF"):
+        return "off"
+    if s.startswith("RISK-ON") or s.startswith("TRANSITIONAL"):
+        return "weak"
+    return "unknown"
+
+
+def _tape_tier(regime=None, spy_note=None):
+    """(tier, label) from the scan regime dict, else the trigger report's SPY-only note
+    (Bullish = strong, Bearish = off, anything else weak)."""
+    if isinstance(regime, dict) and regime.get("regime"):
+        return regime_tier(regime["regime"]), str(regime["regime"])
+    if isinstance(spy_note, dict) and spy_note.get("trend"):
+        t = str(spy_note["trend"])
+        tier = ("strong" if t.lower().startswith("bull")
+                else "off" if t.lower().startswith("bear") else "weak")
+        return tier, f"SPY {t}"
+    return "unknown", ""
+
+
+def weak_market_advice(regime=None, spy_note=None, *, stop_pct=None, target_pct=None,
+                       risk_pct=None) -> Optional[str]:
+    """What the book does differently in a weak tape, beside the plan's own numbers — or
+    None when the tape is strong or unknown. Advice only: nothing here changes a stop,
+    a target or a size."""
+    tier, label = _tape_tier(regime, spy_note)
+    if tier not in ("weak", "off"):
+        return None
+    lo, hi = doctrine.WEAK_TAPE_STOP_PCT
+    tlo, thi = doctrine.WEAK_TAPE_TARGET_PCT
+    plan_stop = f" (plan: {stop_pct * 100:.1f}%)" if stop_pct else ""
+    plan_tgt = f" (plan target +{target_pct * 100:.0f}%)" if target_pct else ""
+    plan_risk = f" (plan: {risk_pct:.2f}% risk per trade)" if risk_pct else ""
+    return (f"{label} — in a weak market the book tightens up: stops {lo * 100:.0f}–"
+            f"{hi * 100:.0f}% below the buy{plan_stop}, profits taken at {tlo * 100:.0f}–"
+            f"{thi * 100:.0f}%{plan_tgt}, and smaller size{plan_risk}.")
+
+
+def in_weak_take_profit_band(gain_pct) -> bool:
+    """A gain inside the book's weak-market take-profit band (``WEAK_TAPE_TARGET_PCT``)."""
+    lo, hi = doctrine.WEAK_TAPE_TARGET_PCT
+    return gain_pct is not None and lo <= float(gain_pct) <= hi + 0.005
+
+
+def spy_confirm_streak(spy_df, max_days: Optional[int] = None) -> Optional[dict]:
+    """Consecutive settled sessions, newest first, with SPY in Stage 1 or 2 — the
+    backtest's re-entry lag, counted the way it counted it, but on SPY alone (the backtest
+    also required 15% of the universe in Stage 2; this has no breadth, so it is an
+    approximation). Stops at ``max_days`` (``REGIME_CONFIRM_DAYS``): at that many the lag
+    is satisfied and older history can't change the answer, so SPY is classified at most
+    that many times. Returns ``{streak, satisfied, phase_now}``, None without 200+ bars."""
+    if spy_df is None or len(spy_df) < 200:
+        return None
+    from src.stock_screener.minervini_screener.screening import classify_phase
+    cap = doctrine.REGIME_CONFIRM_DAYS if max_days is None else int(max_days)
+    streak, phase_now = 0, None
+    for k in range(cap):
+        sub = spy_df.iloc[:len(spy_df) - k]
+        if len(sub) < 200:
+            break
+        ph = classify_phase(sub, float(sub["Close"].iloc[-1])).get("phase")
+        if k == 0:
+            phase_now = ph
+        if ph not in (1, 2):
+            break
+        streak += 1
+    return {"streak": streak, "satisfied": streak >= cap, "phase_now": phase_now}
+
+
+def market_turn(spy_note, prior_market: Optional[dict] = None,
+                has_prior_plan: bool = True) -> dict:
+    """Did the market just TURN? SPY in Stage 4 (the backtest's validated exit) on the
+    evening it gets there — not every evening it stays there, or a "reduce" rule would
+    halve the book night after night. ``prior_market`` is the previous plan's
+    ``market`` record; with no prior plan at all the turn can't be dated, so it is reported
+    as ``unconfirmed`` (the book may already have been reduced). Returns ``{spy_phase,
+    stage4, turn, unconfirmed}``."""
+    ph = (spy_note or {}).get("phase") if isinstance(spy_note, dict) else None
+    stage4 = ph == 4
+    prev = (prior_market or {}).get("spy_phase")
+    turn = bool(stage4 and has_prior_plan and prior_market is not None and prev != 4)
+    unconfirmed = bool(stage4 and not turn and (not has_prior_plan or prior_market is None))
+    return {"spy_phase": ph, "stage4": stage4, "turn": turn, "unconfirmed": unconfirmed}
+
+
 def stop_room_text(room: Optional[dict], day_range) -> str:
     """One caption fragment for :func:`stop_room`'s result: ``'stop 3.1 typical days away
     (2.4%/day)'``, ⚠-prefixed inside ``STOP_ROOM_MIN_DAYS``. Empty when unknown."""

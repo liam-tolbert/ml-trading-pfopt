@@ -385,7 +385,15 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
 
     breadth = calculate_market_breadth(phase_results)
     sig = should_generate_signals(spy_analysis, breadth)
+    # The backtest's re-entry lag, on SPY alone (no breadth history here).
+    from .advisories import spy_confirm_streak
+    try:
+        _streak = spy_confirm_streak(spy)
+    except Exception:
+        _streak = None
     regime = {
+        "spy_ok_streak": (_streak or {}).get("streak"),
+        "spy_ok_satisfied": (_streak or {}).get("satisfied"),
         "regime": sig.get("regime"),
         "should_generate_buys": sig.get("should_generate_buys"),
         "phase2_pct": breadth.get("phase_2_pct", 0.0),

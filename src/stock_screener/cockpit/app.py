@@ -128,7 +128,8 @@ two axes flip from quiet to loud:
 These levels are advisory — place the order in your broker.
 """
 
-from src.stock_screener.cockpit.doctrine import EARNINGS_SOON_DAYS, MAX_LOSS_FROM_FILL
+from src.stock_screener.cockpit.doctrine import (DEFAULT_STOP_FROM_PIVOT, EARNINGS_SOON_DAYS,
+                                                 MAX_LOSS_FROM_FILL, REGIME_CONFIRM_DAYS)
 
 
 
@@ -250,9 +251,9 @@ def _earnings_flag(days) -> str:
 
 
 def _regime_color(regime) -> str:
-    """Risk-On -> green, Risk-Off -> red, anything else/unknown -> orange."""
-    r = str(regime or "").lower()
-    return "green" if "on" in r else "red" if "off" in r else "orange"
+    """Strong/moderate Risk-On -> green, Risk-Off -> red, anything else (weak, mixed,
+    transitional, unknown) -> orange. By label prefix: "TRANSITIONAL" contains "on"."""
+    return {"strong": "green", "off": "red"}.get(advisories.regime_tier(regime), "orange")
 
 
 def step_badge(step: str, title: str) -> str:
@@ -726,6 +727,18 @@ with st.sidebar:
             st.caption(":orange[**⚠︎ CAUTION tape** — the market regime advises against "
                        "NEW buys (most breakouts fail in a weak tape). Managing stops is "
                        "fine; think twice before submitting fresh entries.]")
+        # What the book changes in a weak tape, beside the plan's own numbers (advice only).
+        _weak = advisories.weak_market_advice(res.regime, stop_pct=DEFAULT_STOP_FROM_PIVOT,
+                                              target_pct=0.25)
+        if _weak:
+            st.caption(f":orange[{_weak}]")
+        # The backtest's re-entry lag: after SPY leaves Stage 4, wait before adding.
+        _stk = res.regime.get("spy_ok_streak")
+        if _stk is not None and not res.regime.get("spy_ok_satisfied"):
+            st.caption(f":orange[SPY has been in Stage 1–2 for only **{_stk}/"
+                       f"{REGIME_CONFIRM_DAYS}** sessions — the backtest waited "
+                       f"{REGIME_CONFIRM_DAYS} before adding again after a break (the one "
+                       "market-timing rule that held out of sample). Don't add yet.]")
         # How to size EACH name's market BUY — % of portfolio, raw $, raw share count, or
         # risk-to-stop (Minervini's sizer).
         _mode_label = st.selectbox(

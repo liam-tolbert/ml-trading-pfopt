@@ -54,13 +54,28 @@ def _positions_and_pillars(today=None):
                    pivot=wl_pivots.get(p["symbol"]), regime=None, spy_note=spy,
                    today=today)
                for p in positions}
-    return data, positions, pillars
+    return data, positions, pillars, spy
+
+
+def _market(spy_note) -> dict:
+    """The plan's market read: the trigger report's SPY note (the 16:10 run's settled
+    close — fresher than the day-old scan) and the re-entry streak off CACHED SPY bars
+    (the 16:10 refresh tops SPY up; this job never downloads)."""
+    streak = None
+    try:
+        from src.stock_screener.cockpit import advisories, data_feed
+        spy_df = data_feed.get_many_prices(["SPY"], allow_network=False).get("SPY")
+        streak = advisories.spy_confirm_streak(spy_df)
+    except Exception:
+        streak = None
+    return {"spy_note": spy_note, "streak": streak}
 
 
 def cmd_plan(date: Optional[str], write: bool) -> int:
-    data, positions, pillars = _positions_and_pillars(today=date)
+    data, positions, pillars, spy = _positions_and_pillars(today=date)
     prior = sells.load_latest_sell_plan(before=plan_store.today_iso(date))
-    plan = sells.build_sell_plan(positions, pillars, prior_plan=prior, today=date)
+    plan = sells.build_sell_plan(positions, pillars, prior_plan=prior, today=date,
+                                 market=_market(spy))
     acct = data["account"]
     print(f"account ...{str(acct.get('account_number'))[-4:]}  "
           f"equity ${acct.get('equity', 0):,.0f}  positions {len(positions)}")
@@ -83,7 +98,8 @@ def cmd_execute(date: Optional[str], dry_run: bool) -> int:
               "(set AUTOSELL=1 in .env to arm)")
         return 0
     if dry_run:
-        submit = lambda sym, qty: {"status": "submitted", "detail": "DRY RUN"}  # noqa: E731
+        submit = lambda sym, qty, **kw: {"status": "submitted",  # noqa: E731
+                                         "detail": "DRY RUN"}
     else:
         submit = trade.submit_position_sell
     held = {p["symbol"]: int(p["qty"] or 0)

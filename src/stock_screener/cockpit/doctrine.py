@@ -57,6 +57,23 @@ STOP_ROOM_MIN_DAYS = 2.0
 VIOLATIONS_CAN_FAIL = False
 VIOLATION_FAIL_COUNT = 3
 
+# In a weak or choppy market the book tightens up: stops around 5-6% instead of 7-8%, and
+# profits taken sooner, at 10-12%. Shown beside the plan's own numbers as advice — never
+# applied, because this record's replay (HANDOFF §6.73) says tighter stops cost money here.
+WEAK_TAPE_STOP_PCT = (0.05, 0.06)
+WEAK_TAPE_TARGET_PCT = (0.10, 0.12)
+
+# The one market-timing rule the backtest validated out of sample: when SPY enters Stage 4,
+# get defensive; after it recovers, wait REGIME_CONFIRM_DAYS sessions of a buy-able tape
+# before adding again. 15 is the value chosen on 2003-13 and TESTED on 2014-24 (HANDOFF
+# §1); 25 was picked by looking at the full history and is tainted. Do not tune it.
+REGIME_CONFIRM_DAYS = 15
+# ADVISORY until switched on: the evening plan then also orders a partial sell of every
+# position without a full exit, on the evening SPY first closes in Stage 4 (the backtest
+# exited fully; half is the book's "reduce exposure").
+MARKET_TURN_CAN_TRADE = False
+MARKET_TURN_REDUCE_FRACTION = 0.5
+
 # Breakout confirmation: the close must come on >=1.5x the average of the PRIOR
 # VOL_AVG_DAYS bars. Excluding the current bar is the point — including it dilutes the
 # very spike being tested, and the dilution grows with the size of the spike.

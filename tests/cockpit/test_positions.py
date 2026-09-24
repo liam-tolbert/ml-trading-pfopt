@@ -742,6 +742,204 @@ def test_positions_page_sell_plan_veto():
     assert saved["orders"][0]["status"] == "vetoed", saved["orders"][0]
 
 
+def _mt_positions():
+    return [{"symbol": "AAA", "qty": 10}, {"symbol": "BBB", "qty": 7},
+            {"symbol": "ONE", "qty": 1}]
+
+
+def _mt_pillars(p1_fail=()):
+    def pil(sym):
+        st = "fail" if sym in p1_fail else "ok"
+        return {"P1": {"status": st, "detail": "day-0 close below the pivot"},
+                "P2": {"status": "ok", "detail": ""}, "P3": {"status": "ok", "detail": ""},
+                "P4": {"status": "ok", "detail": ""}}
+    return {s: pil(s) for s in ("AAA", "BBB", "ONE")}
+
+
+def test_build_sell_plan_market_turn_advisory():
+    """§6.78 (audit #9): the evening SPY enters Stage 4 the plan says to reduce — a NOTE,
+    no order, while MARKET_TURN_CAN_TRADE is off — and records the market read so
+    tomorrow's plan can tell a turn from a stay. Staying in Stage 4 and a young recovery
+    streak get their own notes; a strong tape adds none."""
+    from src.stock_screener.cockpit import doctrine, sells
+
+    assert doctrine.MARKET_TURN_CAN_TRADE is False, "ships advisory"
+    s4 = {"spy_note": {"phase": 4, "trend": "Bearish"}, "streak": {"streak": 0,
+                                                                  "satisfied": False}}
+    prior = {"snapshot": {}, "market": {"spy_phase": 2}}
+    plan = sells.build_sell_plan(_mt_positions(), _mt_pillars(), prior_plan=prior,
+                                 today="2026-09-23", market=s4)
+    assert plan["orders"] == [], "advisory: no orders"
+    assert plan["market"] == {"spy_phase": 4, "turn": True, "streak": 0}
+    assert any(n.startswith("MARKET: SPY closed in Stage 4") for n in plan["notes"])
+
+    stay = sells.build_sell_plan(_mt_positions(), _mt_pillars(), prior_plan=plan,
+                                 today="2026-09-24", market=s4)
+    assert stay["market"]["turn"] is False
+    assert any("still in Stage 4" in n for n in stay["notes"]), stay["notes"]
+
+    young = {"spy_note": {"phase": 2}, "streak": {"streak": 4, "satisfied": False}}
+    p = sells.build_sell_plan(_mt_positions(), _mt_pillars(), prior_plan=stay,
+                              today="2026-09-25", market=young)
+    assert any("4/15 sessions back in Stage 1-2" in n for n in p["notes"]), p["notes"]
+    ok = {"spy_note": {"phase": 2}, "streak": {"streak": 15, "satisfied": True}}
+    p = sells.build_sell_plan(_mt_positions(), _mt_pillars(), prior_plan=stay,
+                              today="2026-09-25", market=ok)
+    assert not any(n.startswith("MARKET") for n in p["notes"]) and p["market"]["turn"] is False
+    # no market input at all (older callers): no record, nothing else changes
+    assert "market" not in sells.build_sell_plan(_mt_positions(), _mt_pillars(),
+                                                 today="2026-09-25")
+
+
+def test_build_sell_plan_market_turn_orders_when_switched():
+    """§6.78: with MARKET_TURN_CAN_TRADE on, the turn orders a PARTIAL sell of half of
+    every position without a full exit; a pillar full exit wins (one order per symbol, so
+    a Veto still means "don't sell this name"); a single share gets a note, not an order."""
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import doctrine, sells
+
+    s4 = {"spy_note": {"phase": 4}, "streak": None}
+    with patch.object(doctrine, "MARKET_TURN_CAN_TRADE", True):
+        plan = sells.build_sell_plan(_mt_positions(), _mt_pillars(p1_fail=("AAA",)),
+                                     prior_plan={"snapshot": {}, "market": {"spy_phase": 2}},
+                                     today="2026-09-23", market=s4)
+    by = {o["symbol"]: o for o in plan["orders"]}
+    assert set(by) == {"AAA", "BBB"}, by
+    assert by["AAA"]["exit"] == "full" and by["AAA"]["qty"] == 10
+    assert by["BBB"]["exit"] == "partial" and by["BBB"]["qty"] == 3      # int(7 × 0.5)
+    assert any(n.startswith("ONE: market turn") for n in plan["notes"])
+    assert "(partial)" in sells.format_plan(plan)
+
+
+def test_execute_sell_plan_zero_qty_never_full_exit():
+    """§6.78: the executor's `min(qty, held) or held` turned a 0-share order into "sell
+    everything". Harmless while every order was a full exit; a PARTIAL order must sell
+    exactly its (clamped) quantity and skip at 0. Full exits, and plans written before the
+    `exit` field existed, keep their behavior."""
+    from src.stock_screener.cockpit import sells
+
+    plan = {"date": "2026-08-18", "orders": [
+        {"symbol": "ZERO", "qty": 0, "exit": "partial", "status": "planned", "reasons": []},
+        {"symbol": "HALF", "qty": 5, "exit": "partial", "status": "planned", "reasons": []},
+        {"symbol": "BIG", "qty": 50, "exit": "partial", "status": "planned", "reasons": []},
+        {"symbol": "OLD", "qty": 0, "status": "planned", "reasons": []},
+    ], "snapshot": {}, "notes": []}
+    calls = []
+
+    def submit(sym, qty):
+        calls.append((sym, qty))
+        return {"status": "submitted", "detail": "ok"}
+
+    s = sells.execute_sell_plan(plan, submit=submit,
+                                held_by_symbol={"ZERO": 10, "HALF": 10, "BIG": 8, "OLD": 4},
+                                today="2026-08-19", enabled=True)
+    assert calls == [("HALF", 5), ("BIG", 8), ("OLD", 4)], calls
+    by = {o["symbol"]: o for o in plan["orders"]}
+    assert by["ZERO"]["status"] == "skipped" and by["ZERO"]["detail"] == "nothing to sell"
+    assert s["skipped"] == ["ZERO"]
+
+
+def test_execute_sell_plan_passes_remainder_stop():
+    """§6.78: an order carrying remainder_stop hands it to the stop-aware sell (the ratchet
+    can only raise the remainder's stop); an order without one calls submit with two
+    arguments, so every existing submit keeps working."""
+    from src.stock_screener.cockpit import sells
+
+    plan = {"date": "2026-08-18", "orders": [
+        {"symbol": "FR", "qty": 5, "exit": "partial", "remainder_stop": 100.0,
+         "status": "planned", "reasons": []},
+        {"symbol": "PL", "qty": 3, "status": "planned", "reasons": []}],
+        "snapshot": {}, "notes": []}
+    calls = []
+
+    def submit(sym, qty, **kw):
+        calls.append((sym, qty, kw))
+        return {"status": "submitted", "detail": "ok"}
+
+    sells.execute_sell_plan(plan, submit=submit, held_by_symbol={"FR": 10, "PL": 3},
+                            today="2026-08-19", enabled=True)
+    assert calls == [("FR", 5, {"remainder_stop": 100.0}), ("PL", 3, {})], calls
+
+
+def test_sell_job_plan_includes_market_note():
+    """§6.78: the 16:15 plan reads the trigger report's SPY note (the settled 16:10 close,
+    fresher than the day-old scan) and the cached SPY streak, and records the turn — the
+    evening SPY first closes in Stage 4 prints the reduce note and no order."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import (advisories, data_feed, sell_job, sells, trade,
+                                            triggers)
+
+    offline = _positions_offline()
+    spy_df = pd.DataFrame({"Close": 1.0}, index=pd.bdate_range("2025-01-01", periods=250))
+    saved = {}
+    with patch.object(trade, "fetch_positions", return_value=offline), \
+            patch.object(trade, "fetch_order_fills",
+                         side_effect=trade.TradeUnavailable("down")), \
+            patch.object(triggers, "load_latest_trigger_report",
+                         return_value={"spy": {"phase": 4, "trend": "Bearish"}}), \
+            patch.object(data_feed, "get_many_prices", return_value={"SPY": spy_df}) as gmp, \
+            patch.object(advisories, "spy_confirm_streak",
+                         return_value={"streak": 0, "satisfied": False, "phase_now": 4}), \
+            patch.object(sells, "load_latest_sell_plan",
+                         return_value={"snapshot": {}, "market": {"spy_phase": 2}}), \
+            patch.object(sells, "save_sell_plan", side_effect=lambda p: saved.update(p)):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = sell_job.cmd_plan(None, write=True)
+    assert rc == 0
+    assert gmp.call_args.kwargs.get("allow_network") is False, "the plan job never downloads"
+    assert saved["market"] == {"spy_phase": 4, "turn": True, "streak": 0}, saved.get("market")
+    assert not saved["orders"]
+    assert "MARKET: SPY closed in Stage 4" in out.getvalue()
+
+
+def test_positions_page_renders_plan_notes():
+    """§6.78: the evening plan's NOTES render even when it planned no orders — they are
+    where every advisory lives (P1 violations, the market read), and most evenings have no
+    orders. A market turn on the last plan shows at the top; a weak tape shows the book's
+    numbers."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_positions_page_renders_plan_notes (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import cache, sells, trade
+    from src.stock_screener.cockpit.triggers import save_trigger_report
+
+    plan = {"date": "2026-09-23", "generated_at": "x", "orders": [], "snapshot": {},
+            "notes": ["AAA: P1 warn: violations: 3 lower lows in a row (to day 5)",
+                      "MARKET: SPY closed in Stage 4 today — reduce exposure"],
+            "market": {"spy_phase": 4, "turn": True, "streak": 0}, "executed_at": None}
+    report = {"schema": 1, "date": "2026-09-23",
+              "generated_at": "2026-09-23T16:10:05-04:00",
+              "spy": {"phase": 3, "phase_name": "Stage 3", "trend": "Topping"},
+              "all_stale": False, "intraday": False, "names": []}
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
+    with tempfile.TemporaryDirectory() as _tmp:
+        trg = Path(_tmp) / "triggers"
+        sells.save_sell_plan(plan, trg)
+        save_trigger_report(report, trg)
+        with patch.object(trade, "fetch_positions", return_value=_positions_offline()), \
+                patch.object(trade, "fetch_order_fills",
+                             side_effect=trade.TradeUnavailable("down")), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(cache, "TRIGGERS_DIR", trg):
+            at = AppTest.from_file(page, default_timeout=60)
+            at.run()
+    assert not at.exception, f"positions page raised: {at.exception}"
+    rendered = _rendered_text(at)
+    assert "3 lower lows in a row" in rendered, "plan notes must render with no orders"
+    assert any("Market turn" in str(e.value) for e in at.error), [e.value for e in at.error]
+    assert any("SPY Topping" in str(w.value) for w in at.warning), \
+        [w.value for w in at.warning]
+
+
+
 def test_submit_position_sell_remainder_stop():
     """#19 free-roll mechanics: remainder_stop raises the remainder's stop under the
     ratchet (never lowers), places one when no prior stop existed, and the failed-sell

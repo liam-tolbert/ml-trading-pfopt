@@ -1049,6 +1049,45 @@ def test_trade_panel_gate_blocks_buys():
             "submit must be disabled when the payload is exclusively gate-blocked buys"
 
 
+def test_app_tape_banner_and_advice():
+    """§6.78 (audits #8/#9): the regime chip is coloured by label PREFIX — "TRANSITIONAL /
+    Uncertain" rendered green before, because it contains "on" — and at the point of
+    action the trade panel states the book's weak-tape numbers beside the plan's and, while
+    SPY's recovery streak is short, the backtest's re-entry lag. Advice only."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_app_tape_banner_and_advice (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    result.regime = {**result.regime, "regime": "TRANSITIONAL / Uncertain",
+                     "should_generate_buys": False, "spy_ok_streak": 3,
+                     "spy_ok_satisfied": False}
+    _wl = [{"ticker": "AAA", "judged_pivot": None, "date_added": None,
+            "pivot_source": None, "note": ""}]
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = list(_wl)
+        at.run()
+    assert not at.exception, f"app raised: {at.exception}"
+    rendered = _rendered_text(at)
+    assert ":orange-background[TRANSITIONAL / Uncertain]" in rendered, \
+        "TRANSITIONAL must not render as risk-on green"
+    assert "in a weak market the book tightens up" in rendered
+    assert "(plan: 7.5%)" in rendered
+    assert "**3/15** sessions" in rendered, "re-entry lag caption missing"
+
 
 def test_trade_panel_stop_captions():
     """§6.72/§6.74 in the panel: the stop source is stated above the rows (the default

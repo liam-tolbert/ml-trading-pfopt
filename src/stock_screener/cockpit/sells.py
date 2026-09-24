@@ -46,7 +46,8 @@ ORDER_SKIPPED = "skipped"
 
 
 def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
-                    prior_plan: Optional[dict] = None, today=None) -> dict:
+                    prior_plan: Optional[dict] = None, today=None,
+                    market: Optional[dict] = None) -> dict:
     """Turn per-position pillar reads into the evening sell plan. Pure.
 
     ``positions``: :func:`trade.fetch_positions`-shaped dicts (``symbol``/``qty`` used).
@@ -56,7 +57,17 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
 
     Every position gets a snapshot row (tomorrow's streak needs today's statuses even
     for names with no order). Unknown pillars never trade — missing data is not a
-    signal. Orders are always FULL exits; qty is re-read at execution time anyway."""
+    signal. Pillar orders are FULL exits (``exit: "full"``); qty is re-read at execution.
+
+    ``market`` (``{spy_note, streak}``: the trigger report's SPY note and
+    :func:`advisories.spy_confirm_streak`) adds the market read: always a note and a
+    ``plan["market"]`` record (tomorrow's plan dates the turn from it). On the evening SPY
+    first closes in Stage 4 (:func:`advisories.market_turn`) the note says to reduce; with
+    ``doctrine.MARKET_TURN_CAN_TRADE`` on it also orders a PARTIAL sell of
+    ``MARKET_TURN_REDUCE_FRACTION`` of every position with no full exit (a single share
+    gets the note only). At most one order per symbol — a full exit always wins — so a
+    Veto still means "don't sell this name tomorrow"."""
+    from src.stock_screener.cockpit import advisories, doctrine
     prior_snap = (prior_plan or {}).get("snapshot", {})
     snapshot: Dict[str, dict] = {}
     orders: List[dict] = []
@@ -97,14 +108,57 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
             notes.append(f"{sym}: " + "; ".join(warn_only))
 
         if reasons:
-            orders.append({"symbol": sym, "qty": held, "reasons": reasons,
+            orders.append({"symbol": sym, "qty": held, "exit": "full", "reasons": reasons,
                            "status": ORDER_PLANNED, "detail": ""})
 
+    market_rec = None
+    if market is not None:
+        turn = advisories.market_turn(market.get("spy_note"),
+                                      (prior_plan or {}).get("market"),
+                                      has_prior_plan=prior_plan is not None)
+        stk = market.get("streak") or {}
+        market_rec = {"spy_phase": turn["spy_phase"], "turn": turn["turn"],
+                      "streak": stk.get("streak")}
+        frac = doctrine.MARKET_TURN_REDUCE_FRACTION
+        if turn["turn"]:
+            notes.append(f"MARKET: SPY closed in Stage 4 today — the backtest's one validated "
+                         f"exit. Reduce exposure (sell {frac:.0%} of each position; the "
+                         "backtest exited fully) and add nothing until SPY recovers for "
+                         f"{doctrine.REGIME_CONFIRM_DAYS} sessions.")
+            if doctrine.MARKET_TURN_CAN_TRADE:
+                full = {o["symbol"] for o in orders}
+                for pos in positions:
+                    sym, held = pos.get("symbol"), int(pos.get("qty") or 0)
+                    if sym in full or held < 1:
+                        continue
+                    qty = int(held * frac)
+                    if qty < 1:
+                        notes.append(f"{sym}: market turn — a single share, no partial "
+                                     "sell (decide by hand)")
+                        continue
+                    orders.append({"symbol": sym, "qty": qty, "exit": "partial",
+                                   "reasons": [f"market turn: SPY entered Stage 4 — sell "
+                                               f"{qty}/{held}"],
+                                   "status": ORDER_PLANNED, "detail": ""})
+        elif turn["unconfirmed"]:
+            notes.append("MARKET: SPY is in Stage 4, but with no earlier plan on file the "
+                         "turn can't be dated — the book may already have been reduced; "
+                         "decide by hand.")
+        elif turn["stage4"]:
+            notes.append("MARKET: SPY still in Stage 4 — stay defensive, no new buys.")
+        elif stk.get("streak") is not None and not stk.get("satisfied"):
+            notes.append(f"MARKET: SPY {stk['streak']}/{doctrine.REGIME_CONFIRM_DAYS} "
+                         "sessions back in Stage 1-2 — the re-entry lag isn't met; don't "
+                         "add yet.")
+
     import pandas as pd
-    return {"date": plan_store.today_iso(today),
+    plan = {"date": plan_store.today_iso(today),
             "generated_at": pd.Timestamp.now(tz="America/New_York").isoformat(),
             "orders": orders, "snapshot": snapshot, "notes": notes,
             "executed_at": None}
+    if market_rec is not None:
+        plan["market"] = market_rec
+    return plan
 
 
 # Storage is shared with entries.py (see plan_store); these keep the sell-side names the
@@ -164,9 +218,11 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
     summary; the caller persists the updated plan.
 
     ``submit(symbol, qty)`` is the stop-aware sell (``trade.submit_position_sell``) —
-    injected so the logic tests offline. ``held_by_symbol`` is the account's CURRENT
-    holdings: qty is clamped to it (the plan's count may be a day old) and a no-longer-
-    held name is skipped, never shorted. Guards, in order: the ``AUTOSELL`` env gate
+    injected so the logic tests offline; an order carrying ``remainder_stop`` passes it as
+    a keyword (the ratchet can only raise the remainder's stop). ``held_by_symbol`` is the
+    account's CURRENT holdings: qty is clamped to it (the plan's count may be a day old)
+    and a no-longer-held name is skipped, never shorted. A ``partial`` order sells exactly
+    its quantity (clamped) and is skipped when that is 0 — never widened to a full exit. Guards, in order: the ``AUTOSELL`` env gate
     (ships dark), then plan freshness (:func:`plan_is_current`). Idempotent — only
     ``planned`` orders act; a double-fire submits nothing twice, and a FAILED order
     stays failed for a human (an ambiguous broker failure may have partially acted —
@@ -197,9 +253,22 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
             o["detail"] = "no longer held"
             summary["skipped"].append(sym)
             continue
-        qty = min(int(o.get("qty") or 0), held) or held
+        plan_qty = int(o.get("qty") or 0)
+        if o.get("exit") == "partial":
+            # A partial sell is exactly its quantity, clamped to what's held — never the
+            # whole position. (The full-exit fallback below turned a 0 into "sell all".)
+            qty = min(plan_qty, held)
+            if qty < 1:
+                o["status"] = ORDER_SKIPPED
+                o["detail"] = "nothing to sell"
+                summary["skipped"].append(sym)
+                continue
+        else:                             # a full exit (and every plan before "exit")
+            qty = min(plan_qty, held) or held
+        kw = ({"remainder_stop": o["remainder_stop"]}
+              if o.get("remainder_stop") is not None else {})
         try:
-            res = submit(sym, qty)
+            res = submit(sym, qty, **kw)
         except Exception as e:            # a raise mid-loop must not strand the rest
             res = {"status": "failed", "detail": str(e)}
         if res.get("status") == "submitted":
@@ -222,7 +291,8 @@ def format_plan(plan: dict) -> str:
              f"orders={len(plan.get('orders', []))}"]
     for o in plan.get("orders", []):
         lines.append(f"  {o.get('status', '?').upper():>9}  {o.get('symbol')} "
-                     f"x{o.get('qty')}  - " + "; ".join(o.get("reasons", []))
+                     f"x{o.get('qty')}{' (partial)' if o.get('exit') == 'partial' else ''}"
+                     "  - " + "; ".join(o.get("reasons", []))
                      + (f"  [{o['detail']}]" if o.get("detail") else ""))
     for n in plan.get("notes", []):
         lines.append(f"  note: {n}")

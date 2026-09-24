@@ -215,6 +215,22 @@ _pillars = {p["symbol"]: trade.sell_pillars(
                 p, entry_date=(_open_by_sym.get(p["symbol"]) or {}).get("entry_date"),
                 pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy)
             for p in positions}
+
+# --- The tape: the market-turn read from the evening plan, and the book's weak-market
+# numbers beside the plan's (advice only — nothing here changes a stop or a size) ---------- #
+try:
+    _mk = (sells.load_latest_sell_plan() or {}).get("market") or {}
+except Exception:
+    _mk = {}
+if _mk.get("turn"):
+    st.error("**Market turn:** SPY closed in Stage 4 on the last evening plan — the "
+             "backtest's one validated exit. Reduce exposure and add nothing until SPY "
+             "recovers (see the plan notes below).")
+elif _mk.get("spy_phase") == 4:
+    st.warning("**SPY is in Stage 4** — stay defensive; no new buys.")
+_weak_tape = advisories.weak_market_advice(_regime, _spy, target_pct=0.25)
+if _weak_tape:
+    st.warning(_weak_tape)
 _PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
 # R-multiples off the reconstructed entry stop ('~' = the in-force stop isn't one the plan
 # builder would have attached, so the initial risk is an estimate).
@@ -325,14 +341,22 @@ if _plan and _plan.get("orders"):
               "failed": "⚠️", "skipped": "—"}
     for o in _plan["orders"]:
         c1, c2 = st.columns([5, 1])
-        c1.caption(f"{_OICON.get(o.get('status'), '•')} **{o['symbol']}** ×{o['qty']} — "
-                   f"{o.get('status')} · " + "; ".join(o.get("reasons", []))
+        _part = " (partial)" if o.get("exit") == "partial" else ""
+        c1.caption(f"{_OICON.get(o.get('status'), '•')} **{o['symbol']}** ×{o['qty']}{_part} "
+                   f"— {o.get('status')} · " + "; ".join(o.get("reasons", []))
                    + (f" · {o['detail']}" if o.get("detail") else ""))
         if o.get("status") == sells.ORDER_PLANNED:
             c2.button("Veto", key=f"veto_{o['symbol']}_{_plan.get('date')}",
                       width="stretch", on_click=_do_veto, args=(o["symbol"],))
     if st.session_state.get("veto_error"):
         st.error(f"Veto failed: {st.session_state.pop('veto_error')}")
+# The plan's notes carry every warning that is NOT an order — P1 violations, the market
+# read, first P2 fails. Shown with or without orders: most evenings have none.
+if _plan and _plan.get("notes"):
+    with st.expander(f"Evening plan notes — {_plan.get('date')} ({len(_plan['notes'])})",
+                     expanded=not _plan.get("orders")):
+        for _n in _plan["notes"]:
+            st.caption(_n)
 
 # --- Stop management: basis + per-row editable stops + re-arm -------------------------------- #
 st.markdown("#### 🛡️ Stops & sells")
@@ -372,6 +396,9 @@ for p in positions:
     if _pb and _pb["follow_through"]:
         cA.caption(f"  ↳ ✅ follow-through (day {_pb['day_n']}): "
                    + " · ".join(_pb["follow_through"]))
+    if _weak_tape and advisories.in_weak_take_profit_band(p.get("gain_pct")):
+        cA.caption(f"  ↳ weak tape: the book takes profits at 10–12% — this one is up "
+                   f"{p['gain_pct'] * 100:.1f}%")
     cB.number_input(f"stop {sym}", min_value=0.0, value=float(seed), step=0.01, format="%.2f",
                     key=f"posstop_{sym}_{_nonce}_{basis}", label_visibility="collapsed")
     _ed = st.session_state.get(f"posstop_{sym}_{_nonce}_{basis}", seed)
