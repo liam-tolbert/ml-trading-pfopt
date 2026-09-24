@@ -529,7 +529,9 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
       back below the pivot, a decisive close below it (>2% or a 2nd consecutive), or a
       close below the breakout bar's low fail outright; a stalled clock warns at day
       ``P1_CUSHION_DAYS`` without a ``P1_CUSHION_PCT`` cushion and fails flat-to-red at
-      day ``P1_STALL_DAYS``.
+      day ``P1_STALL_DAYS``. Post-breakout violations
+      (:func:`advisories.post_breakout_read` — the 20-day line and the rest) warn; with
+      ``doctrine.VIOLATIONS_CAN_FAIL`` on, ``VIOLATION_FAIL_COUNT`` of them fail.
     * P2 template — STRICT: anything under 8/8 fails (user decision; expect occasional
       one-day red flips when a knife-edge SMA criterion wobbles).
     * P3 tape — the scan regime dict when available, else the trigger report's SPY-only
@@ -594,6 +596,20 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                 elif day_n >= P1_CUSHION_DAYS and gain < P1_CUSHION_PCT:
                     warns.append(f"day {day_n}, no {P1_CUSHION_PCT * 100:.0f}% cushion "
                                  "— sell into strength")
+            # Post-breakout violations (the 20-day line, heavy selling, lower lows, a gain
+            # given back). Warnings unless the doctrine switch promotes a cluster to a fail.
+            if df is not None and len(df):
+                from . import advisories, doctrine
+                read = advisories.post_breakout_read(
+                    df, e, avg_entry=pos.get("avg_entry"),
+                    below_sma50=bool(pos.get("below_sma50")),
+                    volume_ratio=pos.get("volume_ratio"), today=today)
+                viol = (read or {}).get("violations") or []
+                if (viol and doctrine.VIOLATIONS_CAN_FAIL
+                        and len(viol) >= doctrine.VIOLATION_FAIL_COUNT):
+                    fails.append(f"{len(viol)} post-breakout violations: " + "; ".join(viol))
+                elif viol:
+                    warns.append("violations: " + "; ".join(viol))
             note = "" if pivot else " (no frozen pivot — clock only)"
             if fails:
                 p1 = _pill("fail", "; ".join(fails) + note)
@@ -1466,7 +1482,7 @@ def fetch_positions() -> dict:
                        if q is not None]
         current_stop = max(stop_prices) if stop_prices else None
 
-        sma_50 = last_close = volume_ratio = None
+        sma_50 = sma_20 = last_close = volume_ratio = None
         df = frames.get(sym)
         if df is None and data_feed is not None:
             df = frames.get(data_feed.normalize(sym))
@@ -1478,6 +1494,10 @@ def fetch_positions() -> dict:
                 s = calculate_sma(df["Close"], 50)
                 if len(s) and pd.notna(s.iloc[-1]):
                     sma_50 = float(s.iloc[-1])
+            if calculate_sma is not None and len(df) >= 20:
+                s = calculate_sma(df["Close"], 20)
+                if len(s) and pd.notna(s.iloc[-1]):
+                    sma_20 = float(s.iloc[-1])
             # The shared doctrine read, so the heavy-volume flag here and the trigger
             # job's confirmation can never diverge.
             from .indicators import volume_ratio as _vr
@@ -1507,7 +1527,8 @@ def fetch_positions() -> dict:
             "unrealized_plpc": _attr_float(p, "unrealized_plpc"),
             "lastday_price": _attr_float(p, "lastday_price"),
             "current_stop": current_stop, "has_stop": current_stop is not None,
-            "sma_50": sma_50, "last_close": last_close, "volume_ratio": volume_ratio,
+            "sma_50": sma_50, "sma_20": sma_20, "last_close": last_close,
+            "volume_ratio": volume_ratio,
             "gain_pct": gain_pct, "below_sma50": below_sma50,
             "next_earnings": next_earnings, "earnings_in": earnings_in,
             "stage": position_stage(gain_pct),

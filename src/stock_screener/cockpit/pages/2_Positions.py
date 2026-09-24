@@ -243,7 +243,7 @@ rows = [{
     "P3": _PICON[_pillars[p["symbol"]]["P3"]["status"]],
     "P4": _PICON[_pillars[p["symbol"]]["P4"]["status"]],
     "market_value": p["market_value"], "unrealized_pl": p["unrealized_pl"],
-    "current_stop": p["current_stop"], "sma_50": p["sma_50"],
+    "current_stop": p["current_stop"], "sma_20": p.get("sma_20"), "sma_50": p["sma_50"],
     "earnings": _earnings_cell(p),
     "advisories": " · ".join(p["advisories"]) if p["advisories"] else "",
 } for p in positions]
@@ -267,8 +267,11 @@ col_config = {
     "P1": st.column_config.Column(
         "P1", help="Breakout holding: Day-0 close below pivot, decisive close below "
                    "pivot, close below the breakout bar's low, and the laggard clock "
-                   "(no ~3% cushion by ~day 10; flat-to-red by day 15). Needs the "
-                   "journal entry date; pivot flags need the watchlist's frozen pivot."),
+                   "(no ~3% cushion by ~day 10; flat-to-red by day 15). ⚠ also lists "
+                   "post-breakout violations: a close under the 20-day line in the first "
+                   "month, a heavy down day after a light-volume breakout, lower lows, "
+                   "more down/lower-half closes, a gain given back. Needs the journal "
+                   "entry date; pivot flags need the watchlist's frozen pivot."),
     "P2": st.column_config.Column(
         "P2", help="Trend template on the holding — strict: anything under 8/8 is a "
                    "fail (a knife-edge SMA criterion can flip it for a day)."),
@@ -283,6 +286,9 @@ col_config = {
     "unrealized_pl": _num("Unreal. P&L", format="$%.0f"),
     "current_stop": _num("Stop", format="$%.2f",
                          help="Highest open protective sell-stop in force (blank = no stop)."),
+    "sma_20": _num("20-day SMA", format="$%.2f",
+                   help="A fresh breakout should hold its 20-day line for the first ~month; "
+                        "a close below it is a violation — a reason to doubt the breakout."),
     "sma_50": _num("50-day SMA", format="$%.2f",
                    help="Minervini trails the 50-day once well in profit; a close below it on "
                         "heavy volume is an exit signal."),
@@ -294,7 +300,7 @@ col_config = {
 }
 col_order = ["symbol", "qty", "avg_entry", "current_price", "gain_pct", "R", "stage",
              "P1", "P2", "P3", "P4",
-             "market_value", "unrealized_pl", "current_stop", "sma_50", "earnings",
+             "market_value", "unrealized_pl", "current_stop", "sma_20", "sma_50", "earnings",
              "advisories"]
 st.dataframe(pd.DataFrame(rows), column_config=col_config, column_order=col_order,
              hide_index=True, width="stretch")
@@ -357,6 +363,15 @@ for p in positions:
     if _flagged:
         cA.caption("  ↳ " + " · ".join(f"{k} {_PICON[v['status']]} {v['detail']}"
                                        for k, v in _flagged))
+    # The other half of the post-breakout read: signs the breakout is WORKING (its
+    # violations already show in P1 above).
+    _pb = advisories.post_breakout_read(
+        p.get("df"), (_open_by_sym.get(sym) or {}).get("entry_date"),
+        avg_entry=p.get("avg_entry"), below_sma50=bool(p.get("below_sma50")),
+        volume_ratio=p.get("volume_ratio"))
+    if _pb and _pb["follow_through"]:
+        cA.caption(f"  ↳ ✅ follow-through (day {_pb['day_n']}): "
+                   + " · ".join(_pb["follow_through"]))
     cB.number_input(f"stop {sym}", min_value=0.0, value=float(seed), step=0.01, format="%.2f",
                     key=f"posstop_{sym}_{_nonce}_{basis}", label_visibility="collapsed")
     _ed = st.session_state.get(f"posstop_{sym}_{_nonce}_{basis}", seed)

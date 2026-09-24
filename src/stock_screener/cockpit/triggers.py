@@ -149,6 +149,20 @@ def no_session_since(mtime_epoch: float, now=None) -> bool:
     return True
 
 
+def bar_is_provisional(last_bar_date, now=None) -> bool:
+    """True when ``last_bar_date`` is TODAY's session bar and that session hasn't settled
+    (before ~16:05 ET; ~13:05 on an early close): its close is the latest print and its
+    volume a partial day. A read that judges closes must drop it — an intraday dip under a
+    line is not a close under it. Never raises; an unreadable date reads as settled."""
+    try:
+        n = _now_et(now)
+        day = pd.Timestamp(last_bar_date).normalize()
+        return bool(day == n.normalize()
+                    and n.hour * 60 + n.minute < _intraday_cutoff_min(day))
+    except Exception:
+        return False
+
+
 def frame_settled_current(last_bar_date, now=None) -> bool:
     """True when a frame ENDING at ``last_bar_date`` already contains every bar that can
     exist: that bar's session has settled and no later session has started (evenings /

@@ -9,7 +9,8 @@ frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped 
 automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). A SEPA-fidelity
 audit found nine gaps; §6.72–§6.75 (max loss from the price paid, the Loss Adjustment Exercise, the
 derived stop, stop room) are in; the base count (§6.76) failed its own acceptance test and did not
-ship. Suite **169 cockpit + 35 hunt**, offline, both gating deploys.
+ship. §6.77 (post-breakout violations/follow-through) is in too. Suite **175 cockpit + 35 hunt**,
+offline, both gating deploys.
 
 **Research verdict (2026-06-29) — no out-of-sample alpha.** A strong in-sample result (α t=2.49) was
 overfit; OOS collapsed it to t=0.47. Risk management is real; selection is not. The user trades this
@@ -156,7 +157,7 @@ the discipline.
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
 | `trade.py` | Alpaca paper submit path, stops, the exposure gate, the journal + Loss Adjustment Exercise |
-| `advisories.py` | display-only SEPA reads: stop room |
+| `advisories.py` | display-only SEPA reads: stop room, post-breakout violations/follow-through |
 | `doctrine.py` | the shared rule numbers (imports nothing) |
 | `sells.py` / `entries.py` | P1–P4 sell planner; armed-entry plans |
 | `refresh_job.py` / `sell_job.py` / `entry_job.py` | the three headless CLIs the timers invoke |
@@ -220,6 +221,9 @@ between checks, never the sell signal.** Decisions on settled closes only; execu
 - Earnings: a LOSS is never carried into a ≤21d report; a small gain is trimmed to hold-through size.
 - Automation acts on hard ❌ of P1/P2/P4 only. P3 and all warns are report-only. P2 needs **two
   consecutive** failing closes (the strict template has one-day SMA noise flips).
+- **Post-breakout violations** warn in P1 (§6.77): a close under the 20-day line in the first
+  month, a heavy down day after a light-volume breakout, lower lows, more down or lower-half
+  closes, a gain given back. `VIOLATIONS_CAN_FAIL` (off) would make 3 of them a P1 fail.
 
 **Progressive exposure.** Gate is open when flat, or when every position in the newest-day cohort is
 at breakeven-or-better AND tagged net open P&L ≥ 0. Scope is cockpit-**tagged** positions only, so
@@ -365,7 +369,7 @@ Constants and API facts that are expensive to rediscover. Change these only with
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
 
-**Stops and the book's numbers (`doctrine.py`, §6.72–§6.75):**
+**Stops and the book's numbers (`doctrine.py`, §6.72–§6.77):**
 - `fill_floor(fill)` = `ceil(round(fill × 0.9 × 100, 6)) / 100`: 10% below the fill, rounded UP to
   the cent (the inner `round` stops 42 × 0.9 = 37.800000000000004 ceiling to 37.81). The builder,
   submit and arming all use it, so a builder-made stop always passes the guards.
@@ -374,6 +378,7 @@ positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negat
   quietest real setup runs 1.64%/day and its wildest (IMUX) 7.73%.
 - Derived stop: tagged closed trades, **≥5 wins**, ½ × average win, clamped [4%, 10%]; the 4% floor
   came from the §6.73 pre-registered rule on ONE winner.
+- Post-breakout window: **20** sessions for the 20-day line; violation cluster for the switch = **3**.
 
 **`suggest_stop` bases (Positions page, auto mode):** fresh (gain < `BREAKEVEN_GAIN` 0.16) → 8% below
 entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 50-day → trail
@@ -534,6 +539,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - **(a) Single-threshold blindness** (CNC, TRNS, BZH). The counter walked ONE adaptive ZigZag threshold over the whole Stage-2 segment. The rally out of the start inflated it, so 8–10% legs vanished. This is the exact failure the VCP detector's multi-threshold read exists for.
   - **(b) The transition base** (GRBK, AVBC, GEO). The base formed *before* the last close under a still-falling 200-day. The first base of a new Stage 2 often forms while the stock emerges from Stage 1, so "count only after the start" drops it.
   - **The demotion was moot anyway:** zero tier-A fixtures had ≥5 bases under either rule, so "demote 5th+ bases" would have changed no benchmark tier. The prototype and the acceptance script are not in the tree.
+- **§6.77** **After the buy: the 20-day line, violations and follow-through (audits #6, #7).** `advisories.post_breakout_read` reads the settled bars from the entry day on. **Violations:** a close under the 20-day SMA within the first 20 sessions (`POST_BREAKOUT_DAYS`; strict `<`, so a flat tape never trips it); a heavy (≥1.5×) down day after a light-volume breakout day; 3 lower lows in a row with no above-average-volume up close; more down closes than up (3+ sessions); more lower-half closes than upper-half (bars with H=L skipped); a close under the 50-day on heavy volume; a +5% gain fully given back. **Follow-through:** up closes on rising volume, 3 of the first 4 / 6 of the first 8 sessions up, more upper-half closes, every dip recovered within 2 sessions. Violations become **P1 warnings**, so they reach the Positions captions and the evening plan's notes, never an order. `doctrine.VIOLATIONS_CAN_FAIL` (off) turns `VIOLATION_FAIL_COUNT = 3` of them into a P1 fail, which *is* an automatic full exit. It is read at call time. A live read drops today's bar while its session is open (`triggers.bar_is_provisional`), because an intraday dip under the line is not a close under it. `fetch_positions` carries `sma_20`, and the Positions table has a 20-day column.
 - **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 
 ## 12. Open items
@@ -569,6 +575,10 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   mechanisms (single-threshold blindness, the transition base) are written up there. The demotion
   would have changed no benchmark tier, so recall is not what is at stake.
 - **Deferred: a tier-C exclusion for wild movers (≥8%/day typical range)** — see §6.75 for why.
+- **P1's older checks still read today's provisional bar on live calls.** Day-0 below the pivot,
+  the decisive close, the second close and the breakout-bar low use `last_close`. Only the §6.77
+  reads drop an unsettled bar. The evening plan runs after the settle, so the automation is
+  unaffected; the Positions page mid-session can show a P1 ❌ that the close then clears.
 - **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
   first time two threads log (a page's price read plus the background scan). `docker compose
   restart app` clears it for a while.
@@ -583,5 +593,5 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 169 tests) · `tests/test_hunt.py` (35 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 175 tests) · `tests/test_hunt.py` (35 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
 - **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.
