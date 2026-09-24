@@ -287,8 +287,11 @@ container. `-i` is required or the heredoc never reaches Python and the call sil
 If that answers in seconds while the page still spins, the long-running app is stuck:
 `docker compose restart app` (no sudo; safe in market hours — every timer job runs in its own
 `oneshot` container, and the watchlist, scan and plans are on disk). Since §6.71 every Alpaca call
-times out, so a true hang should no longer happen. If one does, check the app's sockets before
-restarting: the §6.71 signature was one ESTABLISHED, empty-queue socket to `paper-api.alpaca.markets`.
+times out, and since §6.79 a log line can no longer lock out other threads, so a true hang should
+not happen. If one does, dump the app's threads before restarting (`py-spy dump --pid 1` inside
+the container, if installed). A thread parked in `logging/__init__.py ... acquire` is a
+handler lock. An idle ESTABLISHED socket to `paper-api` with nothing in flight is NOT evidence of a
+stuck Alpaca call: a finished request leaves exactly that.
 
 ## 9. Conventions
 
@@ -310,6 +313,9 @@ restarting: the §6.71 signature was one ESTABLISHED, empty-queue socket to `pap
 - **Every outbound network call carries a timeout**, and a timed-out *read* raises
   (`TradeUnavailable`). It never degrades to an empty result that looks like a real answer: an empty
   stops list reads as "unprotected" (§6.71).
+- **Never reuse a stdlib hook's name for something else.** `DatedFileHandler.release()` meant "close
+  the file" to its author and "release the lock" to `logging`, which called it after every record
+  (§6.79). Before naming a method on a subclass, check the base class doesn't already call it.
 - **The user commits all code themselves.** Claude leaves the tree dirty for review — their push is
   the human gate in front of the Pi's auto-deploy.
 - **Don't edit tracked files inside the Pi's checkout** — a modified tracked file trips the
@@ -491,6 +497,8 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - **Fix 1 — timeouts.** `ALPACA_TIMEOUT_S = (5, 15)` via `trade._with_timeout` inside `_connect_paper`, so every cockpit Alpaca call is covered (§10). `fetch_positions` turns a `Timeout` into `TradeUnavailable` — the page's retry warning, never memoized. `_open_sell_stops_by_symbol` still returns `{}` on ordinary errors, **but raises on a timeout**: "no answer" is not "no stops", and `{}` would have shown HALO's armed stop as "⚠ No protective stop" and let `rearm_stops` stack a second stop on the same shares.
   - **Fix 2 — per-session reads** (§6 Key data semantics). `_session_positions` and `journal_cache.cached_fills` now memoize in `st.session_state` by nonce with a 60 s max age. `app._risk_guidance`'s memo ages on the same clock, and still costs one fetch attempt per window during an outage. The Journal's Refresh just bumps the nonce. Eleven `cached_fills.clear()` calls were deleted from the tests; their only job had been stopping one test's cached result leaking into the next.
   - **Tests (+5):** `test_connect_paper_installs_timeout`; `test_alpaca_timeout_ends_a_silent_connection`, which uses a real loopback socket that accepts and never answers and bounds the request with a thread join, so a regression fails instead of hanging the gate; `test_fetch_positions_timeout_is_trade_unavailable`; `test_positions_page_reads_account_per_session`; and `test_order_history_read_per_session`. Both per-session tests were run against `HEAD`'s code before the fix and **fail exactly at "session B"**: one fetch, and B shows A's snapshot.
+  - **Correction: the likelier root cause of the hang is §6.79** (a logging lock held forever), which neither fix above touches.
+- **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 
 ## 12. Open items
 
@@ -518,6 +526,9 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   private `client._session`, verified locally on **0.44.0**; the image pins **0.43.4**.
   `test_connect_paper_installs_timeout` settles it on the first deploy of §6.71 — if that deploy
   fails there, the hook moved and needs a version-specific path, not a skipped test.
+- **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
+  first time two threads log (a page's price read plus the background scan). `docker compose
+  restart app` clears it for a while.
 - **Leaked Yahoo connections.** After 20 days up, the app held ~15 CLOSE_WAIT sockets to
   `query1/2.finance.yahoo.com` (the server closed them; the process never did). It's harmless at that
   count and was not addressed in §6.71. If the app is ever up for months, count them
