@@ -286,6 +286,118 @@ def market_turn(spy_note, prior_market: Optional[dict] = None,
     return {"spy_phase": ph, "stage4": stage4, "turn": turn, "unconfirmed": unconfirmed}
 
 
+DEPTH_VS_MARKET_MAX = 3.0   # the books: avoid a name that fell more than ~2.5-3x the market
+
+
+def _naive_index(frame):
+    import pandas as pd
+    idx = pd.DatetimeIndex(frame.index)
+    return idx.tz_localize(None) if idx.tz is not None else idx
+
+
+def _max_drawdown(frame) -> Optional[float]:
+    """The deepest fall from a running high, as a fraction: High for the highs, Low for
+    the lows, Close for both when a frame lacks them. None on an empty frame."""
+    import numpy as np
+    if frame is None or not len(frame):
+        return None
+    hi = frame["High"] if "High" in frame.columns else frame["Close"]
+    lo = frame["Low"] if "Low" in frame.columns else frame["Close"]
+    run_max = hi.cummax().to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        dd = 1.0 - lo.to_numpy(dtype=float) / run_max
+    dd = dd[np.isfinite(dd)]
+    return float(dd.max()) if len(dd) else None
+
+
+def depth_vs_market(df, spy, contractions) -> Optional[dict]:
+    """The base's depth against the market's decline over the same dates.
+
+    The window runs from the first selected contraction's ``peak_date`` to the last
+    bar. Both depths are the deepest fall from a running high inside it. Returns
+    ``{depth_pct, spy_depth_pct, ratio, flag}`` (percent, ratio to 1 dp; ``flag`` at
+    ``DEPTH_VS_MARKET_MAX``). None without contractions, without two bars of either
+    frame in the window, or when the market fell under 1%: a ratio to a flat market
+    means nothing."""
+    if df is None or spy is None or not contractions:
+        return None
+    import pandas as pd
+    try:
+        start = pd.Timestamp(contractions[0]["peak_date"])
+        if start.tzinfo is not None:
+            start = start.tz_localize(None)
+        w = df[_naive_index(df) >= start]
+        s = spy[_naive_index(spy) >= start]
+    except Exception:
+        return None
+    if len(w) < 2 or len(s) < 2:
+        return None
+    depth, spy_depth = _max_drawdown(w), _max_drawdown(s)
+    if depth is None or spy_depth is None or spy_depth < 0.01:
+        return None
+    ratio = depth / spy_depth
+    return {"depth_pct": round(depth * 100.0, 1), "spy_depth_pct": round(spy_depth * 100.0, 1),
+            "ratio": round(ratio, 1), "flag": bool(ratio >= DEPTH_VS_MARKET_MAX)}
+
+
+def depth_vs_market_text(depth: Optional[dict]) -> str:
+    """One caption for :func:`depth_vs_market`; empty when unknown."""
+    if not depth:
+        return ""
+    body = (f"Base depth **{depth['depth_pct']:.0f}%** while the market fell "
+            f"{depth['spy_depth_pct']:.0f}% (**{depth['ratio']:.1f}×**)")
+    if depth["flag"]:
+        return ("⚠️ " + body + f" — more than {DEPTH_VS_MARKET_MAX:.0f}× the market's "
+                "decline leaves more trapped sellers overhead than the books accept.")
+    return body + "."
+
+
+CONCENTRATION_NAMES = 3     # this many held names in one industry is a concentration
+CONCENTRATION_SHARE = 0.5   # ...or this share of the book, once there are two or more
+GROUP_LEADERS = 3           # the industry's top names by RS, whose breakdown is a warning
+
+
+def industry_concentration(positions) -> Optional[str]:
+    """A warning when the book leans on one industry: ``CONCENTRATION_NAMES`` names in it,
+    or ``CONCENTRATION_SHARE`` of two or more positions. Counts names, not dollars.
+    Positions without an industry are left out of both counts. None otherwise."""
+    from collections import Counter
+    inds = [p.get("industry") for p in positions or [] if p.get("industry")]
+    if not inds:
+        return None
+    ind, n = Counter(inds).most_common(1)[0]
+    m = len(positions)
+    if n >= CONCENTRATION_NAMES or (m >= 2 and n / m >= CONCENTRATION_SHARE and n >= 2):
+        return (f"{n} of your {m} positions are in **{ind}**. The books: a group moves "
+                "together, and a leader's breakdown often takes its neighbours with it.")
+    return None
+
+
+def group_leader_break(industry, candidates, payloads, exclude=None) -> Optional[str]:
+    """A warning when one of the industry's top ``GROUP_LEADERS`` scan names by RS (other
+    than ``exclude``) closed below its 50-day on heavy volume. ``candidates`` is the scan
+    table (``ticker``, ``rs``, ``industry``); ``payloads`` holds each name's frame. None
+    without an industry, a scan, or a break."""
+    if not industry or candidates is None or not len(candidates) \
+            or "industry" not in candidates.columns:
+        return None
+    from .indicators import volume_ratio
+    peers = candidates[(candidates["industry"] == industry)
+                       & (candidates["ticker"] != exclude)]
+    peers = peers.sort_values("rs", ascending=False).head(GROUP_LEADERS)
+    for t in peers["ticker"]:
+        df = (payloads.get(t) or {}).get("df")
+        if df is None or len(df) < 51:
+            continue
+        close = df["Close"].astype(float)
+        sma50 = float(close.tail(50).mean())
+        vr = volume_ratio(df, doctrine.VOL_AVG_DAYS)
+        if float(close.iloc[-1]) < sma50 and vr is not None and vr >= doctrine.VOL_CONFIRM_RATIO:
+            return (f"group leader {t} closed below its 50-day on {vr:.1f}× volume — "
+                    f"watch the rest of {industry}")
+    return None
+
+
 def stop_room_text(room: Optional[dict], day_range) -> str:
     """A caption fragment for a :func:`stop_room` result, e.g. ``'stop 3.1 typical days
     away (2.4%/day)'``. Prefixed ⚠ on ``warn``; empty when unknown."""

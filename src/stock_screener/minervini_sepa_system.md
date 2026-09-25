@@ -51,6 +51,13 @@ been **rising for at least 6 weeks, ideally 13**. One strong day can put the lin
 high with a downtrend behind it. The scan's "RS line trend" column reads the slope
 instead (rising 13w · rising 6w · flat · rolling over · falling); it is not a gate.
 
+**Industry groups.** Most big winners move with their group: several names from one
+industry breaking out together is a group move, and when one of a group's leaders breaks
+down, its neighbours often follow. The scan shows each name's industry and ranks the
+**leading groups** under the market banner; the Positions page warns when your book leans
+on one industry, and when a leader in a held name's industry closes below its 50-day on
+heavy volume.
+
 **Market environment check (run before screening):**
 Count how many stocks pass the template on any given day:
 
@@ -124,6 +131,11 @@ moves. A beautiful chart with decelerating earnings is a trap.
 The VCP (Volatility Contraction Pattern) is Minervini's primary entry setup.
 After fundamentals pass, pull up the daily and weekly charts and look for this
 structure.
+
+Judge the base's depth against the market's, not on its own: a 23% dip during a 10%
+market correction is normal, the same dip while the market slipped 3% is not. The
+books avoid names that corrected more than about 2.5–3× what the market did. The
+scan's "Depth vs market" column and the Step-3 caption give the ratio.
 
 ### What a VCP looks like
 

@@ -115,6 +115,7 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
          f'<tr data-v="{_vcls(v)}" data-t="{_esc(r["ticker"].lower())}">'
          f'<td class="n dim">{r["rank"]}</td>'
          f'<td class="tk">{_esc(r["ticker"])}{" &#9733;" if r["wl"] else ""}</td>'
+         f'<td class="dim">{_esc(r.get("industry") or "-")}</td>'
          f'<td><span class="pill {_vcls(v)}">{_vlabel(v)}</span></td>'
          f'<td class="n">{_f(r["q"], "{:.0f}")}</td><td class="n">{r["rs"]}</td>'
          f'<td>{_esc(r.get("rs_trend") or "-")}</td>'
@@ -126,9 +127,15 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
          f'<td class="n">{_f(r.get("max_order_usd"), "{:,.0f}")}</td>'
          f'<td class="n">{r["dist_days"]}</td>'
          f'<td class="mono dim">{_esc(r["depths"])}</td>'
+         f'<td class="n">{_f(r.get("depth_vs_spy"), "{:.1f}")}</td>'
          f'<td class="note">{_esc((verdicts.get(r["ticker"]) or {}).get("notes", ""))}</td></tr>'
          )((verdicts.get(r["ticker"]) or {}).get("verdict", "unreviewed"))
         for r in diag_rows)
+
+    from collections import Counter
+    _groups = Counter(r.get("industry") for r in passing if r.get("industry"))
+    groups_line = (" &middot; ".join(f"{_esc(k)} {v}" for k, v in _groups.most_common(6))
+                   if _groups else "no industry labels in this scan")
 
     regime = meta.get("regime") or {}
     date_label = meta.get("scan_time", "")[:10]
@@ -152,7 +159,7 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
         conf_line=(", ".join(r["ticker"] for r in confirmed) if confirmed
                    else "none &mdash; every cross so far is on below-average volume; "
                         "the intraday trigger job is the confirmation watch"),
-        min_fund=min_fund, gated=", ".join(gated) or "none",
+        min_fund=min_fund, gated=", ".join(gated) or "none", groups_line=groups_line,
         zone_tbl=_mini_table(buckets["buy_zone"], verdicts),
         appr_tbl=_mini_table(buckets["approaching"], verdicts),
         below_tbl=_mini_table(buckets["below"], verdicts),
@@ -277,6 +284,7 @@ th.n {{ text-align:right; }}
   <h2>Volume-confirmed breakouts <span class="cnt">&middot; the only &ldquo;buy now&rdquo; state ({n_conf})</span></h2>
   <p class="method">{conf_line}</p>
   <p class="method">Buy-zone names clearing this run&rsquo;s F&nbsp;&ge;&nbsp;{min_fund} gate: <b>{gated}</b></p>
+  <p class="method">Groups among PASS names: {groups_line}</p>
 
   <h2>In the buy zone <span class="cnt">&middot; PASS, pivot to +{zone_max}% ({n_zone})</span></h2>
   {zone_tbl}
@@ -312,11 +320,12 @@ th.n {{ text-align:right; }}
   </div>
   <div class="scroll" style="max-height:72vh; overflow-y:auto;">
   <table id="big"><thead>
-    <tr><th class="n">#</th><th>Ticker</th><th>Verdict</th><th class="n">Q</th><th class="n">RS</th>
+    <tr><th class="n">#</th><th>Ticker</th><th>Industry</th><th>Verdict</th><th class="n">Q</th>
+    <th class="n">RS</th>
     <th>RS line</th><th class="n">200d mo</th>
     <th class="n">F</th><th class="n">Close</th><th class="n">Pivot</th><th class="n">vs piv</th>
     <th class="n">ADV$M</th><th class="n">Max order $</th><th class="n">DD</th><th>Legs %</th>
-    <th>Chart notes</th></tr>
+    <th class="n">Depth&times;mkt</th><th>Chart notes</th></tr>
   </thead><tbody>{full_tr}</tbody></table>
   </div>
 

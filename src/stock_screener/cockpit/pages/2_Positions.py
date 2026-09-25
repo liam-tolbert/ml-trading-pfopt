@@ -202,7 +202,7 @@ try:
                   for e in load_watchlist(cache.WATCHLIST_JSON)}
 except Exception:
     _wl_pivots = {}
-_regime = _spy = None
+_regime = _spy = _latest = None
 _rs_map = {}
 try:
     # The newest scan result, if any: None on a true cold start and under AppTest.
@@ -236,6 +236,19 @@ elif _mk.get("spy_phase") == 4:
 _weak_tape = advisories.weak_market_advice(_regime, _spy, target_pct=0.25)
 if _weak_tape:
     st.warning(_weak_tape)
+_conc = advisories.industry_concentration(positions)
+if _conc:
+    st.warning(_conc)
+_leader_breaks = {}
+for p in positions:
+    try:
+        _lb = advisories.group_leader_break(
+            p.get("industry"), getattr(_latest, "candidates", None),
+            getattr(_latest, "payloads", None) or {}, exclude=p["symbol"])
+    except Exception:
+        _lb = None
+    if _lb:
+        _leader_breaks[p["symbol"]] = _lb
 _PICON = {"ok": "✅", "warn": "⚠️", "fail": "❌", "unknown": "—"}
 # '~' = the initial risk is an estimate (see trade.r_multiple).
 _rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
@@ -402,6 +415,8 @@ for p in positions:
     if _pb and _pb["follow_through"]:
         cA.caption(f"  ↳ ✅ follow-through (day {_pb['day_n']}): "
                    + " · ".join(_pb["follow_through"]))
+    if sym in _leader_breaks:
+        cA.caption(f"  ↳ ⚠️ {_leader_breaks[sym]}")
     if _weak_tape and advisories.in_weak_take_profit_band(p.get("gain_pct")):
         cA.caption(f"  ↳ weak tape: the book takes profits at 10–12% — this one is up "
                    f"{p['gain_pct'] * 100:.1f}%")

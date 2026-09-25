@@ -30,6 +30,7 @@ from tests.cockpit import (  # noqa: E402
     test_runlog,
     test_scan,
     test_scan_worker,
+    test_sectors,
     test_trade,
     test_triggers,
     test_vcp,
@@ -49,7 +50,8 @@ SUITES = (
     test_scan_worker,
     test_journal,
     test_runlog,
-    test_advisories)
+    test_advisories,
+    test_sectors)
 
 
 def _run_all() -> int:

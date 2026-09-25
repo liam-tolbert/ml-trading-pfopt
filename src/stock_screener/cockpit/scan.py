@@ -374,12 +374,34 @@ def _new_high_low(df: pd.DataFrame, phase_info: dict) -> Tuple[bool, bool]:
     return nh, nl
 
 
+def leading_groups(cand: Optional[pd.DataFrame], n: int = 5) -> List[dict]:
+    """The industries with the most Tier-A candidates, then the most new highs, then the
+    most candidates: ``[{industry, n, tier_a, new_highs}]``, at most ``n``. ``[]`` when
+    the table has no industry labels."""
+    if cand is None or not len(cand) or "industry" not in cand.columns:
+        return []
+    c = cand[cand["industry"].notna()]
+    if not len(c):
+        return []
+    nh = c["new_high"] if "new_high" in c.columns else pd.Series(False, index=c.index)
+    g = pd.DataFrame({"industry": c["industry"], "n": 1,
+                      "tier_a": (c["tier"] == "A").astype(int),
+                      "new_highs": nh.fillna(False).astype(bool).astype(int)})
+    g = g.groupby("industry", as_index=False).sum()
+    g = g.sort_values(["tier_a", "new_highs", "n", "industry"],
+                      ascending=[False, False, False, True]).head(n)
+    return [{k: (int(v) if k != "industry" else str(v)) for k, v in r.items()}
+            for r in g.to_dict("records")]
+
+
 def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                     spy: pd.DataFrame,
                     get_fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
                     cfg: Optional[ScanConfig] = None,
                     progress: Optional[Callable[[int, int, str], None]] = None,
-                    breadth_history: Optional[List[dict]] = None) -> ScanResult:
+                    breadth_history: Optional[List[dict]] = None,
+                    get_sector: Optional[Callable[[str], Optional[dict]]] = None
+                    ) -> ScanResult:
     """Run the SEPA funnel over already-fetched price frames (deterministic/offline).
 
     ``prices``: {ticker -> daily OHLCV}. ``spy``: SPY daily OHLCV.
@@ -388,10 +410,13 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     warm cache this loop (phase/VCP detection) is the multi-minute part of a scan.
     ``breadth_history``: :func:`breadth_store.load` rows; with them the regime's
     ``nh_nl_expanding`` and the breadth-aware re-entry streak are filled in.
+    ``get_sector``: optional callable run only on Step-1 passers, returning
+    ``{sector, industry}`` (:func:`sectors.get_sector`).
     Names with fewer than ``cfg.min_history_rows`` bars are skipped. A per-name error is
     recorded in ``errors`` and never aborts the scan.
     """
     from . import breadth_store
+    from .advisories import depth_vs_market
     cfg = cfg or ScanConfig()
     errors: List[str] = []
     spy_cp = float(spy["Close"].iloc[-1])
@@ -432,11 +457,16 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             vcp = detect_vcp(df, cp, phase_info)
             if cfg.require_vcp and not vcp.get("is_vcp"):
                 continue
+            depth = depth_vs_market(df, spy, vcp.get("contractions") or [])
 
             breakout = detect_breakout_prior_high(df, cp, phase_info, vcp)
             stop = calculate_stop_loss(df, cp, phase_info, phase_info.get("phase", 2))
 
             fund = get_fundamentals(t) if get_fundamentals else None
+            try:
+                sect = (get_sector(t) if get_sector else None) or {}
+            except Exception:
+                sect = {}
             s2 = _step2_summary(fund)
             if s2["score"] < cfg.min_fundamental_score:
                 continue
@@ -469,6 +499,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             rows.append({
                 "ticker": t,
                 "price": round(cp, 2),
+                "industry": sect.get("industry"),
+                "sector": sect.get("sector"),
                 "rs": rsr,
                 "rs_nh": rs_nh,
                 "new_high": new_high,
@@ -485,6 +517,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "vcp": bool(vcp.get("is_vcp")),
                 "num_contractions": int(vcp.get("contraction_count", 0) or 0),
                 "vcp_quality": round(float(vcp.get("vcp_quality", 0) or 0), 0),
+                "depth_vs_spy": (depth or {}).get("ratio"),
+                "depth_flag": (depth or {}).get("flag"),
                 "breakout_today": levels["breakout_today"],
                 "vol_confirmed": levels["volume_confirmed"],
                 "pct_to_pivot": _fmt(levels["pct_to_pivot"]),
@@ -499,7 +533,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "breakout": breakout, "levels": levels, "fundamentals": fund,
                 "step2": s2, "rs": rsr, "rs_nh": rs_nh, "template": tmpl,
                 "book_template": book, "rs_trend": rs_trend,
-                "sma200_rising_m": sma200_m, "adv_usd": adv_usd,
+                "sma200_rising_m": sma200_m, "adv_usd": adv_usd, "depth": depth,
                 "earnings_in": earnings_in,
             }
         except Exception as e:                                  # never let one name kill the scan
@@ -596,7 +630,8 @@ def run_scan(universe: str, cfg: Optional[ScanConfig] = None,
                  else lambda d, t, s: progress(d, t, f"Screening · {s}"))
     prices = data_feed.get_many_prices(tickers, force=force, max_age_days=0.0,
                                        progress=_p_fetch)
-    from . import breadth_store
+    from . import breadth_store, sectors
     return screen_universe(list(prices.keys()), prices, spy,
                            get_fundamentals=data_feed.get_fundamentals, cfg=cfg,
-                           progress=_p_screen, breadth_history=breadth_store.load())
+                           progress=_p_screen, breadth_history=breadth_store.load(),
+                           get_sector=sectors.get_sector)

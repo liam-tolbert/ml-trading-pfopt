@@ -352,5 +352,48 @@ def test_market_turn_transition_only():
                                                     "turn": False, "unconfirmed": False}
 
 
+def test_depth_vs_market():
+    """§6.83 (audit Step-1 #6): the base's deepest fall from a running high against the
+    market's over the same dates, from the first contraction's peak. 2.3× is fine; 4×
+    is flagged (the books: avoid > 2.5–3× the market); a market that barely moved, no
+    contractions, or a window with under two bars read None."""
+    import pandas as pd
+    from src.stock_screener.cockpit import advisories
+
+    idx = pd.bdate_range(end="2026-06-30", periods=60)
+
+    def frame(path):
+        c = pd.Series(path, index=idx, dtype=float)
+        return pd.DataFrame({"Open": c, "High": c, "Low": c, "Close": c, "Volume": 1e6})
+
+    # stock: 80 -> 100 by bar 20, -23% to 77 by bar 40, back to 95; SPY: 300 -> 270 -> 300
+    stock = ([80 + i for i in range(21)] + [100 - 23 * (i + 1) / 20 for i in range(20)]
+             + [77 + 18 * (i + 1) / 19 for i in range(19)])
+    spy = ([300.0] * 21 + [300 - 30 * (i + 1) / 20 for i in range(20)]
+           + [270 + 30 * (i + 1) / 19 for i in range(19)])
+    cons = [{"peak_date": idx[20], "trough_date": idx[40], "peak_price": 100.0,
+             "trough_price": 77.0, "drawdown_pct": 23.0}]
+    d = advisories.depth_vs_market(frame(stock), frame(spy), cons)
+    assert d == {"depth_pct": 23.0, "spy_depth_pct": 10.0, "ratio": 2.3, "flag": False}, d
+    text = advisories.depth_vs_market_text(d)
+    assert "23%" in text and "2.3×" in text
+
+    deep = stock[:21] + [100 - 40 * (i + 1) / 20 for i in range(20)] + [60.0] * 19
+    d4 = advisories.depth_vs_market(frame(deep), frame(spy), cons)
+    assert d4["ratio"] == 4.0 and d4["flag"] is True
+    assert advisories.depth_vs_market_text(d4).startswith("⚠️")
+
+    # the market barely moved -> no ratio; no contractions -> None; a window with < 2 bars
+    assert advisories.depth_vs_market(frame(stock), frame([300.0] * 60), cons) is None
+    assert advisories.depth_vs_market(frame(stock), frame(spy), []) is None
+    late = [{"peak_date": idx[-1], "trough_date": idx[-1]}]
+    assert advisories.depth_vs_market(frame(stock), frame(spy), late) is None
+    assert advisories.depth_vs_market_text(None) == ""
+
+    # a tz-aware stock index against a naive SPY still aligns on dates
+    tz = frame(stock).tz_localize("America/New_York")
+    assert advisories.depth_vs_market(tz, frame(spy), cons)["ratio"] == 2.3
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "advisories"))

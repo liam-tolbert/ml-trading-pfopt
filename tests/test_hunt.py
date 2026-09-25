@@ -120,7 +120,8 @@ def test_diagnostics_and_gates():
     # §6.80: Step-1 reads come from the scan row; a scan from before they existed reads
     # None, never a KeyError.
     ok("step-1 reads absent from an older scan read as None",
-       a["rs_trend"] is None and a["sma200_m"] is None)
+       a["rs_trend"] is None and a["sma200_m"] is None and a["depth_vs_spy"] is None
+       and a["industry"] is None)
     # §6.81: ADV through the shared helper, and the liquidity ceiling beside it
     _df = b.result.payloads["AAA"]["df"]
     _adv = float((_df["Close"] * _df["Volume"]).tail(20).mean())
@@ -201,7 +202,7 @@ def test_report_builds():
         html = out.read_text(encoding="utf-8")
         for frag in ("Weekend Hunt", "In the buy zone", "Approaching pivot",
                      "Volume-confirmed", "Step-2 fundamentals", "Full review",
-                     "RS line", "AAA", "EEE"):
+                     "RS line", "Groups among PASS names", "AAA", "EEE"):
             ok(f"report contains {frag!r}", frag in html)
 
 

@@ -32,7 +32,7 @@ from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
     watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
-from src.stock_screener.cockpit.scan import filter_candidates  # noqa: E402
+from src.stock_screener.cockpit.scan import filter_candidates, leading_groups  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, cancel_pending_buys,
     fetch_account_summary, fetch_gate_inputs, fetch_held_shares, fill_floor, freshen_prices,
@@ -102,7 +102,9 @@ INFO_STEP3 = """
 look for a **Volatility Contraction Pattern**:
 - 2–6 pullbacks, each **tighter** than the last (e.g. 18% → 12% → 6%),
 - **higher lows**, **volume drying up** into the tightest part,
-- price holding above the **50-day SMA**, total base depth ~10–35%.
+- price holding above the **50-day SMA**, total base depth ~10–35%,
+- a depth in proportion to the market's: the books avoid a name that fell more than
+  ~2.5–3× what the S&P 500 fell over the same stretch (the "Depth vs market" read).
 
 Shaded bands mark *detected* contractions (a hint — you decide). The bottom **RMV** pane
 (Relative Measured Volatility, 0–100) tracks how tight the base is versus the stock's own
@@ -143,6 +145,7 @@ from src.stock_screener.cockpit.doctrine import (DEFAULT_STOP_FROM_PIVOT, EARNIN
 READABLE_COLS = {
     "ticker": "Ticker",
     "price": "Price ($)",
+    "industry": "Industry",
     "rs": "RS rating",
     "rs_nh": "RS line NH",
     "rs_trend": "RS line trend",
@@ -156,6 +159,7 @@ READABLE_COLS = {
     "tier": "Tier",
     "vcp": "VCP detected",
     "num_contractions": "# Contractions",
+    "depth_vs_spy": "Depth vs market (×)",
     "vcp_quality": "VCP quality (0-100)",
     "breakout_today": "Breakout today",
     "vol_confirmed": "Vol confirmed",
@@ -171,6 +175,9 @@ READABLE_COLS = {
 COL_HELP = {
     "ticker": "Stock symbol. Click a row to chart it.",
     "price": "Latest close price.",
+    "industry": "The company's industry (Yahoo). Most big winners move with their group: "
+                "several names from one industry on the list is a group move, and the "
+                "banner's 'Leading groups' line counts them. n/a = not labelled yet.",
     "rs": "Relative-strength rating 1–99: IBD-style weighted return blend (2×3-mo + 6-mo "
           "+ 9-mo + 12-mo — recent strength counts double), percentiled vs the scanned "
           "universe. Minervini wants 70+.",
@@ -205,6 +212,11 @@ COL_HELP = {
            "pullbacks, the last one tight (≤12%), with price near its 52-week high.",
     "num_contractions": "Number of peak→trough pullbacks in the current base. Minervini's "
                         "range is 2–6.",
+    "depth_vs_spy": "How far the base fell against how far the market fell over the same "
+                    "dates: 2.3 = the stock's deepest pullback was 2.3× the S&P 500's. The "
+                    "books avoid names that corrected more than ~2.5–3× the market: a 23% "
+                    "dip in a 10% correction is fine, in a 3% one it isn't. n/a = no "
+                    "contractions, or the market barely moved.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
                    "+ near-high 20 + base length 10). Shown even when VCP is False.",
     "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
@@ -232,10 +244,11 @@ COL_HELP = {
 # visibility, and the ℹ️ Columns popover. `criteria` is left out: the 8/8 gate makes it a
 # constant 8. It stays in the scan frame, where tests read it.
 COL_GROUPS = [
-    ("Identify", ["ticker", "price"]),
+    ("Identify", ["ticker", "price", "industry"]),
     ("Fuel — catalyst & strength", ["rs", "rs_nh", "rs_trend", "sma200_rising_m",
                                     "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
-    ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality"]),
+    ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
+                              "depth_vs_spy"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
                                "pct_to_pivot", "day_range", "adv_musd", "pivot", "stop",
                                "target"]),
@@ -1310,6 +1323,12 @@ with icol:
 if not buy_ok:
     st.caption("⚠︎ Weak tape — most breakouts fail here. "
                + "; ".join(reg.get("reasons", [])))
+_lead = leading_groups(res.candidates)
+if _lead:
+    st.caption("Leading groups: " + " · ".join(
+        f"{g['industry']} ({g['tier_a']} tier A"
+        + (f" · {g['new_highs']} new high{'s' if g['new_highs'] != 1 else ''}"
+           if g["new_highs"] else "") + ")" for g in _lead))
 
 st.caption(f"Scanned {res.n_scanned} names · {res.n_passed} pass the "
            f"{min_criteria}/8 trend template · {len(cand_view)} after filters"
@@ -1479,6 +1498,9 @@ with colSide:
                        "instead (its report row will show ↗ crossed).")
         st.markdown(step_badge("Step 3", "Judge the VCP"))
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
+        _dvm = advisories.depth_vs_market_text(payload.get("depth"))
+        if _dvm:
+            st.caption(_dvm)
         weekly = st.checkbox("Weekly view", value=False)
         show_overlays = st.checkbox("VCP + entry overlays", value=True)
         show_bollinger = st.checkbox(

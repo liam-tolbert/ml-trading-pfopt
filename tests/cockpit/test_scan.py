@@ -504,8 +504,12 @@ def test_screen_universe_rows_carry_step1_reads():
     count in ``criteria``, ``rs_trend``/``rs_slope_13w`` and ``sma200_rising_m``."""
     prices, spy, _ = _synthetic_slice()
     res = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
-    for col in ("rs_trend", "rs_slope_13w", "sma200_rising_m", "criteria"):
+    for col in ("rs_trend", "rs_slope_13w", "sma200_rising_m", "criteria",
+                "depth_vs_spy", "depth_flag"):
         assert col in res.candidates.columns, col
+    for v in res.candidates["depth_vs_spy"].dropna():
+        assert v > 0
+    assert all("depth" in p for p in res.payloads.values())
     labels = {"rising 13w", "rising 6w", "rolling over", "falling", "flat"}
     assert set(res.candidates["rs_trend"].dropna()) <= labels
     assert (res.candidates["sma200_rising_m"].dropna() >= 0).all()
@@ -541,10 +545,13 @@ def test_run_scan_uses_topup_fetch():
         seen["spy"] = kw
         return spy
 
+    from src.stock_screener.cockpit import breadth_store, sectors
     with patch.object(dfeed, "get_universe", lambda u, **kw: ["UPUP"]), \
             patch.object(dfeed, "get_spy", fake_spy), \
             patch.object(dfeed, "get_many_prices", fake_many), \
-            patch.object(dfeed, "get_fundamentals", lambda t, **kw: None):
+            patch.object(dfeed, "get_fundamentals", lambda t, **kw: None), \
+            patch.object(sectors, "get_sector", lambda t, **kw: {}), \
+            patch.object(breadth_store, "load", lambda path=None: []):
         run_scan(universe="full_us")
     assert seen["many"].get("max_age_days") == 0.0, \
         "universe fetch must always top up (no freshness window)"

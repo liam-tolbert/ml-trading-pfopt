@@ -155,6 +155,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "q": float(c["vcp_quality"]), "rs": int(c["rs"]),
             # Row reads a scan from before they existed lacks: None, never a KeyError.
             "rs_trend": c.get("rs_trend"), "sma200_m": c.get("sma200_rising_m"),
+            "depth_vs_spy": c.get("depth_vs_spy"), "industry": c.get("industry"),
             "fund": int(c["fund_score"]),
             "close": round(float(close[-1]), 2), "pivot": round(piv, 2),
             "stop": round(float(lev["stop"]), 2),

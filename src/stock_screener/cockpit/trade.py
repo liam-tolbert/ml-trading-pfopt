@@ -1522,6 +1522,13 @@ def fetch_positions() -> dict:
                 template_criteria = None
 
         next_earnings, earnings_in = earn.get(sym, (None, None))
+        try:
+            # Cache only: the evening screen labels every passer, and a page read MUST NOT
+            # wait on Yahoo per holding.
+            from .sectors import get_sector
+            _sect = get_sector(sym, allow_network=False)
+        except Exception:
+            _sect = {}
         pos = {
             "symbol": sym, "qty": qty, "avg_entry": avg_entry, "current_price": price,
             "market_value": _attr_float(p, "market_value"),
@@ -1534,6 +1541,7 @@ def fetch_positions() -> dict:
             "volume_ratio": volume_ratio, "adv_usd": adv_usd,
             "gain_pct": gain_pct, "below_sma50": below_sma50,
             "next_earnings": next_earnings, "earnings_in": earnings_in,
+            "industry": _sect.get("industry"), "sector": _sect.get("sector"),
             "stage": position_stage(gain_pct),
             "template_criteria": template_criteria, "df": df,
         }
