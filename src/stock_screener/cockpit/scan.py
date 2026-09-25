@@ -363,25 +363,42 @@ def template_chain(df: pd.DataFrame, close: Optional[float] = None
     return validate_minervini_trend_template(cp, phase_info, sma200), phase_info
 
 
+def _new_high_low(df: pd.DataFrame, phase_info: dict) -> Tuple[bool, bool]:
+    """Whether the last bar set a 52-week high, and a 52-week low, against the phase
+    read's 252-bar window. That window is rounded to 2 dp, hence the half-cent slack."""
+    w52h, w52l = phase_info.get("week_52_high"), phase_info.get("week_52_low")
+    hi = df["High"] if "High" in df.columns else df["Close"]
+    lo = df["Low"] if "Low" in df.columns else df["Close"]
+    nh = bool(w52h and float(hi.iloc[-1]) >= float(w52h) - 0.005)
+    nl = bool(w52l and float(lo.iloc[-1]) <= float(w52l) + 0.005)
+    return nh, nl
+
+
 def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                     spy: pd.DataFrame,
                     get_fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
                     cfg: Optional[ScanConfig] = None,
-                    progress: Optional[Callable[[int, int, str], None]] = None) -> ScanResult:
+                    progress: Optional[Callable[[int, int, str], None]] = None,
+                    breadth_history: Optional[List[dict]] = None) -> ScanResult:
     """Run the SEPA funnel over already-fetched price frames (deterministic/offline).
 
     ``prices``: {ticker -> daily OHLCV}. ``spy``: SPY daily OHLCV.
     ``get_fundamentals``: optional callable run only on Step-1 passers (cheap).
     ``progress``: optional ``(done, total, ticker)`` callback, called once per name. On a
     warm cache this loop (phase/VCP detection) is the multi-minute part of a scan.
+    ``breadth_history``: :func:`breadth_store.load` rows; with them the regime's
+    ``nh_nl_expanding`` and the breadth-aware re-entry streak are filled in.
     Names with fewer than ``cfg.min_history_rows`` bars are skipped. A per-name error is
     recorded in ``errors`` and never aborts the scan.
     """
+    from . import breadth_store
     cfg = cfg or ScanConfig()
     errors: List[str] = []
     spy_cp = float(spy["Close"].iloc[-1])
     spy_analysis = analyze_spy_trend(spy, spy_cp)
     rs_rating = _rs_ratings(prices, cfg.rs_period)
+    session = pd.Timestamp(spy.index[-1]).strftime("%Y-%m-%d")
+    n_new_highs = n_new_lows = 0
 
     phase_results: List[dict] = []
     rows: List[dict] = []
@@ -402,6 +419,9 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 continue
             tmpl, phase_info = chain
             phase_results.append({"ticker": t, "phase": phase_info.get("phase", 0)})
+            new_high, new_low = _new_high_low(df, phase_info)
+            n_new_highs += int(new_high)
+            n_new_lows += int(new_low)
             rsr = rs_rating.get(t)
             book = book_template(tmpl, rsr)
             if book["criteria_passed"] < cfg.min_criteria:
@@ -451,6 +471,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "price": round(cp, 2),
                 "rs": rsr,
                 "rs_nh": rs_nh,
+                "new_high": new_high,
                 "rs_trend": (rs_trend or {}).get("label"),
                 "rs_slope_13w": (rs_trend or {}).get("slope_13w"),
                 "sma200_rising_m": sma200_m,
@@ -487,15 +508,30 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
 
     breadth = calculate_market_breadth(phase_results)
     sig = should_generate_signals(spy_analysis, breadth)
-    # The backtest's re-entry lag, on SPY alone (no breadth history here).
+    p2_pct = float(breadth.get("phase_2_pct", 0.0) or 0.0)
+    hist = breadth_history or []
+    # The backtest's re-entry lag. Today's breadth isn't in the history yet, so it is
+    # added for the current session; with no history at all the count is SPY only.
     from .advisories import spy_confirm_streak
     try:
-        _streak = spy_confirm_streak(spy)
+        _p2map = ({**breadth_store.phase2_by_date(hist), session: p2_pct}
+                  if hist else None)
+        _streak = spy_confirm_streak(spy, phase2_by_date=_p2map)
     except Exception:
         _streak = None
+    spread = n_new_highs - n_new_lows
+    n_all = len(phase_results)
     regime = {
+        "session": session,
+        "new_highs": n_new_highs,
+        "new_lows": n_new_lows,
+        "nh_nl_spread": spread,
+        "nh_nl_pct": round(spread / n_all * 100.0, 1) if n_all else None,
+        "nh_nl_expanding": breadth_store.spread_expanding(hist, session, spread),
         "spy_ok_streak": (_streak or {}).get("streak"),
         "spy_ok_satisfied": (_streak or {}).get("satisfied"),
+        "spy_ok_breadth": (_streak or {}).get("breadth"),
+        "spy_ok_partial": (_streak or {}).get("partial"),
         "regime": sig.get("regime"),
         "should_generate_buys": sig.get("should_generate_buys"),
         "phase2_pct": breadth.get("phase_2_pct", 0.0),
@@ -560,6 +596,7 @@ def run_scan(universe: str, cfg: Optional[ScanConfig] = None,
                  else lambda d, t, s: progress(d, t, f"Screening · {s}"))
     prices = data_feed.get_many_prices(tickers, force=force, max_age_days=0.0,
                                        progress=_p_fetch)
+    from . import breadth_store
     return screen_universe(list(prices.keys()), prices, spy,
                            get_fundamentals=data_feed.get_fundamentals, cfg=cfg,
-                           progress=_p_screen)
+                           progress=_p_screen, breadth_history=breadth_store.load())

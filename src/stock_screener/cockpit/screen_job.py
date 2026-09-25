@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:                       # so `from src.X import ...` resolves
     sys.path.insert(0, str(ROOT))
 
-from src.stock_screener.cockpit import runlog, scan  # noqa: E402
+from src.stock_screener.cockpit import breadth_store, runlog, scan  # noqa: E402
 from src.stock_screener.cockpit.scan_worker import (  # noqa: E402
     _STORE, DEFAULT_MIN_CRITERIA, DEFAULT_UNIVERSE)
 
@@ -65,9 +65,20 @@ def run_screen(universe: str = DEFAULT_UNIVERSE,
            "candidates": 0 if cand is None else int(len(cand)),
            "errors": len(getattr(res, "errors", None) or []),
            "elapsed": round(time.time() - t0, 1)}
-    _LOG.info("screen done: %s scanned, %s passed 8/8, %d candidates, %d errors, %.1fs",
-              out["scanned"], out["passed"], out["candidates"], out["errors"],
-              out["elapsed"])
+    # The breadth history gets one settled row per scheduled screen. Only this job
+    # appends: an in-app scan mid-session would write a provisional row.
+    reg = getattr(res, "regime", None) or {}
+    if reg.get("session"):
+        try:
+            breadth_store.append({"date": reg["session"], "n_scanned": out["scanned"],
+                                  "phase2_pct": reg.get("phase2_pct"),
+                                  "new_highs": reg.get("new_highs"),
+                                  "new_lows": reg.get("new_lows")})
+        except Exception as e:
+            _LOG.warning("breadth row not written: %s", e)
+    _LOG.info("screen done: %s scanned, %s passed 8/8, %d candidates, %d errors, "
+              "NH/NL %s/%s, %.1fs", out["scanned"], out["passed"], out["candidates"],
+              out["errors"], reg.get("new_highs"), reg.get("new_lows"), out["elapsed"])
     return out
 
 

@@ -61,6 +61,9 @@ INFO_REGIME = """
 fail in a weak tape. **Phase-2 breadth** = % of scanned names in confirmed uptrends.
 - **BUY OK / Risk-On** → trade actively.
 - **CAUTION / weak breadth / Risk-Off** → preserve capital, wait.
+- **NH/NL** = names at a new 52-week high vs at a new low, the books' own breadth read.
+  ↑ means the spread is wider than ten sessions ago (a bottoming or broadening market),
+  ↓ narrower (leadership thinning). It needs ten evenings of history before it shows.
 
 Don't force trades when few names qualify — the market is telling you something.
 """
@@ -742,8 +745,9 @@ with st.sidebar:
             st.caption(f":orange[{_weak}]")
         _stk = res.regime.get("spy_ok_streak")
         if _stk is not None and not res.regime.get("spy_ok_satisfied"):
+            _how = ("with breadth" if res.regime.get("spy_ok_breadth") else "SPY only")
             st.caption(f":orange[SPY has been in Stage 1–2 for only **{_stk}/"
-                       f"{REGIME_CONFIRM_DAYS}** sessions — the backtest waited "
+                       f"{REGIME_CONFIRM_DAYS}** sessions ({_how}) — the backtest waited "
                        f"{REGIME_CONFIRM_DAYS} before adding again after a break (the one "
                        "market-timing rule that held out of sample). Don't add yet.]")
         _mode_label = st.selectbox(
@@ -1288,12 +1292,17 @@ buy_ok = reg.get("should_generate_buys")
 p2 = reg.get("phase2_pct", 0)
 p2 = p2 if isinstance(p2, (int, float)) else 0
 env = ":green-background[BUY OK]" if buy_ok else ":orange-background[CAUTION]"
-strip = " · ".join([
+_nhnl = ""
+if reg.get("new_highs") is not None:
+    _arrow = {True: " ↑", False: " ↓"}.get(reg.get("nh_nl_expanding"), "")
+    _nhnl = f"NH/NL {reg['new_highs']}/{reg.get('new_lows')}{_arrow}"
+strip = " · ".join([s for s in [
     "**Market** " + _tag(reg.get("regime"), _regime_color(reg.get("regime"))),
     f"SPY {reg.get('spy_trend') or 'n/a'}",
     f"Breadth {p2:.0f}% ({reg.get('breadth_quality') or '?'})",
+    _nhnl,
     env,
-])
+] if s])
 scol, icol = st.columns([0.92, 0.08], vertical_alignment="center")
 scol.markdown(strip)
 with icol:

@@ -159,7 +159,8 @@ the discipline.
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
 | `trade.py` | Alpaca paper submit path, stops, the exposure gate, the journal + Loss Adjustment Exercise |
-| `advisories.py` | display-only SEPA reads: stop room, post-breakout violations/follow-through, regime tier, weak-tape advice, market turn, SPY re-entry streak |
+| `advisories.py` | display-only SEPA reads: stop room, post-breakout violations/follow-through, regime tier, weak-tape advice, market turn, SPY re-entry streak (breadth-aware with history) |
+| `breadth_store.py` | `data/cockpit/breadth.csv`: one row per settled session (n_scanned, phase2_pct, new highs, new lows); appended by `screen_job` only |
 | `doctrine.py` | the shared rule numbers and the two promotion switches (imports nothing) |
 | `sells.py` / `entries.py` | P1–P4 sell planner; armed-entry plans |
 | `refresh_job.py` / `sell_job.py` / `entry_job.py` | the three headless CLIs the timers invoke |
@@ -276,7 +277,7 @@ diverging watchlists is a lost-update race across hosts.
 |---|---|---|
 | `cockpit-refresh` | 09:30, :00/:30 to 15:30, 16:10 | watchlist + held-name price top-up, then trigger check |
 | `cockpit-sellplan` | 16:15 weekdays | evening sell plan (overnight veto window) |
-| `cockpit-eod` | 16:20 weekdays | **two sequential steps in one unit**: full-universe price top-up (arms the settled-close serve), then the universe screen that rebuilds `last_scan.pkl` |
+| `cockpit-eod` | 16:20 weekdays | **two sequential steps in one unit**: full-universe price top-up (arms the settled-close serve), then the universe screen that rebuilds `last_scan.pkl` and appends the session's row to `data/cockpit/breadth.csv` |
 | `cockpit-sellexec` | 09:25 weekdays | submit still-planned sells for the open |
 | `cockpit-buyexec` | 09:26 weekdays | submit at most ONE armed entry |
 | `cockpit-deploy` | hourly, 17:00–09:00 daily | `deploy.sh` |
@@ -324,6 +325,9 @@ stuck Alpaca call: a finished request leaves exactly that.
 - **Source comments say WHY the code must be this way, never which bug/review/date produced it**
   (§6.47). The incident ledger lives in test docstrings and this file. `CLAUDE.md` at the
   repo root holds the full comment and commit rules.
+- **`breadth.csv` is appended only by the scheduled screen.** An in-app scan mid-session would
+  write a provisional row; `screen_job` runs after the settle. A same-evening rerun replaces
+  the day's row.
 - **`RS_FLOOR` is one constant.** The scan gate, the app's slider default, P2 and the hunt read
   `doctrine.RS_FLOOR`. The gate's RS leg lives inside `screen_universe`, so `filter_candidates`
   needs no mirror for it; its own `min_rs` is the slider's extra filter above the floor.
@@ -404,6 +408,16 @@ positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negat
 **`suggest_stop` bases (Positions page, auto mode):** fresh (gain < `BREAKEVEN_GAIN` 0.16) → 8% below
 entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 50-day → trail
 `sma_50 × 0.99`. Floored at the in-force stop (ratchet-safe). `None` = underwater → manual row.
+
+**Breadth (`scan._new_high_low`, `breadth_store`):**
+- New high = the last bar's High ≥ `classify_phase`'s 252-bar `week_52_high` (rounded to 2 dp,
+  hence a 0.005 slack); new low the mirror on Low. Counted over every name with 200 rows,
+  before the 8/8 gate, so the counts describe the universe, not the candidates.
+- `nh_nl_expanding` = today's spread > the spread `SPREAD_LOOKBACK = 10` settled sessions back
+  (rows dated before the session). The breadth-aware re-entry lag requires `phase2_pct ≥
+  BREADTH_MIN_PHASE2` on every counted session; a session without a row counts on SPY alone and
+  sets `partial`. Today's own breadth is added to the map at screen time, since its row is
+  appended afterwards.
 
 **Alpaca facts (alpaca-py 0.43.4):**
 - Keys are per-account. Canonical names: `ALPACA_API_KEY_MINERVINI` /
@@ -565,6 +579,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.79** **The run log deadlocked every second thread that logged — the likelier cause of §6.71's hang.** `runlog.DatedFileHandler` defined `release()` to drop its file handle. That is `logging.Handler`'s LOCK release, which `Handler.handle` calls after every emit. So the handler lock was acquired and never released: the first thread to log owned it forever, and the next thread to log blocked forever. In the app, that is a page's price read (`fetch_positions` → `get_many_prices` logs one line per call) against the background scan, or two sessions' script threads. It matches §6.71's signature: the page spun on "Reading the paper account…" (`get_many_prices` runs right after the Alpaca reads), the Alpaca socket was ESTABLISHED and idle because the request had *finished*, and a restart cleared it. Present since `3ac2d9e` (2026-08-25). Found when the Journal's new cache-only price read hung the test gate at interpreter exit. `logging.shutdown` blocked on the lock the AppTest script thread had taken. Fix: the method is `release_file()`. `test_runlog_second_thread_can_log` logs from three threads with a join bound, and it fails on the old code ("thread B blocked on the handler lock after ['A'] logged"). §6.71's timeout and per-session reads stay: both were real, just not the whole story.
 - **§6.80** **Step 1 is the book's eight (SEPA audit, Step-1 items 1–3).** The vendored template's eighth criterion is a Stage-2 slope check; the book's is an RS rating of at least 70. `scan.book_template` counts the seven price criteria plus `rs >= doctrine.RS_FLOOR`, and `screen_universe` gates on that count (user decision: the gate **and** P2, not display only). The Stage-2 check no longer counts; c1–c5 imply Stage 2. `ScanResult.rs_ratings` carries every rated name so a holding that fell off the list still has one; older pickles lack the attribute and readers use `getattr`. **P2** now reads the seven price criteria from `pos["template_criteria"]` and the eighth from `rs` (the Positions page passes the worker's map; `sell_job` reads the persisted pickle cache-only). Seven passing with no rating is unknown, and unknown never trades. The vendored function is untouched. On the Pi's last scan (2026-09-24, 3,927 names, 417 candidates) the RS leg removes 19 candidates, 6 of them tier A; the names the dropped Stage-2 check would admit can't be counted from the pickle, which holds only passers. Two advisory reads ride along: `scan.rs_line_trend` (least-squares slope of price ÷ SPY over 30 and 65 bars, in % per week, labelled rising 13w / rising 6w / rolling over / falling / flat) and `scan.sma200_rising_months` (consecutive sessions the 200-day beats its value 19 sessions earlier, the template's own offset, in 21-session months). Both are columns, a Step-1 caption per name, and hunt report columns. `RS_FLOOR` replaces the hunt's `MIN_RS = 70` and the slider's literal default.
 - **§6.81** **Liquidity cap (SEPA audit, Step-1 item 4).** The books list liquidity risk; the cockpit showed ADV in the hunt and never acted on it, and §4's STRW lesson (a ~$100k order, ~12% of a day's dollar volume, moved the price 1.5%) was a rule with no enforcement. `doctrine.MAX_ORDER_ADV_PCT = 0.02` of the `ADV_DAYS = 20`-session average dollar volume (`indicators.dollar_adv`) is now the ceiling on one order. The scan carries `adv_musd` (column "Avg $ volume (M)") and the payload `adv_usd`; `build_buy_plan` clamps a non-held buy's share count to the cap **in every mode** (`adv_capped`, `adv_pct` on the row; a clamp to under one share skips the name); `submit_buy_plan` and `entries.build_entry_plan` refuse a row above it, since the limit is editable after Build and the 09:26 executor runs unattended. Rows without a volume read (older plans, short frames) are not judged. The panel marks "volume-capped", shows the cap per row and turns red when an edited limit breaches it. `fetch_positions` carries `adv_usd` and `position_advisories` warns when a position is ≥ 5% of a day's volume (`POSITION_ADV_WARN_PCT`), with the exit time at the cap. The hunt's diagnostics compute ADV through the same helper and add `max_order_usd`; the skill reads it instead of "be suspicious under $2M". Held rows are exempt everywhere: a re-arm is not an order into the market. The 2% is an operating limit, not a tuned number; the books give none.
+- **§6.82** **Breadth the books' way: new highs vs new lows, with history (SEPA audit, Step-1 item 8).** The banner read phase-2 share only; the books watch the count of names at a new 52-week high against new lows, and whether the spread widens. `scan.screen_universe` now counts both over every name it phases (before the gate), from the `week_52_high/low` `classify_phase` already computes (2-dp rounded, so a half-cent slack). The regime dict carries `session` (SPY's last bar date), `new_highs`, `new_lows`, `nh_nl_spread`, `nh_nl_pct` and `nh_nl_expanding`; candidate rows carry `new_high`. History is new: `breadth_store` keeps `data/cockpit/breadth.csv`, one row per settled session, written by `screen_job` after `store.put` and only there. `nh_nl_expanding` compares today's spread with the spread ten settled sessions back (None without them). The §12 breadth gap closes with it: `advisories.spy_confirm_streak(phase2_by_date=)` counts a session only when SPY is in Stage 1–2 **and** that day's phase-2 share was at least `doctrine.BREADTH_MIN_PHASE2 = 15.0` (the vendored `should_generate_signals` default, which it MUST equal); a session with no row counts on SPY alone and sets `partial`. The scan, the trade-panel caption and the evening plan's note say "(with breadth)" or "(SPY only)". History starts at deploy: the arrow appears after ten evenings, the breadth-aware lag after fifteen. The Pi's 2026-09-24 scan reads NH/NL 212/48 on 3,927 names.
 
 ## 12. Open items
 
@@ -613,8 +628,8 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   the decisive close, the second close and the breakout-bar low use `last_close`. Only the §6.77
   reads drop an unsettled bar. The evening plan runs after the settle, so the automation is
   unaffected; the Positions page mid-session can show a P1 ❌ that the close then clears.
-- **The re-entry streak has no breadth.** The backtest's lag also required 15% of the universe in
-  Stage 2. The scan has today's breadth but not its history.
+- ~~The re-entry streak has no breadth~~ — **resolved (§6.82)** once `breadth.csv` has rows. Until
+  it has 15 sessions the streak reads "partial": sessions without a row count on SPY alone.
 - **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
   first time two threads log (a page's price read plus the background scan). `docker compose
   restart app` clears it for a while.
@@ -629,5 +644,5 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 197 tests) · `tests/test_hunt.py` (39 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (13 suites, 201 tests) · `tests/test_hunt.py` (39 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
 - **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.

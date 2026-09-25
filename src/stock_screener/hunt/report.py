@@ -138,6 +138,8 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
         date=_esc(date_label),
         regime=_esc(str(regime.get("regime", "?"))),
         breadth=_f(regime.get("phase2_pct"), "{:.1f}"),
+        nhnl=(f'{regime["new_highs"]}/{regime.get("new_lows")}'
+              if regime.get("new_highs") is not None else "-"),
         n_scanned=meta.get("n_scanned", "?"), n_tmpl=meta.get("n_passed_template", "?"),
         n_tier_a=meta.get("n_tier_a", "?"), n_elig=meta.get("n_eligible", len(diag_rows)),
         min_rs=meta.get("min_rs", pl.MIN_RS),
@@ -255,7 +257,8 @@ th.n {{ text-align:right; }}
   <p class="sub">Manual Step-3 chart review of every Tier&nbsp;A candidate with RS&nbsp;&ge;&nbsp;{min_rs}</p>
 
   <div class="statrow">
-    <div class="stat"><b style="color:var(--pass)">{regime}</b><span>regime &middot; breadth {breadth}%</span></div>
+    <div class="stat"><b style="color:var(--pass)">{regime}</b>
+      <span>regime &middot; breadth {breadth}% &middot; NH/NL {nhnl}</span></div>
     <div class="stat"><b>{n_elig}</b><span>reviewed (Tier A &middot; RS &ge; {min_rs})</span></div>
     <div class="stat"><b style="color:var(--pass)">{n_pass}</b><span>PASS</span></div>
     <div class="stat"><b style="color:var(--cav)">{n_cav}</b><span>PASS with caveats</span></div>

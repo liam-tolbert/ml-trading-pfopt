@@ -151,7 +151,9 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
         elif stk.get("streak") is not None and not stk.get("satisfied"):
             notes.append(f"MARKET: SPY {stk['streak']}/{doctrine.REGIME_CONFIRM_DAYS} "
                          "sessions back in Stage 1-2 — the re-entry lag isn't met; don't "
-                         "add yet.")
+                         "add yet"
+                         + (" (with breadth)" if stk.get("breadth") else " (SPY only)")
+                         + ".")
 
     import pandas as pd
     plan = {"date": plan_store.today_iso(today),

@@ -380,6 +380,125 @@ def test_dollar_adv():
     assert all("adv_usd" in p for p in res.payloads.values())
 
 
+def test_breadth_counts():
+    """§6.82 (audit Step-1 #8): the scan counts names at a new 52-week high and at a new
+    low over every name it phases, before the gate. The regime carries the counts, the
+    spread, the session date and, with history, whether the spread is wider than ten
+    sessions ago; the breadth-aware re-entry streak says whether it had breadth."""
+    from src.stock_screener.cockpit.scan import _new_high_low
+
+    END = "2026-06-30"
+    up = [100.0 + 0.3 * i for i in range(260)]                 # last High is the max
+    down = [180.0 - 0.3 * i for i in range(260)]               # last Low is the min
+    mid = [100.0 + 0.3 * i for i in range(250)] + [175.0 - 0.5 * i for i in range(10)]
+    prices = {"NH": _trigger_frame(END, up), "NL": _trigger_frame(END, down),
+              "MID": _trigger_frame(END, mid)}
+    spy = _trigger_frame(END, [300.0 + 0.2 * i for i in range(260)])
+
+    res = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    reg = res.regime
+    assert reg["session"] == END
+    assert reg["new_highs"] == 1 and reg["new_lows"] == 1 and reg["nh_nl_spread"] == 0
+    assert reg["nh_nl_pct"] == 0.0 and reg["nh_nl_expanding"] is None
+    assert reg["spy_ok_breadth"] is False
+    if len(res.candidates):
+        by = res.candidates.set_index("ticker")
+        assert bool(by.loc["NH", "new_high"]) is True
+        assert "NL" not in by.index
+
+    # ten settled sessions of history with a -5 spread: today's 0 is wider; the streak
+    # now has breadth, partial because the history doesn't cover every counted session
+    hist = [{"date": d.strftime("%Y-%m-%d"), "n_scanned": 3, "phase2_pct": 40.0,
+             "new_highs": 5, "new_lows": 10}
+            for d in __import__("pandas").bdate_range("2026-06-01", periods=12)]
+    res2 = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0),
+                           breadth_history=hist)
+    assert res2.regime["nh_nl_expanding"] is True
+    assert res2.regime["spy_ok_breadth"] is True and res2.regime["spy_ok_partial"] is True
+
+    # the helper: Close-only frames fall back to Close; the 2-dp window gets half-cent slack
+    import pandas as pd
+    idx = pd.bdate_range(end=END, periods=5)
+    close_only = pd.DataFrame({"Close": [1.0, 2.0, 3.0, 4.0, 5.0]}, index=idx)
+    assert _new_high_low(close_only, {"week_52_high": 5.0, "week_52_low": 1.0}) == (True, False)
+    assert _new_high_low(close_only, {"week_52_high": 5.004, "week_52_low": 0.0}) == (True, False)
+    assert _new_high_low(close_only, {}) == (False, False)
+
+
+def test_breadth_store_append_replace_load():
+    """§6.82: the breadth history is one CSV row per session, replaced on a same-day
+    rerun, sorted on load, robust to a missing file and a malformed line; the spread read
+    compares with ten settled sessions back and reads None without them."""
+    import tempfile
+    from src.stock_screener.cockpit import breadth_store as bs
+
+    def row(d, nh, nl, p2=20.0):
+        return {"date": d, "n_scanned": 3900, "phase2_pct": p2, "new_highs": nh,
+                "new_lows": nl}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "b" / "breadth.csv"
+        assert bs.load(p) == []
+        bs.append(row("2026-09-23", 150, 60), p)
+        bs.append(row("2026-09-22", 120, 80), p)
+        bs.append(row("2026-09-23", 155, 58), p)               # same day: replaced
+        rows = bs.load(p)
+        assert [r["date"] for r in rows] == ["2026-09-22", "2026-09-23"]
+        assert rows[1]["new_highs"] == 155 and rows[1]["n_scanned"] == 3900
+        assert isinstance(rows[0]["phase2_pct"], float)
+        assert not list(p.parent.glob("*.tmp"))
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("garbage,line\n")
+        assert len(bs.load(p)) == 2
+        assert bs.phase2_by_date(rows) == {"2026-09-22": 20.0, "2026-09-23": 20.0}
+        try:
+            bs.append({"date": "2026-09-24"}, p)
+            raise AssertionError("a malformed row must raise")
+        except ValueError:
+            pass
+
+    import pandas as pd
+    hist = [row(d.strftime("%Y-%m-%d"), 100 + i, 50) for i, d in
+            enumerate(pd.bdate_range("2026-09-01", periods=12))]
+    today = "2026-09-30"
+    assert bs.spread_expanding(hist, today, 60) is True         # ref = 12-10 -> 102-50
+    assert bs.spread_expanding(hist, today, 52) is False
+    assert bs.spread_expanding(hist[:9], today, 999) is None
+    assert bs.spread_expanding(hist, "2026-09-05", 999) is None  # only 4 prior sessions
+
+
+def test_screen_job_appends_breadth():
+    """§6.82: the scheduled screen appends one breadth row per session after publishing
+    the scan, and a same-evening rerun replaces it rather than doubling it. A result with
+    no session (an older scan shape) writes nothing and the job still succeeds."""
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import breadth_store, cache, screen_job
+    from src.stock_screener.cockpit.scan_worker import ResultStore
+
+    class _Res:
+        n_scanned, n_passed, errors = 3927, 417, []
+        candidates = [1, 2, 3]
+        regime = {"session": "2026-09-24", "phase2_pct": 20.6, "new_highs": 212,
+                  "new_lows": 48}
+
+    class _Old:
+        n_scanned, n_passed, errors, candidates = 10, 5, [], []
+        regime = {"regime": "RISK-ON"}
+
+    with tempfile.TemporaryDirectory() as tmp, \
+            patch.object(cache, "BREADTH_CSV", Path(tmp) / "breadth.csv"):
+        with patch.object(screen_job.scan, "run_scan", lambda **kw: _Res()):
+            screen_job.run_screen(store=ResultStore())
+            screen_job.run_screen(store=ResultStore())
+        rows = breadth_store.load()
+        assert len(rows) == 1 and rows[0]["new_highs"] == 212 and rows[0]["n_scanned"] == 3927
+        with patch.object(screen_job.scan, "run_scan", lambda **kw: _Old()):
+            out = screen_job.run_screen(store=ResultStore())
+        assert out["passed"] == 5 and len(breadth_store.load()) == 1
+
+
 def test_screen_universe_rows_carry_step1_reads():
     """§6.80: the three Step-1 reads reach the candidate rows and payloads: the book's
     count in ``criteria``, ``rs_trend``/``rs_slope_13w`` and ``sma200_rising_m``."""

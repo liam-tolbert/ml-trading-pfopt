@@ -69,6 +69,10 @@ WEAK_TAPE_TARGET_PCT = (0.10, 0.12)
 # After SPY recovers, wait this many sessions before adding. 15 was chosen on 2003-13 and
 # tested on 2014-24 (HANDOFF §1); 25 was fitted on the full history. It MUST NOT be tuned.
 REGIME_CONFIRM_DAYS = 15
+# The breadth the backtest's re-entry lag also required: this share of the universe in
+# Stage 2 on each counted session. MUST equal the vendored should_generate_signals'
+# min_phase2_pct default, or the banner and the lag would disagree.
+BREADTH_MIN_PHASE2 = 15.0
 # Off: the market turn is advice only. On: the evening SPY first closes in Stage 4, the
 # plan sells this fraction of each position without a full exit. The backtest exited
 # fully; half is the book's "reduce exposure".

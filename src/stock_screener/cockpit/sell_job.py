@@ -81,9 +81,11 @@ def _market(spy_note) -> dict:
     cached bars only: this job never downloads."""
     streak = None
     try:
-        from src.stock_screener.cockpit import advisories, data_feed
+        from src.stock_screener.cockpit import advisories, breadth_store, data_feed
         spy_df = data_feed.get_many_prices(["SPY"], allow_network=False).get("SPY")
-        streak = advisories.spy_confirm_streak(spy_df)
+        hist = breadth_store.load()
+        streak = advisories.spy_confirm_streak(
+            spy_df, phase2_by_date=breadth_store.phase2_by_date(hist) if hist else None)
     except Exception:
         streak = None
     return {"spy_note": spy_note, "streak": streak}

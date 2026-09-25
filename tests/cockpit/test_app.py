@@ -70,6 +70,8 @@ def test_streamlit_app_renders_offline():
             rendered = _rendered_text(at)
             assert "Step 1 · **8/8** · RS " in rendered, rendered[:400]
             assert "RS line " in rendered and "200-day rising " in rendered
+            # §6.82: the books' breadth read in the banner (no arrow without history)
+            assert "NH/NL " in rendered and "↑" not in rendered.split("NH/NL ")[1][:6]
             at.run()                                     # rerun -> memo hit, no replay
     assert not at.exception, f"app raised on the memoized rerun: {at.exception}"
     assert calls["n"] == 1, f"scan should run once and memoize, ran {calls['n']}x"

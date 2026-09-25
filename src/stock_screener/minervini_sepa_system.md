@@ -60,6 +60,13 @@ Count how many stocks pass the template on any given day:
 
 > When few stocks pass, the market is telling you something. Don't force trades.
 
+The books' own breadth read is the count of stocks making **new 52-week highs against new
+lows**, and whether that spread is widening: a widening spread is the tell for a bottoming
+or broadening market, a narrowing one for thinning leadership. The cockpit's banner shows
+it as "NH/NL 212/48 ↑" once it has ten evenings of history, and the re-entry lag after a
+market break counts a session only when SPY is back in Stage 1–2 **and** at least 15% of
+the universe is in Stage 2 that day.
+
 ---
 
 ## Step 2 — Fundamental Filters

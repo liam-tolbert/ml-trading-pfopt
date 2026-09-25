@@ -276,7 +276,8 @@ def test_spy_confirm_streak():
 
     with patch.object(screening, "classify_phase", fake_phase(lambda a: 2 if a < 6 else 4)):
         r = advisories.spy_confirm_streak(spy)
-    assert r == {"streak": 6, "satisfied": False, "phase_now": 2}, r
+    assert r == {"streak": 6, "satisfied": False, "phase_now": 2,
+                 "breadth": False, "partial": False}, r
 
     calls.clear()
     with patch.object(screening, "classify_phase", fake_phase(lambda a: 1 if a % 2 else 2)):
@@ -288,6 +289,47 @@ def test_spy_confirm_streak():
         r = advisories.spy_confirm_streak(spy)
     assert r["streak"] == 0 and r["phase_now"] == 4
     assert advisories.spy_confirm_streak(spy.iloc[:150]) is None
+
+
+def test_spy_confirm_streak_with_breadth():
+    """§6.82 (audit Step-1 #8): with a breadth history, a session counts toward the
+    re-entry lag only when SPY was in Stage 1-2 AND at least 15% of the universe was in
+    Stage 2, as the backtest required. A session with no breadth row counts on SPY alone
+    and marks the read partial. A sub-15% session breaks the streak."""
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import advisories
+    from src.stock_screener.cockpit.doctrine import BREADTH_MIN_PHASE2, REGIME_CONFIRM_DAYS
+    from src.stock_screener.minervini_screener import screening
+
+    assert BREADTH_MIN_PHASE2 == 15.0, "MUST match should_generate_signals' default"
+    spy = pd.DataFrame({"Close": 100.0}, index=pd.bdate_range("2025-01-01", periods=300))
+    days = [d.strftime("%Y-%m-%d") for d in spy.index]
+    stage2 = lambda sub, cp: {"phase": 2}                       # noqa: E731
+
+    # every session has ample breadth -> the full lag, with breadth, not partial
+    full = {d: 22.0 for d in days}
+    with patch.object(screening, "classify_phase", stage2):
+        r = advisories.spy_confirm_streak(spy, phase2_by_date=full)
+    assert r["streak"] == REGIME_CONFIRM_DAYS and r["satisfied"] is True
+    assert r["breadth"] is True and r["partial"] is False
+
+    # the session 3 back had 12% breadth -> the streak stops at 3
+    thin = {**full, days[-4]: 12.0}
+    with patch.object(screening, "classify_phase", stage2):
+        r = advisories.spy_confirm_streak(spy, phase2_by_date=thin)
+    assert r["streak"] == 3 and r["satisfied"] is False and r["partial"] is False
+
+    # a history that starts 5 sessions ago: older sessions count on SPY alone, partial
+    recent = {d: 22.0 for d in days[-5:]}
+    with patch.object(screening, "classify_phase", stage2):
+        r = advisories.spy_confirm_streak(spy, phase2_by_date=recent)
+    assert r["streak"] == REGIME_CONFIRM_DAYS and r["partial"] is True
+
+    # no map at all: SPY only
+    with patch.object(screening, "classify_phase", stage2):
+        r = advisories.spy_confirm_streak(spy)
+    assert r["breadth"] is False and r["partial"] is False
 
 
 def test_market_turn_transition_only():

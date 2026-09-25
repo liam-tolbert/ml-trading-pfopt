@@ -233,18 +233,22 @@ def in_weak_take_profit_band(gain_pct) -> bool:
     return gain_pct is not None and lo <= float(gain_pct) <= hi + 0.005
 
 
-def spy_confirm_streak(spy_df, max_days: Optional[int] = None) -> Optional[dict]:
+def spy_confirm_streak(spy_df, max_days: Optional[int] = None,
+                       phase2_by_date: Optional[dict] = None) -> Optional[dict]:
     """Consecutive settled sessions, newest first, with SPY in Stage 1 or 2.
 
-    This is the backtest's re-entry lag on SPY alone. The backtest also required 15% of
-    the universe in Stage 2, so this is an approximation. Counting stops at ``max_days``
+    This is the backtest's re-entry lag. With ``phase2_by_date`` (``{'YYYY-MM-DD':
+    phase2_pct}``) a session also needs breadth of at least ``BREADTH_MIN_PHASE2``, as the
+    backtest required; a session missing from the map counts on SPY alone and sets
+    ``partial``. Without the map the count is SPY only. Counting stops at ``max_days``
     (default ``REGIME_CONFIRM_DAYS``): older bars can't change the answer. Returns
-    ``{streak, satisfied, phase_now}``; None under 200 bars."""
+    ``{streak, satisfied, phase_now, breadth, partial}``; None under 200 bars."""
     if spy_df is None or len(spy_df) < 200:
         return None
+    import pandas as pd
     from src.stock_screener.minervini_screener.screening import classify_phase
     cap = doctrine.REGIME_CONFIRM_DAYS if max_days is None else int(max_days)
-    streak, phase_now = 0, None
+    streak, phase_now, partial = 0, None, False
     for k in range(cap):
         sub = spy_df.iloc[:len(spy_df) - k]
         if len(sub) < 200:
@@ -254,8 +258,16 @@ def spy_confirm_streak(spy_df, max_days: Optional[int] = None) -> Optional[dict]
             phase_now = ph
         if ph not in (1, 2):
             break
+        if phase2_by_date is not None:
+            day = pd.Timestamp(sub.index[-1]).strftime("%Y-%m-%d")
+            p2 = phase2_by_date.get(day)
+            if p2 is None:
+                partial = True
+            elif float(p2) < doctrine.BREADTH_MIN_PHASE2:
+                break
         streak += 1
-    return {"streak": streak, "satisfied": streak >= cap, "phase_now": phase_now}
+    return {"streak": streak, "satisfied": streak >= cap, "phase_now": phase_now,
+            "breadth": phase2_by_date is not None, "partial": partial}
 
 
 def market_turn(spy_note, prior_market: Optional[dict] = None,

@@ -18,6 +18,7 @@ WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (entry dic
 TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports + entry/sell plans
 LOGS_DIR = CACHE_DIR / "logs"                   # dated run logs, pruned by runlog.RETENTION_DAYS
 LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"     # newest completed ScanResult (scan_worker)
+BREADTH_CSV = CACHE_DIR / "breadth.csv"         # one row per settled session (breadth_store)
 
 # MUST be bumped whenever the persisted scan dict changes shape. It lives here, not in
 # scan_worker, because the weekend hunt reads the same pickle. With two copies, the writer
