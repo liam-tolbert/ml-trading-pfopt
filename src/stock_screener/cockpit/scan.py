@@ -30,8 +30,9 @@ from src.stock_screener.minervini_screener.screening import (
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
-from .doctrine import DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL, NO_CHASE_PCT, RS_FLOOR
-from .indicators import (relative_measured_volatility,
+from .doctrine import (ADV_DAYS, DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL, NO_CHASE_PCT,
+                       RS_FLOOR)
+from .indicators import (dollar_adv, relative_measured_volatility,
                          bollinger_bandwidth_percentile_last, ttm_squeeze)
 # Cockpit VCP detector, a drop-in with the same dict schema. The vendored
 # detect_vcp_pattern starves strong uptrends: cc=0 for ~84% of candidates on full_us.
@@ -431,6 +432,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                      else bool(_rs_at_high and _w52 and cp < _w52))
             rs_trend = rs_line_trend(df, spy["Close"])
             sma200_m = sma200_rising_months(df)
+            adv_usd = dollar_adv(df, ADV_DAYS)
             # RMV: an advisory base-tightness read for Step 4. It does NOT feed the
             # pivot/stop/target math.
             levels["rmv"] = _rmv_display(df, vcp)
@@ -466,6 +468,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "vol_confirmed": levels["volume_confirmed"],
                 "pct_to_pivot": _fmt(levels["pct_to_pivot"]),
                 "day_range": vcp.get("median_tr_pct"),
+                "adv_musd": round(adv_usd / 1e6, 2) if adv_usd else None,
                 "pivot": round(levels["pivot"], 2),
                 "stop": round(levels["stop"], 2),
                 "target": round(levels["target"], 2),
@@ -475,7 +478,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "breakout": breakout, "levels": levels, "fundamentals": fund,
                 "step2": s2, "rs": rsr, "rs_nh": rs_nh, "template": tmpl,
                 "book_template": book, "rs_trend": rs_trend,
-                "sma200_rising_m": sma200_m, "earnings_in": earnings_in,
+                "sma200_rising_m": sma200_m, "adv_usd": adv_usd,
+                "earnings_in": earnings_in,
             }
         except Exception as e:                                  # never let one name kill the scan
             errors.append(f"{t}: {e}")

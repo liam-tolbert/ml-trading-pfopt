@@ -217,6 +217,9 @@ experience.
 - Example: $100,000 account, 1% risk, entry at $50, stop at 8% below ($46):
   `$100,000 × 0.01 / ($50 × 0.08) = $2,500 position` (~50 shares)
 - This keeps any single loss manageable regardless of how wrong you are
+- Liquidity: one order never exceeds **2% of the stock's average daily dollar volume**
+  (20 sessions). A $2M-a-day name allows a $40k order. The trade plan clamps the share
+  count and says so; a full position needs a more liquid name
 
 ### Profit targets and exits
 

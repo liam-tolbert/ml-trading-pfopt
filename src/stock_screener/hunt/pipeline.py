@@ -28,11 +28,13 @@ import pandas as pd
 from src.stock_screener.cockpit.cache import (CACHE_DIR, LAST_SCAN_PKL as _LAST_SCAN_PKL,
                                               SCAN_PERSIST_VERSION as _PERSIST_VERSION,
                                               WATCHLIST_JSON)
-from src.stock_screener.cockpit.doctrine import (EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
+from src.stock_screener.cockpit.doctrine import (ADV_DAYS, MAX_ORDER_ADV_PCT,
+                                                 EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
                                                  NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS,
                                                  VOL_CONFIRM_RATIO)
 from src.stock_screener.cockpit.advisories import stop_room, typical_day_range
-from src.stock_screener.cockpit.indicators import prior_volume_average, volume_ratio
+from src.stock_screener.cockpit.indicators import (dollar_adv, prior_volume_average,
+                                                   volume_ratio)
 
 # ---- rules (sources in the module docstring) ------------------------------ #
 MIN_RS = RS_FLOOR              # the book's eighth criterion; one number everywhere
@@ -147,6 +149,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         s2 = p.get("step2") or {}
         checks = s2.get("checks") or {}
         fu = p.get("fundamentals") or {}
+        adv = dollar_adv(df, ADV_DAYS)
         rows.append({
             "rank": rank, "ticker": t, "wl": int(t in wl),
             "q": float(c["vcp_quality"]), "rs": int(c["rs"]),
@@ -156,7 +159,9 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "close": round(float(close[-1]), 2), "pivot": round(piv, 2),
             "stop": round(float(lev["stop"]), 2),
             "vs_pivot_pct": round(vs_pivot, 2),
-            "adv_musd": round(float((df["Close"] * df["Volume"]).tail(20).mean()) / 1e6, 2),
+            "adv_musd": round(adv / 1e6, 2) if adv else None,
+            # the biggest order the liquidity rule allows
+            "max_order_usd": round(MAX_ORDER_ADV_PCT * adv) if adv else None,
             "dist_days": dist_days, "gaps8": gaps8,
             "depths": "->".join(f"{d:.0f}" for d in depths),
             "n_legs": len(depths),

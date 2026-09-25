@@ -130,8 +130,8 @@ These levels are advisory — place the order in your broker.
 """
 
 from src.stock_screener.cockpit.doctrine import (DEFAULT_STOP_FROM_PIVOT, EARNINGS_SOON_DAYS,
-                                                 MAX_LOSS_FROM_FILL, REGIME_CONFIRM_DAYS,
-                                                 RS_FLOOR)
+                                                 MAX_LOSS_FROM_FILL, MAX_ORDER_ADV_PCT,
+                                                 REGIME_CONFIRM_DAYS, RS_FLOOR)
 
 
 
@@ -158,6 +158,7 @@ READABLE_COLS = {
     "vol_confirmed": "Vol confirmed",
     "pct_to_pivot": "Distance to pivot (%)",
     "day_range": "Typical day (%)",
+    "adv_musd": "Avg $ volume (M)",
     "pivot": "Pivot ($)",
     "stop": "Stop ($)",
     "target": "Target ($)",
@@ -214,6 +215,9 @@ COL_HELP = {
                  "over the last ~2 months, as % of price. A stop only one or two of these "
                  "below your buy gets hit by normal noise before the trade can work — a "
                  "wild mover needs a wider stop (and so a smaller position), or a pass.",
+    "adv_musd": "Average daily dollar volume over the last 20 sessions, in $M. One order "
+                "stays within 2% of it: a $2M-a-day name allows a $40k order. Bigger orders "
+                "move the price against you, so the trade plan clamps the share count.",
     "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
     "stop": "Advisory stop-loss, ~7–8% below the pivot. The 10% maximum loss is measured "
             "from the price you PAY, so a trade plan raises this stop for a fill higher in "
@@ -230,7 +234,8 @@ COL_GROUPS = [
                                     "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
-                               "pct_to_pivot", "day_range", "pivot", "stop", "target"]),
+                               "pct_to_pivot", "day_range", "adv_musd", "pivot", "stop",
+                               "target"]),
 ]
 DISPLAY_ORDER = [c for _, cols in COL_GROUPS for c in cols]
 
@@ -940,6 +945,8 @@ with st.sidebar:
                         _fl = " ⚠︎ extended" if _o["extended"] else ""
                         if _o.get("capped"):
                             _fl += " ⚠︎ capped"
+                        if _o.get("adv_capped"):
+                            _fl += " ⚠︎ volume-capped"
                         if _o.get("pivot_frozen") and _o.get("pivot"):
                             _fl += f" · 📌 pivot {_o['pivot']:.2f}"   # stop/zone off frozen level
                         _ew = _earnings_flag(_o.get("earnings_in"))
@@ -1003,6 +1010,18 @@ with st.sidebar:
                                     f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the "
                                     f"{'limit' if _is_lim else 'price'}, the most a fill "
                                     "up there may lose")
+                    _adv = _o.get("adv_usd")
+                    if (_adv and _on and _held_sh <= 0
+                            and _o["shares"] * _paid > MAX_ORDER_ADV_PCT * _adv):
+                        # An edited limit can push the notional past the cap the builder
+                        # applied; submit and arming refuse it.
+                        _cA.caption(f"  ↳ :red[{_o['shares']} sh at {_paid:,.2f} is "
+                                    f"{_o['shares'] * _paid / _adv * 100:.1f}% of a day's $ "
+                                    f"volume — max {MAX_ORDER_ADV_PCT * 100:.0f}%]")
+                    elif _o.get("adv_capped") and _on and _held_sh <= 0:
+                        _cA.caption(f"  ↳ capped by volume: {_o['shares']} sh = "
+                                    f"{MAX_ORDER_ADV_PCT * 100:.0f}% of a day's $ volume "
+                                    f"(${_adv / 1e6:.1f}M/day)")
                     if (_is_lim and _on and _held_sh <= 0 and _edlim
                             and _edlim < _o["price"]):
                         _cA.caption(f"  ↳ limit {_edlim:,.2f} < last close {_o['price']:,.2f} "
@@ -1020,6 +1039,11 @@ with st.sidebar:
                     st.caption("⚠︎ *capped* = the risk-sized quantity hit the 10%-of-equity "
                                "order cap and was clamped down, so the realized risk sits below "
                                "your target. Lower the risk % or tighten the stop to fit.")
+                if any(_o.get("adv_capped") for _o in _buys):
+                    st.caption(f"⚠︎ *volume-capped* = the share count was reduced to "
+                               f"{MAX_ORDER_ADV_PCT * 100:.0f}% of the name's average daily $ "
+                               "volume. A bigger order moves the price against you; a full "
+                               "position needs a more liquid name.")
                 if any(_earnings_flag(_o.get("earnings_in")) for _o in _buyable):
                     st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
                                f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "

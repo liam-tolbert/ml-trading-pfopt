@@ -1160,5 +1160,55 @@ def test_trade_panel_stop_captions():
         assert "derived stop 47.00 — 6.0% below the price" in rendered
 
 
+def test_trade_panel_adv_caption():
+    """§6.81 in the panel: a volume-capped row says so with the name's daily $ volume, and
+    a limit edited past the cap turns red (submit and arming would refuse it)."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_trade_panel_adv_caption (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import scan as scanmod, cache
+
+    prices, spy, _ = _synthetic_slice()
+    result = screen_universe(list(prices), prices, spy, get_fundamentals=None,
+                             cfg=ScanConfig(min_rs=0.0))
+    _wl = [{"ticker": t, "judged_pivot": None, "date_added": None,
+            "pivot_source": None, "note": ""} for t in ("THIN", "OVER")]
+    _acct = {"account_number": "PA000123", "equity": 100000.0, "using_dedicated": True}
+    app_path = str(ROOT / "src" / "stock_screener" / "cockpit" / "app.py")
+    plan = [
+        {"ticker": "THIN", "shares": 38, "price": 100.0, "pivot": 100.0,
+         "est_value": 3990.0, "extended": False, "capped": False, "stop_price": 94.5,
+         "limit_price": 105.0, "earnings_in": None, "adv_usd": 200_000.0,
+         "adv_pct": 0.02, "adv_capped": True},
+        {"ticker": "OVER", "shares": 40, "price": 100.0, "pivot": 100.0,
+         "est_value": 4400.0, "extended": False, "capped": False, "stop_price": 99.0,
+         "limit_price": 110.0, "earnings_in": None, "adv_usd": 200_000.0,
+         "adv_pct": 0.022, "adv_capped": False},
+    ]
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(scanmod, "run_scan", return_value=result), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+        at = AppTest.from_file(app_path, default_timeout=60)
+        at.session_state["watchlist"] = list(_wl)
+        at.session_state["trade_build_n"] = 1
+        at.session_state["trade_plan"] = {
+            "plan": plan, "skipped": [], "account": dict(_acct), "held": {},
+            "build_ts": 1, "order_type": "limit",
+            "derived": {"stop_pct": None, "reason": "default stop"}}
+        at.run()
+        assert not at.exception, f"app raised: {at.exception}"
+        rendered = _rendered_text(at)
+        assert "capped by volume: 38 sh = 2% of a day's $ volume ($0.2M/day)" in rendered, \
+            rendered[-800:]
+        assert "40 sh at 110.00 is 2.2% of a day's $ volume — max 2%" in rendered
+        assert "*volume-capped*" in rendered
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "app"))

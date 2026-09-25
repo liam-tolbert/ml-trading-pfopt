@@ -16,6 +16,12 @@ from __future__ import annotations
 # hunt MUST all read this one number.
 RS_FLOOR = 70
 
+# Liquidity: one order MUST stay within this share of the name's average daily dollar
+# volume, measured over ADV_DAYS sessions. A bigger order moves the price against you.
+# The plan builder clamps the share count; submit and arming refuse a row above it.
+ADV_DAYS = 20
+MAX_ORDER_ADV_PCT = 0.02
+
 # No entry within ~3 weeks of a scheduled report: an earnings gap is an unpriced risk.
 # The app warns; the hunt blocks.
 EARNINGS_SOON_DAYS = 21

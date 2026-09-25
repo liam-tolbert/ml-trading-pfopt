@@ -121,6 +121,12 @@ def test_diagnostics_and_gates():
     # None, never a KeyError.
     ok("step-1 reads absent from an older scan read as None",
        a["rs_trend"] is None and a["sma200_m"] is None)
+    # §6.81: ADV through the shared helper, and the liquidity ceiling beside it
+    _df = b.result.payloads["AAA"]["df"]
+    _adv = float((_df["Close"] * _df["Volume"]).tail(20).mean())
+    ok("adv_musd is the 20-day dollar volume in $M", abs(a["adv_musd"] - _adv / 1e6) < 0.01)
+    ok("max_order_usd is 2% of the 20-day dollar volume",
+       abs(a["max_order_usd"] - 0.02 * _adv) < 1.0)
 
     verdicts = {t: {"ticker": t, "verdict": "PASS", "notes": ""} for t in diag.ticker}
     g = pl.gates(diag, verdicts, min_fund=0)

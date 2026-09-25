@@ -987,6 +987,99 @@ def test_build_buy_plan_fill_floor():
     assert p[0]["stop_price"] is None
 
 
+def test_build_buy_plan_adv_cap():
+    """§6.81 (audit Step-1 #4): one order stays within 2% of the name's 20-day dollar
+    volume, in every sizing mode. STRW's ~$100k order was ~12% of its ADV and moved the
+    price 1.5%. The cap reads the payload's adv_usd, else the frame; held rows are exempt;
+    no volume read means no clamp; a clamp to under one share skips the name."""
+    import pandas as pd
+    from src.stock_screener.cockpit.trade import build_buy_plan
+    from src.stock_screener.cockpit.doctrine import MAX_ORDER_ADV_PCT
+
+    def _payload(price, adv_usd=None, bars=3, vol=1000):
+        idx = pd.bdate_range(end=pd.Timestamp("2026-06-30"), periods=bars)
+        df = pd.DataFrame({"Open": price, "High": price, "Low": price,
+                           "Close": price, "Volume": vol}, index=idx)
+        lv = {"pivot": price, "buy_zone": (price, price * 1.05),
+              "stop": round(price * 0.925, 2)}
+        p = {"df": df, "levels": lv}
+        if adv_usd is not None:
+            p["adv_usd"] = adv_usd
+        return p
+
+    thin = {"THIN": _payload(100.0, adv_usd=200_000.0)}      # 2% of a day = $4,000 = 40 sh
+    # pct: 5% of $100k wants 50 sh -> 40, flagged, 2.0% of a day
+    p, _ = build_buy_plan(["THIN"], thin, mode="pct", amount=5.0, equity=100_000.0)
+    assert p[0]["shares"] == 40 and p[0]["adv_capped"] is True
+    assert p[0]["adv_usd"] == 200_000 and abs(p[0]["adv_pct"] - MAX_ORDER_ADV_PCT) < 1e-9
+    # shares: an explicit 100 is clamped too — the count is the user's, the market isn't
+    p, _ = build_buy_plan(["THIN"], thin, mode="shares", amount=100)
+    assert p[0]["shares"] == 40 and p[0]["adv_capped"] is True
+    # risk: $1,000 budget / $7.5 per share = 133 sh; the equity cap clamps to 100 first,
+    # then the volume cap to 40 — both flags set, the tighter one wins
+    p, _ = build_buy_plan(["THIN"], thin, mode="risk", amount=1.0, equity=100_000.0)
+    assert p[0]["shares"] == 40 and p[0]["adv_capped"] is True and p[0]["capped"] is True
+    # under the cap: unflagged, adv_pct reported
+    p, _ = build_buy_plan(["THIN"], thin, mode="shares", amount=10)
+    assert p[0]["shares"] == 10 and p[0]["adv_capped"] is False
+    assert abs(p[0]["adv_pct"] - 1000.0 / 200_000.0) < 1e-9
+
+    # limit plan: the cap binds on the limit (the worst-case fill), 4000 / 105 = 38 sh
+    p, _ = build_buy_plan(["THIN"], thin, mode="shares", amount=100, order_type="limit")
+    assert p[0]["shares"] == 38 and p[0]["limit_price"] == 105.0
+
+    # held: the re-arm row is never clamped
+    p, _ = build_buy_plan(["THIN"], thin, mode="shares", amount=100, held={"THIN": 100})
+    assert p[0]["shares"] == 100 and p[0]["adv_capped"] is False
+
+    # no volume read (a 3-bar frame, no adv_usd): no clamp, adv_pct None
+    p, _ = build_buy_plan(["A"], {"A": _payload(100.0)}, mode="shares", amount=100)
+    assert p[0]["shares"] == 100 and p[0]["adv_capped"] is False
+    assert p[0]["adv_usd"] is None and p[0]["adv_pct"] is None
+
+    # from the frame: 25 bars at 100 × 500 sh = $50,000/day -> 2% = $1,000 = 10 sh
+    p, _ = build_buy_plan(["F"], {"F": _payload(100.0, bars=25, vol=500)},
+                          mode="shares", amount=100)
+    assert p[0]["shares"] == 10 and p[0]["adv_usd"] == 50_000
+
+    # a clamp to under one share skips the name with the volume named
+    _, s = build_buy_plan(["DEAD"], {"DEAD": _payload(100.0, adv_usd=4_000.0)},
+                          mode="shares", amount=5)
+    assert s and "$ volume" in s[0]["reason"] and "under one share" in s[0]["reason"]
+
+
+def test_submit_buy_plan_adv_guard():
+    """§6.81: submit refuses a row whose notional exceeds 2% of its adv_usd, judged on the
+    limit (editable after Build) else the price; at the cap it goes through; a row with no
+    adv_usd is not judged; the held re-arm path never applies it."""
+    from alpaca.trading.enums import OrderType
+
+    FakeClient, _Order = _submit_fakes()
+    _entry, _run = _submit_entry, _run_submit
+
+    # 40 sh at a 110 limit = $4,400 on a $200k/day name = 2.2% -> skipped
+    fa = FakeClient()
+    outA = _run([_entry("THIN", 40, 100.0, 94.5, limit=110.0, adv_usd=200_000.0)],
+                fa)["results"][0]
+    assert outA["status"] == "skipped" and not fa.submitted
+    assert "2.2% of a day's $ volume" in outA["detail"] and "max 2%" in outA["detail"]
+
+    # exactly at the cap: 40 sh × 100 = $4,000 -> submitted
+    fb = FakeClient()
+    assert _run([_entry("EDGE", 40, 100.0, 94.5, adv_usd=200_000.0)],
+                fb)["results"][0]["status"] == "submitted"
+
+    # no adv_usd on the row (an older plan): not judged ($9,000 stays under the equity cap)
+    fc = FakeClient()
+    assert _run([_entry("OLD", 90, 100.0, 94.5)], fc)["results"][0]["status"] == "submitted"
+
+    # held: re-arm only, never an order into the market
+    fd = FakeClient(positions={"HELD": "40"},
+                    open_orders=[_Order("lo-1", "HELD", OrderType.STOP, stop_price=80.0)])
+    outD = _run([_entry("HELD", 400, 100.0, 94.5, adv_usd=200_000.0)], fd)["results"][0]
+    assert outD["status"] == "stop_only"
+
+
 def test_submit_buy_plan_max_loss_guard():
     """§6.72: submit re-checks the max loss against the HIGHEST possible fill (the edited
     limit, else the price) — both levels are editable after Build, and the unattended

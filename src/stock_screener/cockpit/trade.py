@@ -21,9 +21,10 @@ import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # doctrine is constants-only and imports nothing, so this module stays import-light.
-from .doctrine import (DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR, DERIVED_STOP_MIN_WINS,
-                       DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS, MAX_LOSS_FROM_FILL,
-                       NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
+from .doctrine import (ADV_DAYS, DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR,
+                       DERIVED_STOP_MIN_WINS, DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS,
+                       MAX_LOSS_FROM_FILL, MAX_ORDER_ADV_PCT, NO_CHASE_PCT, RS_FLOOR,
+                       VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 
 MIN_TRADE_USD = 50.0        # MUST match alpaca_trader.MIN_TRADE_USD. Copied so the pure
                             # plan builder needn't import alpaca-py.
@@ -43,6 +44,7 @@ TRAIL_GAIN = 0.20           # gain past which, "well in profit", trail the 50-da
 SELL_STRENGTH_GAIN = 0.20   # gain past which to consider selling part into strength
 HEAVY_VOL_RATIO = VOL_CONFIRM_RATIO   # a heavy-volume day IS the breakout-confirmation bar
 EARNINGS_CUSHION_MIN = 0.08  # min profit cushion to comfortably hold a position through a report
+POSITION_ADV_WARN_PCT = 0.05  # a position this big vs a day's $ volume takes days to exit
 # Suggested-stop bases for the re-arm action; "auto" picks per position by its gain.
 STOP_BASES = ("auto", "initial", "breakeven", "sma50")
 
@@ -452,7 +454,9 @@ def position_advisories(pos: dict) -> List[str]:
 
     The "2× initial risk" rule assumes an ``INITIAL_STOP_PCT`` stop because the entry stop
     isn't stored, so it is a nudge, not exact. The earnings rules fire only for a known
-    report within ``EARNINGS_SOON_DAYS`` (``earnings_in`` >= 0) and a known gain."""
+    report within ``EARNINGS_SOON_DAYS`` (``earnings_in`` >= 0) and a known gain. The
+    liquidity rule fires when ``market_value`` is at least ``POSITION_ADV_WARN_PCT`` of
+    ``adv_usd``."""
     out: List[str] = []
     gain = pos.get("gain_pct")
     avg_entry = pos.get("avg_entry")
@@ -476,6 +480,11 @@ def position_advisories(pos: dict) -> List[str]:
         elif gain < EARNINGS_CUSHION_MIN:
             out.append(f"⚠ Earnings in {int(ei)}d with only a {gain * 100:.0f}% cushion — "
                        "consider trimming before the report.")
+    mv, adv = pos.get("market_value"), pos.get("adv_usd")
+    if mv and adv and mv / adv >= POSITION_ADV_WARN_PCT:
+        out.append(f"Position ≈ {mv / adv * 100:.0f}% of a day's $ volume — an exit at "
+                   f"{MAX_ORDER_ADV_PCT * 100:.0f}%/day takes ~"
+                   f"{math.ceil(mv / adv / MAX_ORDER_ADV_PCT)} sessions.")
     if gain is not None and gain >= SELL_STRENGTH_GAIN:
         out.append(f"Up {gain * 100:.0f}% — consider selling part into strength.")
     if pos.get("below_sma50"):
@@ -705,7 +714,8 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     Returns ``(plan, skipped)``; raises ValueError for an unknown ``mode`` or
     ``order_type``. Each plan entry has ticker, shares, price, pivot, pivot_frozen,
     est_value, extended, capped, stop_price, stop_floored, stop_derived, limit_price,
-    earnings_in and day_range_pct. Each skipped entry is ``{ticker, reason}``. A name is
+    earnings_in, day_range_pct, adv_usd, adv_pct and adv_capped. Each skipped entry is
+    ``{ticker, reason}``. A name is
     skipped when it isn't in the current scan, has no current price, sizes to < 1 share, or
     rounds to a notional under the $50 floor in a dollar-denominated mode (pct, dollars,
     risk). ``"shares"`` is exempt from the floor: the count is explicit. pct and risk skip
@@ -720,6 +730,12 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
     ``earnings_in`` (calendar days to the next report; None = unknown) passes through for
     an advisory warning, never a skip. ``day_range_pct`` is the name's typical daily range
     (%), for judging the stop against noise.
+
+    **Liquidity.** A non-held buy is clamped, in every mode, to ``MAX_ORDER_ADV_PCT`` of
+    the name's average daily dollar volume (``payload["adv_usd"]``, else computed from
+    ``df`` over ``ADV_DAYS`` bars); ``adv_capped`` marks it and ``adv_pct`` is the order's
+    share of a day. A clamp to under one share skips the name. Without a volume read
+    there is no clamp and ``adv_pct`` is None.
 
     With ``max_bar_age_days`` set, a name whose freshest bar is more than that many trading
     days older than ``asof`` (default today) is skipped as stale. The app pairs this with
@@ -766,6 +782,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
         import pandas as pd
         _stale_ref = (pd.Timestamp(asof).normalize() if asof is not None
                       else pd.Timestamp.today().normalize())
+    from .indicators import dollar_adv as _dollar_adv
     plan: List[dict] = []
     skipped: List[dict] = []
     for t in dict.fromkeys(tickers):
@@ -806,6 +823,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             pivot, buy_hi = bz[0], bz[1]
             stop = lv.get("stop")
         capped = False
+        adv = payload.get("adv_usd") or _dollar_adv(payload.get("df"), ADV_DAYS)
 
         # Size on the worst-case fill: ~the current price for a market order, the limit for a
         # buy limit, which never fills higher.
@@ -873,6 +891,17 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
         else:                                                        # "shares"
             shares = int(amount)
 
+        adv_capped = False
+        if adv and not (held and held.get(t, 0) > 0):
+            adv_cap = int(MAX_ORDER_ADV_PCT * adv / basis)
+            if shares > adv_cap:
+                shares, adv_capped = adv_cap, True
+                if shares < 1:
+                    skipped.append({"ticker": t, "reason":
+                                    f"{MAX_ORDER_ADV_PCT * 100:.0f}% of a day's $ volume "
+                                    f"(${adv / 1e6:.1f}M) is under one share"})
+                    continue
+
         # A held name that fails a sizing gate still needs its stop maintained.
         _held_fallback = bool(held and held.get(t, 0) > 0 and stop and stop > 0)
         if shares < 1:
@@ -903,6 +932,9 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             "limit_price": round(limit, 2) if limit else None,
             "earnings_in": payload.get("earnings_in"),
             "day_range_pct": (payload.get("vcp") or {}).get("median_tr_pct"),
+            "adv_usd": round(float(adv)) if adv else None,
+            "adv_pct": round(est_value / adv, 4) if adv else None,
+            "adv_capped": adv_capped,
         })
     return plan, skipped
 
@@ -1189,6 +1221,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
       With ``attach_stop``, a buy whose stop is more than ``MAX_LOSS_FROM_FILL`` below its
       highest possible fill (the limit, else the last price) is skipped. The stop and the
       limit are editable after Build, so this MUST re-check what the builder applied.
+      A buy whose notional exceeds ``MAX_ORDER_ADV_PCT`` of its ``adv_usd`` is skipped for
+      the same reason; a row without ``adv_usd`` is not judged.
 
       **Build-time intent is binding.** A ``rearm_only`` row (held at Build; the preview
       offered no buy) or a ``stop_only`` row whose position has since closed is SKIPPED,
@@ -1285,6 +1319,13 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
             if _est > max_allowed:
                 results.append({**o, "status": "skipped",
                                 "detail": f"exceeds 10% of equity (${max_allowed:,.0f} cap)"})
+                continue
+            _adv = o.get("adv_usd")
+            if _adv and _est > MAX_ORDER_ADV_PCT * float(_adv):
+                results.append({**o, "status": "skipped",
+                                "detail": f"order is {_est / float(_adv) * 100:.1f}% of a "
+                                          f"day's $ volume (${float(_adv) / 1e6:.1f}M/day) "
+                                          f"— max {MAX_ORDER_ADV_PCT * 100:.0f}%"})
                 continue
             if attach_stop:
                 # A limit BUY fills at or below the limit, near the price when marketable,
@@ -1443,7 +1484,7 @@ def fetch_positions() -> dict:
                        if q is not None]
         current_stop = max(stop_prices) if stop_prices else None
 
-        sma_50 = sma_20 = last_close = volume_ratio = None
+        sma_50 = sma_20 = last_close = volume_ratio = adv_usd = None
         df = frames.get(sym)
         if df is None and data_feed is not None:
             df = frames.get(data_feed.normalize(sym))
@@ -1461,8 +1502,9 @@ def fetch_positions() -> dict:
                     sma_20 = float(s.iloc[-1])
             # The shared doctrine read, so the heavy-volume flag here and the trigger
             # job's confirmation can never diverge.
-            from .indicators import volume_ratio as _vr
+            from .indicators import dollar_adv as _dadv, volume_ratio as _vr
             volume_ratio = _vr(df, VOL_AVG_DAYS)
+            adv_usd = _dadv(df, ADV_DAYS)
 
         gain_pct = _attr_float(p, "unrealized_plpc")
         if gain_pct is None and avg_entry and price:
@@ -1489,7 +1531,7 @@ def fetch_positions() -> dict:
             "lastday_price": _attr_float(p, "lastday_price"),
             "current_stop": current_stop, "has_stop": current_stop is not None,
             "sma_50": sma_50, "sma_20": sma_20, "last_close": last_close,
-            "volume_ratio": volume_ratio,
+            "volume_ratio": volume_ratio, "adv_usd": adv_usd,
             "gain_pct": gain_pct, "below_sma50": below_sma50,
             "next_earnings": next_earnings, "earnings_in": earnings_in,
             "stage": position_stage(gain_pct),

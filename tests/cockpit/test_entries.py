@@ -120,6 +120,27 @@ def test_build_entry_plan_rejects_over_max_loss():
     assert any("WIDE" in n and "≥ 47.25" in n for n in plan["notes"]), plan["notes"]
 
 
+def test_build_entry_plan_rejects_over_adv():
+    """§6.81: arming refuses a row whose shares × limit exceed 2% of its adv_usd, and
+    carries adv_usd on the armed row so the morning executor's submit re-checks it. A row
+    without adv_usd is not judged."""
+    from src.stock_screener.cockpit import entries
+
+    rows = [
+        {"ticker": "THIN", "shares": 50, "price": 100.0, "limit_price": 105.0,
+         "stop_price": 95.0, "adv_usd": 200_000.0},          # $5,250 = 2.6% of a day
+        {"ticker": "EDGE", "shares": 38, "price": 100.0, "limit_price": 105.0,
+         "stop_price": 95.0, "adv_usd": 200_000.0},          # $3,990 = 2.0%
+        {"ticker": "OLD", "shares": 500, "price": 100.0, "limit_price": 105.0,
+         "stop_price": 95.0},                                # no volume read
+    ]
+    plan = entries.build_entry_plan(rows, today="2026-08-20")
+    armed = {r["ticker"]: r for r in plan["rows"]}
+    assert set(armed) == {"EDGE", "OLD"}, armed
+    assert armed["EDGE"]["adv_usd"] == 200_000.0 and armed["OLD"]["adv_usd"] is None
+    assert any("THIN" in n and "2.6% of a day's $ volume" in n for n in plan["notes"])
+
+
 def test_entry_plan_persistence_freshness_and_disarm():
     """#24 plan files + the weekend-safe freshness rule (NOT the sells version): a
     Friday/Saturday/Sunday plan executes Monday — exactly one business day inside

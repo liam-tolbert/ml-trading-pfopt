@@ -39,6 +39,19 @@ def volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
         return None
 
 
+def dollar_adv(df: Optional[pd.DataFrame], days: int) -> Optional[float]:
+    """Average daily dollar volume: the mean of ``Close × Volume`` over the last ``days``
+    bars. None without Close/Volume, under ``days`` bars, or when the mean isn't a
+    positive number."""
+    try:
+        if df is None or len(df) < days:
+            return None
+        v = float((df["Close"] * df["Volume"]).tail(days).mean())
+        return v if np.isfinite(v) and v > 0 else None
+    except Exception:
+        return None
+
+
 def _true_range(df: pd.DataFrame) -> pd.Series:
     """Raw true range per bar: max of (H-L, |H-prev C|, |L-prev C|), in price units. The
     Keltner ATR in :func:`ttm_squeeze` needs it unscaled; :func:`true_range_pct` is the

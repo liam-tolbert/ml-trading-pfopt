@@ -159,6 +159,16 @@ def test_position_advisories():
         assert not any("below your cost" in a for a in position_advisories(
             {**base, "gain_pct": 0.01, "avg_entry": 110.0, "current_stop": ok_stop}))
 
+    # §6.81: a position at 12% of a day's dollar volume takes ~6 sessions to exit at the
+    # 2%/day cap; under 5%, or with no volume read, stays silent.
+    big = position_advisories({**base, "gain_pct": 0.01, "market_value": 120_000.0,
+                               "adv_usd": 1_000_000.0})
+    assert any("12% of a day's $ volume" in a and "~6 sessions" in a for a in big), big
+    for quiet in ({**base, "gain_pct": 0.01, "market_value": 40_000.0,
+                   "adv_usd": 1_000_000.0},
+                  {**base, "gain_pct": 0.01, "market_value": 120_000.0}):
+        assert not any("$ volume" in a for a in position_advisories(quiet)), quiet
+
 
 def test_sell_pillars():
     """§6.52: the Step-E doctrine as per-position P1-P4 statuses (pure, pinned today).

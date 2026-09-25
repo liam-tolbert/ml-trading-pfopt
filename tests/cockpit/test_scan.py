@@ -360,6 +360,26 @@ def test_sma200_rising_months():
     assert sma200_rising_months(None) is None
 
 
+def test_dollar_adv():
+    """§6.81: average daily dollar volume over the last N bars; None without Volume,
+    under N bars, or when the mean isn't positive. The scan row carries it in $M."""
+    import pandas as pd
+    from src.stock_screener.cockpit.indicators import dollar_adv
+
+    idx = pd.bdate_range(end="2026-06-30", periods=30)
+    df = pd.DataFrame({"Close": 10.0, "Volume": 100_000}, index=idx)
+    assert dollar_adv(df, 20) == 1_000_000.0
+    assert dollar_adv(df.iloc[-19:], 20) is None
+    assert dollar_adv(df.drop(columns=["Volume"]), 20) is None
+    assert dollar_adv(df.assign(Volume=0), 20) is None
+    assert dollar_adv(None, 20) is None
+
+    prices, spy, _ = _synthetic_slice()
+    res = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    assert "adv_musd" in res.candidates.columns
+    assert all("adv_usd" in p for p in res.payloads.values())
+
+
 def test_screen_universe_rows_carry_step1_reads():
     """§6.80: the three Step-1 reads reach the candidate rows and payloads: the book's
     count in ``criteria``, ``rs_trend``/``rs_slope_13w`` and ``sma200_rising_m``."""

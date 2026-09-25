@@ -34,8 +34,10 @@ mamba run -n ml-trading python -m src.stock_screener.hunt <cmd>
    `data/cockpit/hunt/<date>/charts/`.
 4. **Review every sheet** (Read each PNG). Judge each ticker against Step 3:
    contractions tightening, volume drying up on pullbacks, higher lows, base
-   depth sane, clear pivot, no distribution — plus liquidity (be suspicious
-   under ~$2M ADV), penny/illiquid character, air pockets, stale or broken
+   depth sane, clear pivot, no distribution — plus liquidity (an order MUST stay
+   within 2% of the 20-day dollar volume; `max_order_usd` in the diagnostics is the
+   ceiling, and a ceiling under a full position is a `PASS-` at best),
+   penny/illiquid character, air pockets, stale or broken
    pivots. Verdict per ticker: `PASS` (chart confirms), `PASS-` (real setup,
    named caveat), `FAIL` (price action contradicts the label). Notes are one
    dense line naming the reason, e.g. `"12-9-9-4 tightening, vol dry-up, -2% to pivot"`.

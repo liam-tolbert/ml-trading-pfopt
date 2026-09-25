@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from src.stock_screener.cockpit import plan_store
-from src.stock_screener.cockpit.doctrine import MAX_LOSS_FROM_FILL
+from src.stock_screener.cockpit.doctrine import MAX_LOSS_FROM_FILL, MAX_ORDER_ADV_PCT
 from src.stock_screener.cockpit.trade import fill_floor, stop_within_max_loss
 
 AUTOBUY_ENV = "AUTOBUY"
@@ -40,7 +40,7 @@ def _row(o: dict) -> dict:
     return {"ticker": str(o["ticker"]), "shares": int(o["shares"]),
             "price": f(o.get("price")), "pivot": f(o.get("pivot")),
             "limit_price": f(o.get("limit_price")), "stop_price": f(o.get("stop_price")),
-            "est_value": f(o.get("est_value")),
+            "est_value": f(o.get("est_value")), "adv_usd": f(o.get("adv_usd")),
             "earnings_in": None if o.get("earnings_in") is None
             else int(o["earnings_in"]),
             "status": ROW_ARMED, "detail": ""}
@@ -54,8 +54,9 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
     Only genuine buy rows arm: ``shares >= 1``, not ``rearm_only``/``stop_only``, and
     both a positive ``limit_price`` (the no-chase cap is the entry mechanic; a market
     row MUST NOT arm) and a positive ``stop_price`` below it (the OTO leg), at most
-    ``MAX_LOSS_FROM_FILL`` below the limit. The executor runs unattended, so a bad stop
-    MUST be refused at arming, not at 09:26. Order is preserved — the executor walks rows
+    ``MAX_LOSS_FROM_FILL`` below the limit, and a notional within ``MAX_ORDER_ADV_PCT`` of
+    ``adv_usd`` when that is known. The executor runs unattended, so a bad row MUST be
+    refused at arming, not at 09:26. Order is preserved — the executor walks rows
     top-down, so the panel's ordering is the ranking."""
     rows = []
     skipped = []
@@ -76,6 +77,13 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
             skipped.append(f"{t}: stop {float(stop):,.2f} is more than "
                            f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the limit "
                            f"{float(lim):,.2f} — raise it to ≥ {fill_floor(lim):,.2f}")
+            continue
+        adv = o.get("adv_usd")
+        notional = int(o["shares"]) * float(lim)
+        if adv and notional > MAX_ORDER_ADV_PCT * float(adv):
+            skipped.append(f"{t}: {int(o['shares'])} sh at {float(lim):,.2f} is "
+                           f"{notional / float(adv) * 100:.1f}% of a day's $ volume — max "
+                           f"{MAX_ORDER_ADV_PCT * 100:.0f}%")
             continue
         rows.append(_row(o))
 

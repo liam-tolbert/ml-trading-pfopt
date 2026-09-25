@@ -122,7 +122,9 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
          f'<td class="n">{r["fund"]}</td>'
          f'<td class="n">{_f(r["close"])}</td><td class="n">{_f(r["pivot"])}</td>'
          f'<td class="n {"pos" if r["vs_pivot_pct"] >= 0 else "neg"}">{r["vs_pivot_pct"]:+.1f}%</td>'
-         f'<td class="n">{_f(r["adv_musd"], "{:.1f}")}</td><td class="n">{r["dist_days"]}</td>'
+         f'<td class="n">{_f(r["adv_musd"], "{:.1f}")}</td>'
+         f'<td class="n">{_f(r.get("max_order_usd"), "{:,.0f}")}</td>'
+         f'<td class="n">{r["dist_days"]}</td>'
          f'<td class="mono dim">{_esc(r["depths"])}</td>'
          f'<td class="note">{_esc((verdicts.get(r["ticker"]) or {}).get("notes", ""))}</td></tr>'
          )((verdicts.get(r["ticker"]) or {}).get("verdict", "unreviewed"))
@@ -310,7 +312,8 @@ th.n {{ text-align:right; }}
     <tr><th class="n">#</th><th>Ticker</th><th>Verdict</th><th class="n">Q</th><th class="n">RS</th>
     <th>RS line</th><th class="n">200d mo</th>
     <th class="n">F</th><th class="n">Close</th><th class="n">Pivot</th><th class="n">vs piv</th>
-    <th class="n">ADV$M</th><th class="n">DD</th><th>Legs %</th><th>Chart notes</th></tr>
+    <th class="n">ADV$M</th><th class="n">Max order $</th><th class="n">DD</th><th>Legs %</th>
+    <th>Chart notes</th></tr>
   </thead><tbody>{full_tr}</tbody></table>
   </div>
 
