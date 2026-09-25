@@ -138,7 +138,7 @@ def _positions_offline(**pos):
          "has_stop": True, "sma_50": 95.0, "last_close": 101.0, "volume_ratio": 1.0,
          "gain_pct": 0.01, "below_sma50": False, "next_earnings": None,
          "earnings_in": None, "stage": "fresh", "advisories": [],
-         "template_criteria": 8}
+         "template_criteria": 7}          # the seven price criteria; RS is the eighth
     p.update(pos)
     return {"account": {"account_number": "PA00SZOE", "equity": 50000.0,
                         "cash": 10000.0, "using_dedicated": True,

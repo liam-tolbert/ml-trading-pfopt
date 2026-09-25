@@ -11,6 +11,11 @@ Paths and cache-format versions live in ``cache.py``.
 """
 from __future__ import annotations
 
+# The trend template's eighth criterion: an RS rating of at least 70. The books want the
+# 80s-90s; 70 is the floor. The scan gate, the P2 pillar, the app's slider default and the
+# hunt MUST all read this one number.
+RS_FLOOR = 70
+
 # No entry within ~3 weeks of a scheduled report: an earnings gap is an unpriced risk.
 # The app warns; the hunt blocks.
 EARNINGS_SOON_DAYS = 21

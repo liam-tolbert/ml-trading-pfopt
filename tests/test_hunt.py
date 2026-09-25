@@ -117,6 +117,10 @@ def test_diagnostics_and_gates():
     # 3%-below-pivot stop is 1.5 ordinary days away.
     ok("typical day computed from df", abs(a["day_range"] - 2.0) < 0.01)
     ok("stop room = pivot-to-stop over the typical day", abs(a["stop_room"] - 1.5) < 0.05)
+    # §6.80: Step-1 reads come from the scan row; a scan from before they existed reads
+    # None, never a KeyError.
+    ok("step-1 reads absent from an older scan read as None",
+       a["rs_trend"] is None and a["sma200_m"] is None)
 
     verdicts = {t: {"ticker": t, "verdict": "PASS", "notes": ""} for t in diag.ticker}
     g = pl.gates(diag, verdicts, min_fund=0)
@@ -191,7 +195,7 @@ def test_report_builds():
         html = out.read_text(encoding="utf-8")
         for frag in ("Weekend Hunt", "In the buy zone", "Approaching pivot",
                      "Volume-confirmed", "Step-2 fundamentals", "Full review",
-                     "AAA", "EEE"):
+                     "RS line", "AAA", "EEE"):
             ok(f"report contains {frag!r}", frag in html)
 
 

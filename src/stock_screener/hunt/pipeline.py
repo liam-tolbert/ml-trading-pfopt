@@ -10,7 +10,8 @@ The entry rules are named constants. Their sources:
 - The buy zone is the pivot to +5% (scan.py ``buy_zone``; SEPA doc "Entry within 5%
   of pivot"). The +10% in vcp.BUY_ZONE_PCT is only the Tier-A screening tolerance and
   MUST NOT be used as an entry bound.
-- The RS floor is 70 (the Step-1 checklist; the app's Min-RS default).
+- The RS floor is ``doctrine.RS_FLOOR``, the book's eighth trend-template criterion. The
+  scan gate applies it; the hunt's filter guards against a scan from before the gate did.
 """
 from __future__ import annotations
 
@@ -28,12 +29,13 @@ from src.stock_screener.cockpit.cache import (CACHE_DIR, LAST_SCAN_PKL as _LAST_
                                               SCAN_PERSIST_VERSION as _PERSIST_VERSION,
                                               WATCHLIST_JSON)
 from src.stock_screener.cockpit.doctrine import (EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
-                                                 NO_CHASE_PCT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
+                                                 NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS,
+                                                 VOL_CONFIRM_RATIO)
 from src.stock_screener.cockpit.advisories import stop_room, typical_day_range
 from src.stock_screener.cockpit.indicators import prior_volume_average, volume_ratio
 
 # ---- rules (sources in the module docstring) ------------------------------ #
-MIN_RS = 70                    # Step-1 floor / app Min-RS default
+MIN_RS = RS_FLOOR              # the book's eighth criterion; one number everywhere
 BUY_ZONE_MAX_PCT = NO_CHASE_PCT * 100.0   # pivot .. +5% = the entry range (scan.py buy_zone)
 APPROACH_MIN_PCT = -3.0        # within 3% below pivot = "approaching"
 MAX_SCAN_AGE_DAYS = 3.0        # the hunt MUST run off a weekend-fresh scan
@@ -148,6 +150,8 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         rows.append({
             "rank": rank, "ticker": t, "wl": int(t in wl),
             "q": float(c["vcp_quality"]), "rs": int(c["rs"]),
+            # Row reads a scan from before they existed lacks: None, never a KeyError.
+            "rs_trend": c.get("rs_trend"), "sma200_m": c.get("sma200_rising_m"),
             "fund": int(c["fund_score"]),
             "close": round(float(close[-1]), 2), "pivot": round(piv, 2),
             "stop": round(float(lev["stop"]), 2),

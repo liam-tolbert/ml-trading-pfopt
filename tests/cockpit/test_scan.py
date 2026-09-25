@@ -242,6 +242,140 @@ def test_rs_line_new_high_flag():
         assert v is None or v is True or v is False or pd.isna(v)
 
 
+def test_book_template():
+    """§6.80 (audit Step-1 #1): the gate is the book's eight criteria — the vendored
+    template's seven price criteria plus an RS rating >= RS_FLOOR (70). The vendored
+    eighth, a Stage-2 slope check, is not one of the book's and no longer counts: a name
+    with the seven and RS 84 passes even when that slope reads negative; RS 64 or an
+    unknown rating fails the eighth."""
+    from src.stock_screener.cockpit.scan import book_template, price_criteria_passed
+
+    seven = {"price_above_150_200": True, "sma_150_above_200": True,
+             "sma_200_rising": True, "sma_50_above_150": True, "price_above_50": True,
+             "price_30pct_above_52w_low": True, "price_near_52w_high": True,
+             "distance_from_52w_low_pct": 45.0, "distance_from_52w_high_pct": 3.0}
+    tmpl = {"criteria_passed": 7, "criteria_details": {**seven, "confirmed_stage_2": False}}
+    b = book_template(tmpl, 84)
+    assert b["passes"] and b["criteria_passed"] == 8 and b["rs_ok"] is True
+    assert set(b["details"]) == set(seven) - {"distance_from_52w_low_pct",
+                                              "distance_from_52w_high_pct"} | {"rs_rating"}
+    assert price_criteria_passed(tmpl) == 7
+
+    low = book_template(tmpl, 64)
+    assert not low["passes"] and low["criteria_passed"] == 7 and low["rs_ok"] is False
+    unknown = book_template(tmpl, None)
+    assert not unknown["passes"] and unknown["criteria_passed"] == 7
+    assert unknown["rs_ok"] is None
+    assert book_template(tmpl, float("nan"))["rs_ok"] is None
+
+    # a price criterion failing counts whatever the RS
+    broken = {**tmpl, "criteria_details": {**tmpl["criteria_details"],
+                                           "price_above_50": False}}
+    assert book_template(broken, 99)["criteria_passed"] == 7
+    assert price_criteria_passed(broken) == 6
+    assert price_criteria_passed(None) is None
+    assert book_template(None, 90)["criteria_passed"] == 1
+
+
+def test_screen_universe_gates_on_rs():
+    """§6.80: RS >= 70 is the eighth criterion of the scan gate. A name that passes the
+    seven price criteria with RS 64 is not a candidate; at 70 it is. The result carries
+    every name's rating (``rs_ratings``), not only the passers', so a held name that
+    dropped out of the list still has one for P2."""
+    from unittest.mock import patch
+
+    prices, spy, _ = _synthetic_slice()
+    real = scan_mod._rs_ratings(prices, 126)
+    base = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    assert len(base.candidates) >= 3
+    assert (base.candidates["rs"] >= 70).all(), base.candidates[["ticker", "rs"]]
+    assert (base.candidates["criteria"] == 8).all()
+    assert set(base.rs_ratings) == set(real) and len(base.rs_ratings) > len(base.candidates)
+
+    top = base.candidates["ticker"].iloc[0]
+    with patch.object(scan_mod, "_rs_ratings", lambda p, n: {**real, top: 64}):
+        low = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    assert top not in set(low.candidates["ticker"])
+    assert low.rs_ratings[top] == 64                      # rated, just not a candidate
+    with patch.object(scan_mod, "_rs_ratings", lambda p, n: {**real, top: 70}):
+        edge = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    assert top in set(edge.candidates["ticker"])
+
+    # an older pickle's ScanResult has no rs_ratings attribute: readers use getattr
+    import pickle
+    old = pickle.loads(pickle.dumps(base))
+    del old.__dict__["rs_ratings"]
+    assert getattr(pickle.loads(pickle.dumps(old)), "rs_ratings", {}) == {}
+
+
+def test_rs_line_trend_labels():
+    """§6.80 (audit Step-1 #2): the RS line's direction over ~6 and ~13 weeks, the 2017
+    template's addition. One synthetic ratio per label; too little overlap -> None."""
+    import pandas as pd
+    from src.stock_screener.cockpit.scan import rs_line_trend
+
+    idx = pd.bdate_range(end="2026-06-30", periods=120)
+    spy = pd.Series(300.0, index=idx)
+
+    def trend(closes):
+        return rs_line_trend(pd.DataFrame({"Close": closes}, index=idx), spy)
+
+    up = [100.0 + 0.3 * i for i in range(120)]
+    assert trend(up)["label"] == "rising 13w"
+    assert trend(up)["slope_6w"] > 0 and trend(up)["slope_13w"] > 0
+    # down 8% over the first 90 bars, then up 4% over the last 30: short up, long down
+    late = [100.0 - 8.0 * i / 89 for i in range(90)] + [92.0 + 4.0 * i / 29 for i in range(30)]
+    assert trend(late)["label"] == "rising 6w"
+    # up 12% over the first 90 bars, then down 3% over the last 30: long up, short down
+    roll = [100.0 + 12.0 * i / 89 for i in range(90)] + [112.0 - 3.0 * i / 29 for i in range(30)]
+    assert trend(roll)["label"] == "rolling over"
+    down = [100.0 - 0.2 * i for i in range(120)]
+    assert trend(down)["label"] == "falling"
+    assert trend([100.0] * 120)["label"] == "flat"
+    assert trend([100.0] * 120)["slope_13w"] == 0.0
+
+    short = pd.DataFrame({"Close": [100.0] * 40}, index=idx[-40:])
+    assert rs_line_trend(short, spy) is None
+
+
+def test_sma200_rising_months():
+    """§6.80 (audit Step-1 #3): how long the 200-day has risen, in 21-session months,
+    by the template's own test (above its value 19 sessions earlier). A series flat for
+    250 bars then rising 60 has an SMA rising for exactly those 60 sessions -> 2.9; a
+    falling series reads 0.0; under 219 rows -> None."""
+    import pandas as pd
+    from src.stock_screener.cockpit.scan import sma200_rising_months
+
+    def frame(closes):
+        idx = pd.bdate_range(end="2026-06-30", periods=len(closes))
+        return pd.DataFrame({"Close": closes}, index=idx)
+
+    flat_then_up = [100.0] * 250 + [100.0 + 0.5 * i for i in range(1, 61)]
+    assert sma200_rising_months(frame(flat_then_up)) == 2.9
+    assert sma200_rising_months(frame([200.0 - 0.1 * i for i in range(300)])) == 0.0
+    # rising throughout: every testable session counts (the first 218 can't be tested)
+    assert sma200_rising_months(frame([100.0 + 0.3 * i for i in range(400)])) == \
+        round((400 - 218) / 21.0, 1)
+    assert sma200_rising_months(frame([100.0] * 218)) is None
+    assert sma200_rising_months(None) is None
+
+
+def test_screen_universe_rows_carry_step1_reads():
+    """§6.80: the three Step-1 reads reach the candidate rows and payloads: the book's
+    count in ``criteria``, ``rs_trend``/``rs_slope_13w`` and ``sma200_rising_m``."""
+    prices, spy, _ = _synthetic_slice()
+    res = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
+    for col in ("rs_trend", "rs_slope_13w", "sma200_rising_m", "criteria"):
+        assert col in res.candidates.columns, col
+    labels = {"rising 13w", "rising 6w", "rolling over", "falling", "flat"}
+    assert set(res.candidates["rs_trend"].dropna()) <= labels
+    assert (res.candidates["sma200_rising_m"].dropna() >= 0).all()
+    for p in res.payloads.values():
+        assert p["book_template"]["passes"] and p["book_template"]["rs_ok"] is True
+        assert p["rs_trend"] is None or p["rs_trend"]["label"] in labels
+        assert "sma200_rising_m" in p
+
+
 def test_run_scan_uses_topup_fetch():
     """run_scan routes ALL price fetches (universe + SPY) through the ALWAYS-top-up path
     (max_age_days=0.0 — same semantics as the EOD trigger): the old 30-minute freshness

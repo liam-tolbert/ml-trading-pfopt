@@ -32,19 +32,24 @@ eliminated — there is no partial credit, and no rounding up.
 ## Step 1 — Trend Template (already implemented in Python)
 
 All 8 conditions must be true simultaneously, using **simple moving averages only**
-(not EMAs — they produce different results).
+(not EMAs — they produce different results). The cockpit's scan gate is exactly these
+eight, and the Positions page's P2 pillar judges a holding by the same eight.
 
 | # | Condition | Notes |
 |---|-----------|-------|
-| 1 | Price > 150-day SMA | Confirms positive long-term trend |
-| 2 | Price > 200-day SMA | Confirms positive long-term trend |
-| 3 | Price > 50-day SMA | Short-term momentum above all longer MAs |
+| 1 | Price > 150-day SMA and > 200-day SMA | Confirms positive long-term trend |
+| 2 | 150-day SMA > 200-day SMA | Medium-term trend above long-term baseline |
+| 3 | 200-day SMA trending up ≥ 1 month | Compare today's 200d SMA vs its value ~20 trading days ago — it must be higher. The best setups show 4–5 months; the scan's "200-day rising (months)" column counts them |
 | 4 | 50-day SMA > 150-day SMA | Short-term accelerating above medium-term |
-| 5 | 150-day SMA > 200-day SMA | Medium-term trend above long-term baseline |
-| 6 | 200-day SMA trending up ≥ 1 month | Compare today's 200d SMA vs value 22 trading days ago — it must be higher. Ideally rising 4–5 months for best setups |
-| 7 | Price ≥ 30% above 52-week low | Eliminates bottoming stocks — you want proven strength, not a bounce |
-| 8 | Price ≤ 25% below 52-week high | Stock must be near the top of its range, not far from highs |
-| 9 | RS rating ≥ 70 (ideally 80s–90s) | IBD RS Rating or equivalent percentile vs all stocks |
+| 5 | Price > 50-day SMA | Short-term momentum above all longer MAs |
+| 6 | Price ≥ 30% above 52-week low | Eliminates bottoming stocks — you want proven strength, not a bounce |
+| 7 | Price ≤ 25% below 52-week high | Stock must be near the top of its range, not far from highs |
+| 8 | RS rating ≥ 70 (ideally 80s–90s) | IBD-style percentile vs all scanned stocks. The eighth criterion; the scan's RS rating is a rank, so a name can dip under 70 for a day |
+
+The 2017 book adds a note to the RS check: the RS line (price ÷ S&P 500) should have
+been **rising for at least 6 weeks, ideally 13**. One strong day can put the line at a
+high with a downtrend behind it. The scan's "RS line trend" column reads the slope
+instead (rising 13w · rising 6w · flat · rolling over · falling); it is not a gate.
 
 **Market environment check (run before screening):**
 Count how many stocks pass the template on any given day:

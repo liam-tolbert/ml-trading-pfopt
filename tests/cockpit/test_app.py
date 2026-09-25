@@ -65,6 +65,11 @@ def test_streamlit_app_renders_offline():
             at = AppTest.from_file(app_path, default_timeout=60)
             at.run()
             assert not at.exception, f"app raised: {at.exception}"
+            # §6.80: the per-name Step-1 line — the book's count, RS against the floor,
+            # the RS-line trend and the 200-day duration.
+            rendered = _rendered_text(at)
+            assert "Step 1 · **8/8** · RS " in rendered, rendered[:400]
+            assert "RS line " in rendered and "200-day rising " in rendered
             at.run()                                     # rerun -> memo hit, no replay
     assert not at.exception, f"app raised on the memoized rerun: {at.exception}"
     assert calls["n"] == 1, f"scan should run once and memoize, ran {calls['n']}x"

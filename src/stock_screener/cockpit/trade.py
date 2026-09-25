@@ -23,7 +23,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 # doctrine is constants-only and imports nothing, so this module stays import-light.
 from .doctrine import (DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR, DERIVED_STOP_MIN_WINS,
                        DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS, MAX_LOSS_FROM_FILL,
-                       NO_CHASE_PCT, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
+                       NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 
 MIN_TRADE_USD = 50.0        # MUST match alpaca_trader.MIN_TRADE_USD. Copied so the pure
                             # plan builder needn't import alpaca-py.
@@ -505,7 +505,7 @@ def _trading_days_since(last, today) -> Optional[int]:
 
 
 def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
-                 spy_note=None, today=None) -> dict:
+                 spy_note=None, today=None, rs=None) -> dict:
     """The sell doctrine's four thesis pillars for ONE holding. Pure, display-only.
 
     Any failing pillar kills the trade; the stop is only the disaster floor between
@@ -523,8 +523,11 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
       day ``P1_STALL_DAYS``. Post-breakout violations
       (:func:`advisories.post_breakout_read`) warn. With ``doctrine.VIOLATIONS_CAN_FAIL``
       on, ``VIOLATION_FAIL_COUNT`` of them fail.
-    * P2 template — STRICT: anything under 8/8 fails, by the user's choice. Expect an
-      occasional one-day red flip when an SMA criterion sits on the edge.
+    * P2 template — the book's eight: ``pos["template_criteria"]`` counts the seven
+      price criteria and ``rs`` (the scan's RS rating) is the eighth, ``>= RS_FLOOR``.
+      STRICT: anything under 8/8 fails, by the user's choice. Seven passing with no RS
+      rating reads unknown. Expect an occasional one-day red flip when an SMA criterion
+      sits on the edge, or when the RS rank dips under the floor.
     * P3 tape — the scan ``regime`` dict when available, else the trigger report's
       SPY-only ``spy_note`` (partial: ok/warn), else unknown.
     * P4 earnings — inside the ``EARNINGS_SOON_DAYS`` window a loss or a thin cushion
@@ -611,12 +614,22 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
 
     # ---- P2: Stage-2 structure ---------------------------------------------------- #
     tc = pos.get("template_criteria")
+    rs_ok = None
+    try:
+        if rs is not None and math.isfinite(float(rs)):
+            rs_ok = float(rs) >= RS_FLOOR
+    except (TypeError, ValueError):
+        rs_ok = None
     if tc is None:
         p2 = _pill("unknown", "no template read (no bars)")
-    elif int(tc) >= 8:
-        p2 = _pill("ok", "8/8 trend template")
+    elif int(tc) < 7:
+        p2 = _pill("fail", f"{int(tc) + (1 if rs_ok else 0)}/8 — template broken")
+    elif rs_ok is None:
+        p2 = _pill("unknown", "7/7 price criteria; no RS rating (no scan)")
+    elif not rs_ok:
+        p2 = _pill("fail", f"7/8 — RS {float(rs):.0f} under {RS_FLOOR}")
     else:
-        p2 = _pill("fail", f"{int(tc)}/8 — template broken")
+        p2 = _pill("ok", f"8/8 trend template (RS {float(rs):.0f})")
 
     # ---- P3: the tape ------------------------------------------------------------- #
     if isinstance(regime, dict) and regime.get("regime") is not None:
@@ -1456,13 +1469,13 @@ def fetch_positions() -> dict:
             gain_pct = (price - avg_entry) / avg_entry
         below_sma50 = bool(sma_50 is not None and last_close is not None and last_close < sma_50)
 
-        template_criteria = None
+        template_criteria = None                 # the seven price criteria; RS is the eighth
         if df is not None and len(df):
             try:
-                from .scan import template_chain
+                from .scan import price_criteria_passed, template_chain
                 _chain = template_chain(df)
                 if _chain is not None:
-                    template_criteria = int(_chain[0].get("criteria_passed", 0))
+                    template_criteria = price_criteria_passed(_chain[0])
             except Exception:
                 template_criteria = None
 

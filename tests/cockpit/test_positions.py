@@ -165,7 +165,9 @@ def test_sell_pillars():
     P1 fails on Day-0 close below pivot / decisive (>2%) close / 2nd consecutive close /
     close below the breakout bar's low / flat-to-red at day 15+, warns on no-3%-cushion
     at day 10+, degrades without an entry date or pivot. P2 is STRICT (user decision:
-    7/8 fails). P3 reads the scan regime, falls back to the trigger report's SPY note.
+    7/8 fails) on the book's eight: the seven price criteria in ``template_criteria``
+    plus the scan's RS rating >= 70 (§6.80). P3 reads the scan regime, falls back to the
+    trigger report's SPY note.
     P4 fails on loss-or-thin-cushion inside the 21-day window, warns with a real
     cushion. A bare pos dict (no new keys) yields four unknowns, never a raise."""
     import pandas as pd
@@ -185,11 +187,11 @@ def test_sell_pillars():
     # all-ok: day 5, cushioned, above pivot, 8/8, risk-on, report far out. The tz-aware
     # UTC entry (the journal's native form) must land on the ET trading date.
     ok = sell_pillars(
-        P(last_close=108.0, gain_pct=0.05, template_criteria=8, earnings_in=40,
+        P(last_close=108.0, gain_pct=0.05, template_criteria=7, earnings_in=40,
           df=_trigger_frame(TODAY, [108.0] * 30)),
         entry_date=pd.Timestamp("2026-08-05 14:30", tz="UTC"), pivot=100.0,
         regime={"regime": "RISK-ON (Strong)", "should_generate_buys": True},
-        today=TODAY)
+        today=TODAY, rs=84)
     assert S(ok) == {"P1": "ok", "P2": "ok", "P3": "ok", "P4": "ok"}, ok
     assert "day 5" in ok["P1"]["detail"]
 
@@ -230,11 +232,20 @@ def test_sell_pillars():
                          today=TODAY)
     assert nopiv["P1"]["status"] == "ok" and "clock only" in nopiv["P1"]["detail"]
 
-    # P2 strict: 8 ok, 7 FAILS (user decision), 5 fails, None unknown
-    assert sell_pillars(P(template_criteria=8), today=TODAY)["P2"]["status"] == "ok"
-    p27 = sell_pillars(P(template_criteria=7), today=TODAY)["P2"]
-    assert p27["status"] == "fail" and "7/8" in p27["detail"]
+    # P2 strict, the book's eight: seven price criteria + RS 84 ok; RS 64 fails on the
+    # eighth; six price criteria fail whatever the RS; seven with no rating read
+    # unknown (never trades); None unknown
+    p2ok = sell_pillars(P(template_criteria=7), rs=84, today=TODAY)["P2"]
+    assert p2ok["status"] == "ok" and "RS 84" in p2ok["detail"]
+    p2rs = sell_pillars(P(template_criteria=7), rs=64, today=TODAY)["P2"]
+    assert p2rs["status"] == "fail" and "7/8" in p2rs["detail"] and "RS 64" in p2rs["detail"]
+    p26 = sell_pillars(P(template_criteria=6), rs=90, today=TODAY)["P2"]
+    assert p26["status"] == "fail" and "7/8" in p26["detail"]
     assert sell_pillars(P(template_criteria=5), today=TODAY)["P2"]["status"] == "fail"
+    norating = sell_pillars(P(template_criteria=7), today=TODAY)["P2"]
+    assert norating["status"] == "unknown" and "no RS rating" in norating["detail"]
+    assert sell_pillars(P(template_criteria=7), rs=float("nan"),
+                        today=TODAY)["P2"]["status"] == "unknown"
     assert sell_pillars(P(), today=TODAY)["P2"]["status"] == "unknown"
 
     # P3: scan regime beats everything; SPY note is the partial fallback
@@ -894,6 +905,44 @@ def test_sell_job_plan_includes_market_note():
     assert saved["market"] == {"spy_phase": 4, "turn": True, "streak": 0}, saved.get("market")
     assert not saved["orders"]
     assert "MARKET: SPY closed in Stage 4" in out.getvalue()
+
+
+def test_sell_job_plan_reads_rs_from_scan():
+    """§6.80: the evening plan's P2 reads the RS rating from the persisted last scan
+    (cache only, the same pickle the app adopts). A held name rated 64 fails P2 on that
+    close; with no scan on disk the eighth criterion is unknown and P2 never trades."""
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import cache, scan_worker, sell_job, trade, triggers
+    from src.stock_screener.cockpit.scan import ScanResult
+    from src.stock_screener.cockpit.scan_worker import ResultStore
+
+    offline = _positions_offline(template_criteria=7)
+    key = (scan_worker.DEFAULT_UNIVERSE, scan_worker.DEFAULT_MIN_CRITERIA)
+    with tempfile.TemporaryDirectory() as _tmp:
+        pkl = Path(_tmp) / "last_scan.pkl"
+        ResultStore(persist_path=pkl).put(key, ScanResult(
+            candidates=pd.DataFrame(), payloads={}, regime={}, rs_ratings={"AAA": 64}))
+        with patch.object(trade, "fetch_positions", return_value=offline), \
+                patch.object(trade, "fetch_order_fills",
+                             side_effect=trade.TradeUnavailable("down")), \
+                patch.object(triggers, "load_latest_trigger_report", return_value=None), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(scan_worker, "_STORE", ResultStore(persist_path=pkl)):
+            _, _, pillars, _ = sell_job._positions_and_pillars()
+        assert pillars["AAA"]["P2"]["status"] == "fail", pillars["AAA"]["P2"]
+        assert "RS 64" in pillars["AAA"]["P2"]["detail"]
+
+        with patch.object(trade, "fetch_positions", return_value=offline), \
+                patch.object(trade, "fetch_order_fills",
+                             side_effect=trade.TradeUnavailable("down")), \
+                patch.object(triggers, "load_latest_trigger_report", return_value=None), \
+                patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+                patch.object(scan_worker, "_STORE",
+                             ResultStore(persist_path=Path(_tmp) / "none.pkl")):
+            _, _, pillars, _ = sell_job._positions_and_pillars()
+        assert pillars["AAA"]["P2"]["status"] == "unknown", pillars["AAA"]["P2"]
 
 
 def test_positions_page_renders_plan_notes():

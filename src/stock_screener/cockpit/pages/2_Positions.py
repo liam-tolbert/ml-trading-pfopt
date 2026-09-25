@@ -203,9 +203,12 @@ try:
 except Exception:
     _wl_pivots = {}
 _regime = _spy = None
+_rs_map = {}
 try:
     # The newest scan result, if any: None on a true cold start and under AppTest.
-    _regime = getattr(scan_worker.get_worker().latest(), "regime", None)
+    _latest = scan_worker.get_worker().latest()
+    _regime = getattr(_latest, "regime", None)
+    _rs_map = getattr(_latest, "rs_ratings", None) or {}     # absent in older pickles
 except Exception:
     _regime = None
 if _regime is None:
@@ -215,7 +218,8 @@ if _regime is None:
         _spy = None
 _pillars = {p["symbol"]: trade.sell_pillars(
                 p, entry_date=(_open_by_sym.get(p["symbol"]) or {}).get("entry_date"),
-                pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy)
+                pivot=_wl_pivots.get(p["symbol"]), regime=_regime, spy_note=_spy,
+                rs=_rs_map.get(p["symbol"]))
             for p in positions}
 
 # --- The tape: market turn and weak-market advice (display only) ---------------------------- #
@@ -289,8 +293,11 @@ col_config = {
                    "more down/lower-half closes, a gain given back. Needs the journal "
                    "entry date; pivot flags need the watchlist's frozen pivot."),
     "P2": st.column_config.Column(
-        "P2", help="Trend template on the holding — strict: anything under 8/8 is a "
-                   "fail (a knife-edge SMA criterion can flip it for a day)."),
+        "P2", help="The book's trend template on the holding: the seven price criteria "
+                   "plus an RS rating ≥ 70 from the last scan. Strict: anything under "
+                   "8/8 is a fail (a knife-edge SMA criterion can flip it for a day, and "
+                   "RS is a rank that can dip under 70 for a day). Seven passing with no "
+                   "scan reads —."),
     "P3": st.column_config.Column(
         "P3", help="The tape: scan regime when available, else the trigger report's "
                    "SPY-only read. Risk-off = demote every yellow flag to red."),

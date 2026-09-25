@@ -30,16 +30,29 @@ from src.stock_screener.cockpit import (cache, export, plan_store, sells,  # noq
                                         trade, triggers)
 
 
+def _rs_ratings() -> dict:
+    """The last scan's RS ratings from the persisted pickle, cache only. ``{}`` without
+    a scan or on any error."""
+    try:
+        from src.stock_screener.cockpit import scan_worker
+        ent = scan_worker._STORE.get((scan_worker.DEFAULT_UNIVERSE,
+                                      scan_worker.DEFAULT_MIN_CRITERIA))
+        return dict(getattr(getattr(ent, "result", None), "rs_ratings", None) or {})
+    except Exception:
+        return {}
+
+
 def _positions_and_pillars(today=None):
     """The Positions page's pillar wiring, headless. Returns ``(data, positions, pillars,
     spy_note)``; a failed positions read raises.
 
     Every side input is best effort: a missing journal, watchlist or report degrades
-    pillars to unknown, and unknown never trades. The scan-store regime isn't available
-    in a fresh process, so P3 falls back to the trigger report's SPY note. P3 is
-    report-only in the plan."""
+    pillars to unknown, and unknown never trades. P2's RS rating comes from the persisted
+    last scan. The scan-store regime isn't available in a fresh process, so P3 falls back
+    to the trigger report's SPY note. P3 is report-only in the plan."""
     data = trade.fetch_positions()
     positions = data["positions"]
+    rs_map = _rs_ratings()
     try:
         fills = trade.fetch_order_fills()["fills"]
         open_by_sym = {r["symbol"]: r for r in trade.build_trade_journal(fills)["open"]}
@@ -57,7 +70,7 @@ def _positions_and_pillars(today=None):
     pillars = {p["symbol"]: trade.sell_pillars(
                    p, entry_date=(open_by_sym.get(p["symbol"]) or {}).get("entry_date"),
                    pivot=wl_pivots.get(p["symbol"]), regime=None, spy_note=spy,
-                   today=today)
+                   today=today, rs=rs_map.get(p["symbol"]))
                for p in positions}
     return data, positions, pillars, spy
 

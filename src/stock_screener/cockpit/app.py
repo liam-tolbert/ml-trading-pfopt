@@ -66,13 +66,16 @@ Don't force trades when few names qualify — the market is telling you somethin
 """
 
 INFO_STEP1 = """
-**Step 1 — Trend Template (automated gate).** Every row passes **all 8** of Minervini's
+**Step 1 — Trend Template (automated gate).** Every row passes **all 8** of the book's
 trend-template criteria: price above stacked **50 > 150 > 200-day SMAs**, 200-day rising
-≥1 month, **≥30% above the 52-wk low**, **within 25% of the 52-wk high**, confirmed Stage 2.
-This is *eligibility, not a buy signal.*
+≥1 month, **≥30% above the 52-wk low**, **within 25% of the 52-wk high**, and an **RS
+rating of 70 or more** — the book's eighth criterion. This is *eligibility, not a buy
+signal.*
 
 - **RS** = relative-strength rating (IBD-style weighted blend of 3/6/9/12-mo returns,
-  recent 3-mo counted double, percentiled vs the scanned set); Minervini wants **70+**.
+  recent 3-mo counted double, percentiled vs the scanned set); the book wants the 80s–90s.
+- **RS line trend**: the 2017 book adds that the stock-÷-SPY line should have been rising
+  for 6 weeks, ideally 13. **200-day rising**: the books' best names show 4–5 months.
 - Tighten further in the sidebar: raise **min RS** or require a VCP.
 - Sort by `fund_score` / `rs`, then **click a row** to study the chart.
 """
@@ -127,7 +130,8 @@ These levels are advisory — place the order in your broker.
 """
 
 from src.stock_screener.cockpit.doctrine import (DEFAULT_STOP_FROM_PIVOT, EARNINGS_SOON_DAYS,
-                                                 MAX_LOSS_FROM_FILL, REGIME_CONFIRM_DAYS)
+                                                 MAX_LOSS_FROM_FILL, REGIME_CONFIRM_DAYS,
+                                                 RS_FLOOR)
 
 
 
@@ -138,6 +142,8 @@ READABLE_COLS = {
     "price": "Price ($)",
     "rs": "RS rating",
     "rs_nh": "RS line NH",
+    "rs_trend": "RS line trend",
+    "sma200_rising_m": "200-day rising (months)",
     "criteria": "Trend criteria (/8)",
     "fund_score": "Fundamental score (0-4)",
     "rev_yoy": "Revenue YoY (%)",
@@ -169,6 +175,14 @@ COL_HELP = {
              "outperforming the market while still basing, the classic institutional-"
              "accumulation tell. One of the strongest breakout-confirmation signals for a "
              "coiled name. n/a = under ~6 months of overlapping history.",
+    "rs_trend": "Direction of the RS line (price ÷ SPY) over the last ~6 and ~13 weeks. "
+                "The 2017 template wants it rising 6 weeks, ideally 13: 'rising 13w' is "
+                "the book's ideal, 'rising 6w' the minimum, 'rolling over' means the recent "
+                "leg has turned down, 'falling' fails it. One strong day can fake 'at a "
+                "high'; this reads the slope instead.",
+    "sma200_rising_m": "How many months the 200-day SMA has risen without a pause, counted "
+                       "the way the template tests it (above its value ~1 month earlier). "
+                       "1 month is the gate; the books' best names show 4–5.",
     "fund_score": "Step-2 fundamental checks passed (0–4): revenue ≥20%, EPS ≥20%, EPS "
                   "accelerating, margins expanding.",
     "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
@@ -212,8 +226,8 @@ COL_HELP = {
 # constant 8. It stays in the scan frame, where tests read it.
 COL_GROUPS = [
     ("Identify", ["ticker", "price"]),
-    ("Fuel — catalyst & strength", ["rs", "rs_nh", "fund_score", "rev_yoy", "eps_yoy",
-                                    "op_margin"]),
+    ("Fuel — catalyst & strength", ["rs", "rs_nh", "rs_trend", "sma200_rising_m",
+                                    "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
                                "pct_to_pivot", "day_range", "pivot", "stop", "target"]),
@@ -507,9 +521,11 @@ st.sidebar.caption("Universe: **all US common stocks** (~3–4k names from Nasda
                    "pages while it finishes; later scans use the cache and fetch only "
                    "new days.")
 st.sidebar.caption("Gate: full **8/8** trend template")
-min_rs = st.sidebar.slider("Min RS rating", 0, 99, 70,
+min_rs = st.sidebar.slider("Min RS rating", 0, 99, RS_FLOOR,
                            help="IBD-style weighted multi-horizon return percentile "
-                                "(2×3-mo + 6-mo + 9-mo + 12-mo) vs the scanned universe")
+                                "(2×3-mo + 6-mo + 9-mo + 12-mo) vs the scanned universe. "
+                                f"The gate already requires {RS_FLOOR}, the book's eighth "
+                                "criterion; raise this to tighten further.")
 require_vcp = st.sidebar.checkbox("VCP only (hint filter)", value=False)
 min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
 
@@ -1328,6 +1344,19 @@ payload = res.payloads[pick]
 colChart, colSide = st.columns([3, 1])
 
 with colSide:
+    # Step 1 for this name: the book's count, RS against the floor, and the two reads the
+    # gate doesn't test. Older payloads carry only the vendored count.
+    _bk = payload.get("book_template") or {}
+    _n8 = _bk.get("criteria_passed",
+                  (payload.get("template") or {}).get("criteria_passed", "?"))
+    _s1 = [f"**{_n8}/8**"]
+    if payload.get("rs") is not None:
+        _s1.append(f"RS {payload['rs']} {'≥' if _bk.get('rs_ok') else '<'} {RS_FLOOR}")
+    if (payload.get("rs_trend") or {}).get("label"):
+        _s1.append(f"RS line {payload['rs_trend']['label']}")
+    if payload.get("sma200_rising_m") is not None:
+        _s1.append(f"200-day rising {payload['sma200_rising_m']:.1f} mo")
+    st.caption("Step 1 · " + " · ".join(_s1))
     with st.container(border=True):
         st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
         info_btn(INFO_STEP2)

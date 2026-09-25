@@ -117,6 +117,8 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
          f'<td class="tk">{_esc(r["ticker"])}{" &#9733;" if r["wl"] else ""}</td>'
          f'<td><span class="pill {_vcls(v)}">{_vlabel(v)}</span></td>'
          f'<td class="n">{_f(r["q"], "{:.0f}")}</td><td class="n">{r["rs"]}</td>'
+         f'<td>{_esc(r.get("rs_trend") or "-")}</td>'
+         f'<td class="n">{_f(r.get("sma200_m"), "{:.1f}")}</td>'
          f'<td class="n">{r["fund"]}</td>'
          f'<td class="n">{_f(r["close"])}</td><td class="n">{_f(r["pivot"])}</td>'
          f'<td class="n {"pos" if r["vs_pivot_pct"] >= 0 else "neg"}">{r["vs_pivot_pct"]:+.1f}%</td>'
@@ -306,6 +308,7 @@ th.n {{ text-align:right; }}
   <div class="scroll" style="max-height:72vh; overflow-y:auto;">
   <table id="big"><thead>
     <tr><th class="n">#</th><th>Ticker</th><th>Verdict</th><th class="n">Q</th><th class="n">RS</th>
+    <th>RS line</th><th class="n">200d mo</th>
     <th class="n">F</th><th class="n">Close</th><th class="n">Pivot</th><th class="n">vs piv</th>
     <th class="n">ADV$M</th><th class="n">DD</th><th>Legs %</th><th>Chart notes</th></tr>
   </thead><tbody>{full_tr}</tbody></table>

@@ -5,8 +5,8 @@ fundamentals callable), so it runs deterministically offline in tests. ``run_sca
 is the live convenience wrapper that pulls data via ``data_feed`` first.
 
 Funnel:
-  Step 1  validate_minervini_trend_template   -> HARD gate (the candidate list)
-  +       trailing-return percentile           -> RS rating (display / optional filter)
+  Step 1  the book's eight criteria: the vendored template's seven price criteria
+          plus an RS rating >= RS_FLOOR       -> HARD gate (the candidate list)
   Step 2  fundamentals summary                 -> highlight (badges + pass-count)
   Step 3  detect_vcp (cockpit ZigZag detector) -> hint for the chart (not a gate by default)
   Step 4  detect_breakout + calculate_stop_loss-> advisory entry levels
@@ -30,7 +30,7 @@ from src.stock_screener.minervini_screener.screening import (
     validate_minervini_trend_template,
 )
 from src.stock_screener.minervini_screener.screening import calculate_stop_loss
-from .doctrine import DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL, NO_CHASE_PCT
+from .doctrine import DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL, NO_CHASE_PCT, RS_FLOOR
 from .indicators import (relative_measured_volatility,
                          bollinger_bandwidth_percentile_last, ttm_squeeze)
 # Cockpit VCP detector, a drop-in with the same dict schema. The vendored
@@ -40,10 +40,10 @@ from .vcp import detect_vcp
 
 @dataclass
 class ScanConfig:
-    min_criteria: int = 8          # Step-1 gate: require all 8 trend-template criteria
+    min_criteria: int = 8          # Step-1 gate: require all 8 of the book's criteria
     min_history_rows: int = 200    # classify_phase needs >= 200 rows
     rs_period: int = 126           # ~6 months, for the RS rating percentile
-    min_rs: float = 0.0            # 0 = off; else require RS rating >= this (1-99)
+    min_rs: float = 0.0            # 0 = off; an extra RS filter above the gate's RS_FLOOR
     require_vcp: bool = False       # if True, only keep names with a valid VCP
     min_fundamental_score: int = 0  # keep names with >= this many Step-2 checks passed
 
@@ -56,6 +56,41 @@ class ScanResult:
     n_scanned: int = 0
     n_passed: int = 0
     errors: List[str] = field(default_factory=list)
+    rs_ratings: Dict[str, int] = field(default_factory=dict)   # every rated name
+
+
+# The vendored template's seven price criteria. Its eighth, ``confirmed_stage_2``, is not
+# in the book; the book's eighth is the RS rating.
+PRICE_CRITERIA = ("price_above_150_200", "sma_150_above_200", "sma_200_rising",
+                  "sma_50_above_150", "price_above_50", "price_30pct_above_52w_low",
+                  "price_near_52w_high")
+
+
+def price_criteria_passed(tmpl: Optional[dict]) -> Optional[int]:
+    """How many of the seven price criteria a vendored template dict passes. None
+    without a template."""
+    if not tmpl:
+        return None
+    det = tmpl.get("criteria_details") or {}
+    return sum(1 for k in PRICE_CRITERIA if det.get(k))
+
+
+def book_template(tmpl: Optional[dict], rs) -> dict:
+    """The book's eight trend-template criteria: the seven price criteria plus an RS
+    rating of at least ``RS_FLOOR``. Returns ``{criteria_passed, criteria_total, passes,
+    rs_ok, details}``. An unknown ``rs`` gives ``rs_ok`` None, which counts as a fail."""
+    det = (tmpl or {}).get("criteria_details") or {}
+    details = {k: bool(det.get(k)) for k in PRICE_CRITERIA}
+    rs_ok = None
+    try:
+        if rs is not None and np.isfinite(float(rs)):
+            rs_ok = bool(float(rs) >= RS_FLOOR)
+    except (TypeError, ValueError):
+        rs_ok = None
+    details["rs_rating"] = rs_ok
+    n = sum(1 for v in details.values() if v)
+    return {"criteria_passed": n, "criteria_total": 8, "passes": n >= 8,
+            "rs_ok": rs_ok, "details": details}
 
 
 # --------------------------------------------------------------------------- #
@@ -240,6 +275,59 @@ def rs_line_at_high(df: pd.DataFrame, spy_close: pd.Series, window: int = 252,
         return None
 
 
+RS_TREND_SHORT_BARS = 30       # ~6 weeks
+RS_TREND_LONG_BARS = 65        # ~13 weeks
+RS_TREND_FLAT_PCT = 0.1        # |slope| under this, in % of the line per week, reads flat
+
+
+def rs_line_trend(df: pd.DataFrame, spy_close: pd.Series) -> Optional[dict]:
+    """The RS line's direction over the last ~6 and ~13 weeks. Returns ``{slope_6w,
+    slope_13w, label}``; the slopes are least squares, in % of the line's mean per week.
+    Labels: ``rising 13w`` (both up), ``rising 6w`` (only the short slope up),
+    ``rolling over`` (long up, short down), ``falling`` (both down), else ``flat``.
+    None under ``RS_TREND_LONG_BARS`` aligned sessions, or on error."""
+    try:
+        ratio = (df["Close"] / spy_close).dropna().to_numpy(dtype=float)
+    except Exception:
+        return None
+    if len(ratio) < RS_TREND_LONG_BARS:
+        return None
+
+    def slope(n: int) -> float:
+        y = ratio[-n:]
+        m = np.polyfit(np.arange(n, dtype=float), y, 1)[0]
+        return float(m / y.mean() * 100.0 * 5.0)
+
+    s6, s13 = slope(RS_TREND_SHORT_BARS), slope(RS_TREND_LONG_BARS)
+    flat = RS_TREND_FLAT_PCT
+    if s6 > flat and s13 > flat:
+        label = "rising 13w"
+    elif s6 > flat:
+        label = "rising 6w"
+    elif s6 < -flat and s13 > flat:
+        label = "rolling over"
+    elif s6 < -flat and s13 < -flat:
+        label = "falling"
+    else:
+        label = "flat"
+    return {"slope_6w": round(s6, 2), "slope_13w": round(s13, 2), "label": label}
+
+
+def sma200_rising_months(df: pd.DataFrame) -> Optional[float]:
+    """How long the 200-day SMA has been rising, in months of 21 sessions: consecutive
+    sessions, newest first, where the SMA is above its value 19 sessions earlier, the
+    vendored template's own test. None under 219 rows."""
+    if df is None or len(df) < 219:
+        return None
+    sma = calculate_sma(df["Close"], 200).to_numpy(dtype=float)
+    n, i = 0, len(sma) - 1
+    while (i >= 19 and np.isfinite(sma[i]) and np.isfinite(sma[i - 19])
+           and sma[i] > sma[i - 19]):
+        n += 1
+        i -= 1
+    return round(n / 21.0, 1)
+
+
 def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
     """The Step-4 display RMV, reusing the value ``detect_vcp`` already computed. That is
     safe: the last-bar RMV depends on at most ~60 trailing bars (a 10-bar ATR inside a
@@ -313,10 +401,10 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 continue
             tmpl, phase_info = chain
             phase_results.append({"ticker": t, "phase": phase_info.get("phase", 0)})
-            if tmpl.get("criteria_passed", 0) < cfg.min_criteria:
-                continue
-
             rsr = rs_rating.get(t)
+            book = book_template(tmpl, rsr)
+            if book["criteria_passed"] < cfg.min_criteria:
+                continue
             if cfg.min_rs and (rsr is None or rsr < cfg.min_rs):
                 continue
 
@@ -341,6 +429,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             _w52 = phase_info.get("week_52_high")
             rs_nh = (None if _rs_at_high is None
                      else bool(_rs_at_high and _w52 and cp < _w52))
+            rs_trend = rs_line_trend(df, spy["Close"])
+            sma200_m = sma200_rising_months(df)
             # RMV: an advisory base-tightness read for Step 4. It does NOT feed the
             # pivot/stop/target math.
             levels["rmv"] = _rmv_display(df, vcp)
@@ -359,7 +449,10 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "price": round(cp, 2),
                 "rs": rsr,
                 "rs_nh": rs_nh,
-                "criteria": tmpl.get("criteria_passed"),
+                "rs_trend": (rs_trend or {}).get("label"),
+                "rs_slope_13w": (rs_trend or {}).get("slope_13w"),
+                "sma200_rising_m": sma200_m,
+                "criteria": book["criteria_passed"],
                 "fund_score": s2["score"],
                 "rev_yoy": _fmt(fund and fund.get("revenue_yoy")),
                 "eps_yoy": _fmt(fund and fund.get("eps_yoy")),
@@ -381,7 +474,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "df": df, "phase_info": phase_info, "vcp": vcp,
                 "breakout": breakout, "levels": levels, "fundamentals": fund,
                 "step2": s2, "rs": rsr, "rs_nh": rs_nh, "template": tmpl,
-                "earnings_in": earnings_in,
+                "book_template": book, "rs_trend": rs_trend,
+                "sma200_rising_m": sma200_m, "earnings_in": earnings_in,
             }
         except Exception as e:                                  # never let one name kill the scan
             errors.append(f"{t}: {e}")
@@ -417,7 +511,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     else:
         cand = pd.DataFrame()
     return ScanResult(candidates=cand, payloads=payloads, regime=regime,
-                      n_scanned=len(phase_results), n_passed=len(rows), errors=errors)
+                      n_scanned=len(phase_results), n_passed=len(rows), errors=errors,
+                      rs_ratings=rs_rating)
 
 
 def _fmt(x) -> Optional[float]:
