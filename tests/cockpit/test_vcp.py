@@ -263,6 +263,25 @@ def test_vcp_extended_breakout_is_watch_not_review():
     assert v["is_vcp"] is True, (v["tier"], v["pattern_details"])
 
 
+_BENCH: dict = {}
+
+
+def _bench_results() -> dict:
+    """``{ticker: (df, detect_vcp result)}`` over the 200 benchmark fixtures, computed once
+    per process for the benchmark and the Step-3 cross-tab."""
+    if not _BENCH:
+        import pandas as pd
+        from vcp_labels import LABELS, fixture_filename
+        from src.stock_screener.cockpit.vcp import detect_vcp
+
+        fdir = ROOT / "tests" / "fixtures" / "vcp_bench"
+        assert fdir.exists(), "benchmark fixtures missing — were tests/fixtures committed?"
+        for t in LABELS:
+            df = pd.read_parquet(fdir / fixture_filename(t))
+            _BENCH[t] = (df, detect_vcp(df, float(df["Close"].iloc[-1]), {}))
+    return _BENCH
+
+
 def test_vcp_benchmark_200_charts():
     """The 200-chart hand-labeled benchmark (see tests/vcp_labels.py for the blind
     protocol). Hard contracts:
@@ -270,17 +289,11 @@ def test_vcp_benchmark_200_charts():
       - shortlist:  every YES-labeled chart lands in tier A or B;
       - regression floor: tier A captures at least 45 of the 72 YES charts.
     Soft stats (tier sizes, precision) are printed for future tuning."""
-    import pandas as pd
-    from vcp_labels import LABELS, fixture_filename
-    from src.stock_screener.cockpit.vcp import detect_vcp
-
-    fdir = ROOT / "tests" / "fixtures" / "vcp_bench"
-    assert fdir.exists(), "benchmark fixtures missing — were tests/fixtures committed?"
+    from vcp_labels import LABELS
 
     tiers, misses = {}, []
     for t, lab in LABELS.items():
-        df = pd.read_parquet(fdir / fixture_filename(t))
-        r = detect_vcp(df, float(df["Close"].iloc[-1]), {})
+        df, r = _bench_results()[t]
         tiers[t] = r["tier"]
         # §6.75: every result, C included, carries the typical day the stop is judged by
         assert r.get("median_tr_pct") is not None, (t, r["tier"], r["pattern_details"])
@@ -299,6 +312,68 @@ def test_vcp_benchmark_200_charts():
     assert not misses, f"never-miss violated — YES charts in tier C: {misses}"
     assert all(tiers[t] in ("A", "B") for t in yes), "a YES chart left tier A/B"
     assert yes_a >= 45, f"tier-A recall regressed: only {yes_a}/{len(yes)} YES in A"
+
+
+def test_step3_reads_on_benchmark():
+    """§6.91+: the Step-3 reads over the 200 labelled charts. The thresholds were set in the
+    plan before this ran and MUST NOT be tuned to it. The tables are printed for the ledger;
+    only the pre-registered named charts are asserted: RLYB ("extreme vol dry-up") reads
+    dry, JAKK ("drying volume") and BATRA ("quiet volume") read at least partial, and BEAM
+    ("no dry-up") does not read dry."""
+    from collections import Counter
+    from vcp_labels import LABELS
+    from src.stock_screener.cockpit import advisories
+
+    bench = _bench_results()
+    dry = {t: advisories.volume_dryup(df, r["contractions"]) for t, (df, r) in bench.items()}
+    tab = Counter((LABELS[t]["label"], (d or {}).get("verdict", "n/a")) for t, d in dry.items())
+    print("    step3 dry-up: " + "  ".join(
+        f"{lab} " + " ".join(f"{v}={tab[(lab, v)]}" for v in ("dry", "partial", "none", "n/a"))
+        for lab in ("YES", "NO")))
+    assert dry["RLYB"]["verdict"] == "dry", dry["RLYB"]
+    assert dry["JAKK"]["verdict"] != "none" and dry["BATRA"]["verdict"] != "none"
+    assert (dry["BEAM"] or {}).get("verdict") != "dry", dry["BEAM"]
+
+    # Shakeouts. Pre-registered: BOH and PNTG show a shakeout, CLDX an undercut. It FAILED
+    # on BOH (§6.92): its labelled "Jun 1 one-day shakeout" is its first contraction's own
+    # low, not an undercut of an earlier one. So the app doesn't show it (hunt only); these
+    # asserts pin the outcome so a change to it is noticed.
+    so = {t: advisories.shakeouts(df, r["contractions"]) for t, (df, r) in bench.items()}
+
+    def kind(s):
+        return ("n/a" if s is None else "shakeout" if s["shakeouts"] else
+                "broken" if s["broken"] else "open" if s["events"] else "clean")
+    tab = Counter((LABELS[t]["label"], kind(s)) for t, s in so.items())
+    print("    step3 shakeout: " + "  ".join(
+        f"{lab} " + " ".join(f"{v}={tab[(lab, v)]}"
+                             for v in ("shakeout", "broken", "open", "clean", "n/a"))
+        for lab in ("YES", "NO")))
+    assert so["PNTG"]["shakeouts"] >= 1 and so["CLDX"]["events"]
+    assert so["BOH"]["events"] == []
+
+    # V recovery. Pre-registered: the flag ships only if it fires on >= 7 of the 13
+    # V-labelled NO charts and on <= 25% of the YES charts. It FAILED (§6.93): 0 of 13. The
+    # base it measures starts at the first selected contraction, on the right side of the
+    # V the labeller saw. So the app doesn't show it (hunt only); this pins the outcome.
+    v_named = ("UTI", "WLFC", "PRLD", "AGX", "CGEM", "DSGN", "EPC", "KB", "LINE", "MPC",
+               "RLAY", "SRRK", "VTRS")
+    vr = {t: advisories.v_recovery(df, r["contractions"]) for t, (df, r) in bench.items()}
+    flagged = {t for t, x in vr.items() if x and x["v_flag"]}
+    yes = [t for t in LABELS if LABELS[t]["label"] == "YES"]
+    print(f"    step3 v-recovery: V-labelled {len(flagged & set(v_named))}/{len(v_named)}  "
+          f"YES {len(flagged & set(yes))}/{len(yes)}  "
+          f"other NO {len(flagged - set(yes) - set(v_named))}/"
+          f"{len(LABELS) - len(yes) - len(v_named)}")
+    assert len(flagged & set(v_named)) < 7
+
+    # The books' halving (§6.94): shown, not judged, so printed only.
+    bt = Counter((LABELS[t]["label"],
+                  (lambda x: "n/a" if x is None else str(x["book_tight"]))(
+                      advisories.book_tightening(r["contractions"])))
+                 for t, (df, r) in bench.items())
+    print("    step3 halving: " + "  ".join(
+        f"{lab} " + " ".join(f"{v}={bt[(lab, v)]}" for v in ("True", "False", "n/a"))
+        for lab in ("YES", "NO")))
 
 
 def test_zigzag_fast_parity():

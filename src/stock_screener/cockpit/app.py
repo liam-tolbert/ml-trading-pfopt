@@ -118,7 +118,12 @@ look for a **Volatility Contraction Pattern**:
 - **higher lows**, **volume drying up** into the tightest part,
 - price holding above the **50-day SMA**, total base depth ~10–35%,
 - a depth in proportion to the market's: the books avoid a name that fell more than
-  ~2.5–3× what the S&P 500 fell over the same stretch (the "Depth vs market" read).
+  ~2.5–3× what the S&P 500 fell over the same stretch (the "Depth vs market" read),
+- **volume drying up** in the final tight area: below its 50-day average, with a day or
+  two of almost none (the "Dry-up" read; the chart marks the near-silent days),
+- the books' rule of thumb that each dip is about **half** the one before (the scan's
+  own rule is deliberately looser, so it never misses a real base), and a base of at
+  least **3 weeks** (the detector's length can read short; judge it on the chart).
 
 Shaded bands mark *detected* contractions (a hint — you decide). The bottom **RMV** pane
 (Relative Measured Volatility, 0–100) tracks how tight the base is versus the stock's own
@@ -177,6 +182,7 @@ READABLE_COLS = {
     "vcp": "VCP detected",
     "num_contractions": "# Contractions",
     "depth_vs_spy": "Depth vs market (×)",
+    "dryup_ratio": "Dry-up (× avg volume)",
     "vcp_quality": "VCP quality (0-100)",
     "breakout_today": "Breakout today",
     "vol_confirmed": "Vol confirmed",
@@ -245,6 +251,10 @@ COL_HELP = {
                     "books avoid names that corrected more than ~2.5–3× the market: a 23% "
                     "dip in a 10% correction is fine, in a 3% one it isn't. n/a = no "
                     "contractions, or the market barely moved.",
+    "dryup_ratio": "Volume in the final tight area (from the last pullback's peak up to any "
+                   "breakout) against the 50-day average before it. Under 1 = drying up, the "
+                   "books' sign that sellers are gone; the Step-3 panel also counts "
+                   "near-silent days (≤ half the average). n/a = no contractions.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
                    "+ near-high 20 + base length 10). Shown even when VCP is False.",
     "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
@@ -277,7 +287,7 @@ COL_GROUPS = [
                                     "fund_score", "rev_yoy", "eps_yoy", "op_margin",
                                     "code33", "earn_react", "est_rev_90d"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
-                              "depth_vs_spy"]),
+                              "depth_vs_spy", "dryup_ratio"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
                                "pct_to_pivot", "day_range", "adv_musd", "pivot", "stop",
                                "target"]),
@@ -1541,9 +1551,11 @@ with colSide:
                        "instead (its report row will show ↗ crossed).")
         st.markdown(step_badge("Step 3", "Judge the VCP"))
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
-        _dvm = advisories.depth_vs_market_text(payload.get("depth"))
-        if _dvm:
-            st.caption(_dvm)
+        for _cap in (advisories.depth_vs_market_text(payload.get("depth")),
+                     advisories.volume_dryup_text(payload.get("dryup")),
+                     advisories.book_tightening_text(payload.get("book_tightening"))):
+            if _cap:
+                st.caption(_cap)
         weekly = st.checkbox("Weekly view", value=False)
         show_overlays = st.checkbox("VCP + entry overlays", value=True)
         show_bollinger = st.checkbox(
@@ -1560,7 +1572,8 @@ with colChart:
         fig = build_chart(pick, payload["df"], vcp=payload.get("vcp"),
                           levels=payload.get("levels"), show_overlays=show_overlays,
                           weekly=weekly, lookback_days=_ranges[rsel],
-                          show_bollinger=show_bollinger)
+                          show_bollinger=show_bollinger,
+                          marks=advisories.step3_marks(payload))
         st.plotly_chart(fig, width="stretch")
 
 # Step 4 — Entry (advisory) + position sizer.

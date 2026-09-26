@@ -450,5 +450,135 @@ def test_earnings_reaction_flags():
     assert advisories.earnings_reaction_text(None) == ""
 
 
+def test_volume_dryup():
+    """§6.91 (audit Step-3 #1): the final tight area's volume against the 50-day average
+    before it, and its near-silent days. A breakout close ends the window, so a name that
+    already broke out is judged on its base; zero-volume bars are data gaps, not quiet
+    days."""
+    from src.stock_screener.cockpit import advisories
+
+    df = _reaction_frame(n=80)
+    peak = df.index[60]
+    cons = [{"peak_date": peak, "peak_price": 105.0, "trough_price": 98.0}]
+    df.loc[df.index[60:], "Volume"] = 400.0
+    r = advisories.volume_dryup(df, cons)
+    assert r["verdict"] == "dry" and r["avg_ratio"] == 0.4 and r["quiet_days"] == 20
+    assert r["window_bars"] == 20 and len(r["quiet_dates"]) == 20
+    assert "Volume dry-up ✅" in advisories.volume_dryup_text(r)
+
+    loud = _reaction_frame(n=80)
+    loud.loc[loud.index[60:], "Volume"] = 1500.0
+    assert advisories.volume_dryup(loud, cons)["verdict"] == "none"
+    assert advisories.volume_dryup_text(advisories.volume_dryup(loud, cons)).startswith("⚠️")
+
+    half = _reaction_frame(n=80)
+    half.loc[half.index[60:], "Volume"] = 900.0          # below average, no quiet day
+    assert advisories.volume_dryup(half, cons)["verdict"] == "partial"
+
+    broke = df.copy()
+    broke.loc[broke.index[75:], ["Close", "Volume"]] = [110.0, 5000.0]
+    b = advisories.volume_dryup(broke, cons)
+    assert b["window_bars"] == 15 and b["verdict"] == "dry"
+
+    gaps = df.copy()
+    gaps.loc[gaps.index[62:66], "Volume"] = 0.0
+    assert advisories.volume_dryup(gaps, cons)["quiet_days"] == 16
+
+    assert advisories.volume_dryup(df, []) is None
+    short = [{"peak_date": df.index[-2], "peak_price": 105.0}]
+    assert advisories.volume_dryup(df, short) is None
+    marks = advisories.step3_marks({"dryup": r})
+    assert len(marks) == 20 and marks[0]["pane"] == "volume"
+    assert advisories.step3_marks({}) == [] and advisories.step3_marks(None) == []
+
+
+def test_shakeouts():
+    """§6.92 (audit Step-3 #3): an undercut of a base low that closes back above it within 3
+    bars is a shakeout (counting the undercut bar as 0); one that stays below is a lower
+    low; one too recent to tell is open. One bar under two lows counts once."""
+    from src.stock_screener.cockpit import advisories
+
+    cons = [{"peak_date": "2026-08-03", "trough_date": "2026-08-26", "trough_price": 95.0},
+            {"peak_date": "2026-09-01", "trough_date": "2026-09-15", "trough_price": 97.0}]
+
+    def frame(lows=None, closes=None):
+        df = _reaction_frame(n=80)
+        for d, v in (lows or {}).items():
+            df.loc[d, "Low"] = v
+        for d, v in (closes or {}).items():
+            df.loc[d, "Close"] = v
+        return df
+
+    same = advisories.shakeouts(frame({"2026-09-18": 96.5}), cons)
+    e = same["latest"]
+    assert same["shakeouts"] == 1 and e["status"] == "shakeout" and e["recovered_in"] == 0
+    assert e["ref_low"] == 97.0 and e["undercut_pct"] == round((1 - 96.5 / 97) * 100, 1)
+    later = advisories.shakeouts(frame({"2026-09-18": 96.5},
+                                       {"2026-09-18": 96.8, "2026-09-21": 96.9,
+                                        "2026-09-22": 96.9}), cons)
+    assert later["latest"]["recovered_in"] == 3
+    stays = {d: 96.0 for d in ("2026-09-18", "2026-09-21", "2026-09-22", "2026-09-23",
+                               "2026-09-24")}
+    broken = advisories.shakeouts(frame({"2026-09-18": 95.5}, stays), cons)
+    assert broken["broken"] == 1 and broken["latest"]["status"] == "broken"
+    # one bar under both lows counts once, against the higher (97)
+    both = advisories.shakeouts(frame({"2026-09-18": 94.0}, stays), cons)
+    assert len(both["events"]) == 1 and both["events"][0]["ref_low"] == 97.0
+    last = frame().index[-1]
+    fresh = advisories.shakeouts(frame({last: 96.0}, {last: 96.0}), cons)
+    assert fresh["latest"]["status"] == "open"
+    clean = advisories.shakeouts(frame(), cons)
+    assert clean["events"] == []
+    assert advisories.shakeouts(frame(), cons[:1]) is None
+
+
+def test_v_recovery():
+    """§6.93 (audit Step-3 #4): the right side's pace against the decline. A 20% base that
+    fell for 30 sessions and got back within 5% of its high in 5 is a V (6×); the same base
+    recovering over 29 sessions is not; a shallow base is never a V; a base that hasn't
+    recovered has no right side yet."""
+    from src.stock_screener.cockpit import advisories
+
+    def vframe(recover_at, floor=84.0, low_min=80.0):
+        df = _reaction_frame(n=80)
+        df.loc[df.index[21:], ["Close", "Low"]] = [floor + 1.0, floor]
+        df.loc[df.index[50], "Low"] = low_min
+        if recover_at is not None:
+            df.loc[df.index[recover_at:], "Close"] = 96.0
+        return df
+
+    cons = [{"peak_date": _reaction_frame(n=80).index[20], "peak_price": 100.0}]
+    fast = advisories.v_recovery(vframe(55), cons)
+    assert fast == {"depth_pct": 20.0, "left_bars": 30, "right_bars": 5, "speed": 6.0,
+                    "v_flag": True}, fast
+    slow = advisories.v_recovery(vframe(79), cons)
+    assert slow["right_bars"] == 29 and slow["v_flag"] is False
+    shallow = advisories.v_recovery(vframe(55, floor=93.0, low_min=92.0), cons)
+    assert shallow["depth_pct"] == 8.0 and shallow["v_flag"] is False
+    assert advisories.v_recovery(vframe(None), cons) is None
+    assert advisories.v_recovery(vframe(55), []) is None
+
+
+def test_book_tightening():
+    """§6.94 (audit Step-3 #2, #6): the books' rule of thumb, each dip about half the one
+    before, shown beside the detector's looser rule; the base length is shown, not
+    judged."""
+    from src.stock_screener.cockpit import advisories
+
+    legs = lambda *d: [{"drawdown_pct": x} for x in d]              # noqa: E731
+    half = advisories.book_tightening(legs(24.0, 13.0, 6.0), 6.14)
+    assert half == {"depths": [24.0, 13.0, 6.0], "ratios": [0.54, 0.46], "book_tight": True,
+                    "base_weeks": 6.1}
+    assert advisories.book_tightening_text(half) == (
+        "Dips 24% → 13% → 6% (each 0.54×, 0.46× the last): the books' halving ✅ · "
+        "base 6.1 weeks (books: ≥ 3)")
+    loose = advisories.book_tightening(legs(20.0, 18.0, 16.0))
+    assert loose["book_tight"] is False and loose["base_weeks"] is None
+    assert "looser than the books' halving" in advisories.book_tightening_text(loose)
+    assert advisories.book_tightening(legs(0.0, 5.0))["book_tight"] is False
+    assert advisories.book_tightening(legs(20.0)) is None
+    assert advisories.book_tightening_text(None) == ""
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "advisories"))

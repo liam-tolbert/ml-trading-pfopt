@@ -33,7 +33,9 @@ mamba run -n ml-trading python -m src.stock_screener.hunt <cmd>
 3. **`charts`** — renders review sheets (4 tickers per PNG) into
    `data/cockpit/hunt/<date>/charts/`.
 4. **Review every sheet** (Read each PNG). Judge each ticker against Step 3:
-   contractions tightening, volume drying up on pullbacks, higher lows, base
+   contractions tightening, volume drying up (computed: the title's `DU r/n` is the
+   final tight area's volume over its 50-day average and its near-silent days; read
+   it, don't re-estimate it from the bars), higher lows, base
    depth sane, clear pivot, no distribution — plus liquidity (an order MUST stay
    within 2% of the 20-day dollar volume; `max_order_usd` in the diagnostics is the
    ceiling, and a ceiling under a full position is a `PASS-` at best),

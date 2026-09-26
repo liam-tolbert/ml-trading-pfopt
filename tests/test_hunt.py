@@ -123,6 +123,11 @@ def test_diagnostics_and_gates():
        a["rs_trend"] is None and a["sma200_m"] is None and a["depth_vs_spy"] is None
        and a["industry"] is None)
     # §6.86: Code 33 and the inventory flag come from the payload's fundamentals
+    # §6.91: the dry-up read comes from the frame and the payload's contractions (the
+    # fixture's contraction peak is 40 bars back on a flat tape with a 0.8x last bar)
+    ok("dry-up computed for the review",
+       a["dryup"] in ("dry", "partial", "none") and a["step3"].startswith("DU "))
+    ok("step3_summary empty without reads", pl.step3_summary(None) == "")
     ok("step-2 reads absent from older fundamentals read as None",
        a["code33"] is None and a["inv_flag"] is None and a["earn_react"] is None)
     # §6.87: the reaction is computed from the frame and the fundamentals' release date

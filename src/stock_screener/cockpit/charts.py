@@ -50,11 +50,39 @@ def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
     return df.resample("W-FRI").agg(cols).dropna(subset=["Close"])
 
 
+def _add_marks(fig: go.Figure, d: pd.DataFrame, marks: list) -> None:
+    """One marker trace per (pane, symbol) group of ``marks`` on bars inside ``d``."""
+    groups: dict = {}
+    for m in marks:
+        try:
+            ts = pd.Timestamp(m["date"])
+        except Exception:
+            continue
+        if ts not in d.index:
+            continue
+        pane = m.get("pane", "price")
+        if pane == "volume" and "Volume" in d.columns:
+            y, row = float(d.at[ts, "Volume"]), 2
+        else:
+            y, row = float(d.at[ts, "Low"]) * 0.985, 1
+        key = (row, m.get("symbol", "triangle-up"), m.get("color", "#1a73e8"))
+        groups.setdefault(key, []).append((ts, y, m.get("text", "")))
+    for (row, symbol, color), pts in groups.items():
+        fig.add_trace(go.Scatter(
+            x=[p[0] for p in pts], y=[p[1] for p in pts], mode="markers",
+            marker=dict(symbol=symbol, size=9, color=color), hoverinfo="text",
+            hovertext=[p[2] for p in pts], showlegend=False), row=row, col=1)
+
+
 def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                 levels: Optional[dict] = None, show_overlays: bool = True,
                 weekly: bool = False, lookback_days: Optional[int] = None,
-                show_bollinger: bool = False) -> go.Figure:
+                show_bollinger: bool = False, marks: Optional[list] = None) -> go.Figure:
     """Return a 3-row Plotly figure: candlestick + SMAs (top), volume, RMV (bottom).
+
+    ``marks`` are Step-3 read markers, ``{"date", "pane": "price"|"volume", "text",
+    "symbol", "color"}``: a price mark sits under that bar's low, a volume mark on top of
+    its bar. Drawn in the daily view only, with the overlays.
 
     ``lookback_days`` zooms the view to the last N calendar days so a multi-week VCP
     base is visible. SMAs are still computed on the full history, so the 50/150/200
@@ -153,6 +181,9 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                         showlegend=False), row=1, col=1)
             except Exception:
                 pass
+
+    if show_overlays and marks and not weekly:
+        _add_marks(fig, d, marks)
 
     if show_overlays and levels:
         piv, stp, tgt = levels.get("pivot"), levels.get("stop"), levels.get("target")

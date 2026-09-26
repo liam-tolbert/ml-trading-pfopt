@@ -1116,14 +1116,17 @@ def _edgar_backfill(sym: str, today=None, force: bool = False) -> Optional[dict]
     quarters), ``revenue_quarter_end`` / ``eps_quarter_end`` (``'YYYY-MM-DD'`` of the
     quarter each ``*_yoy`` describes), and the ``_code33``, ``_annual_runs`` and
     ``_edgar_last_report`` keys. A ``*_prev`` is the quarter immediately before. A key is
-    None when the facts can't support it. ``force`` skips the fresh cache. With no CIK or a
+    None when the facts can't support it. ``force`` skips the fresh cache, and a cache
+    missing any of ``_EDGAR_KEYS`` (an older schema) is not served. With no CIK or a
     failed fetch, returns the stale cache if any, else None; foreign listings and funds
     have no CIK."""
     ensure_dirs()
     path = EDGAR_DIR / f"{sym}.json"
     if not force and age_days(path) <= 7.0:
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if all(k in cached for k in _EDGAR_KEYS):
+                return cached
         except Exception:
             pass
     cik = _edgar_cik(sym)
@@ -1300,6 +1303,12 @@ def _reported_since_written(cached: dict, path: Path, today=None) -> bool:
     return written <= report < _today(today)
 
 
+# A cache missing any of these was written by an older schema and is refetched whatever its
+# age. The newest key per schema is enough; a key present as None is a valid cache.
+_FUNDAMENTALS_KEYS = ("next_earnings", "last_surprise_pct", "est_rev_90d")
+_EDGAR_KEYS = ("code33", "last_report")
+
+
 def get_fundamentals(ticker: str, force: bool = False,
                      max_age_days: float = 7.0, today=None) -> Optional[dict]:
     """Quarterly fundamentals for ``ticker`` as a dict, from a per-ticker JSON cache up to
@@ -1314,9 +1323,7 @@ def get_fundamentals(ticker: str, force: bool = False,
         try:
             cached = json.loads(path.read_text())
             reported = _reported_since_written(cached, path, today)
-            # A cache without these keys has an older schema and is refetched at once,
-            # not after max_age_days. A key present as None is a valid cache.
-            if "next_earnings" in cached and "last_surprise_pct" in cached and not reported:
+            if all(k in cached for k in _FUNDAMENTALS_KEYS) and not reported:
                 return cached
         except Exception:
             pass

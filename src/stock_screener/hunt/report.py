@@ -139,6 +139,7 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
          f'<td class="n">{r["dist_days"]}</td>'
          f'<td class="mono dim">{_esc(r["depths"])}</td>'
          f'<td class="n">{_f(r.get("depth_vs_spy"), "{:.1f}")}</td>'
+         f'<td class="mono dim">{_esc(r.get("step3") or "-")}</td>'
          f'<td class="note">{_esc((verdicts.get(r["ticker"]) or {}).get("notes", ""))}</td></tr>'
          )((verdicts.get(r["ticker"]) or {}).get("verdict", "unreviewed"))
         for r in diag_rows)
@@ -340,13 +341,16 @@ th.n {{ text-align:right; }}
     <th>RS line</th><th class="n">200d mo</th>
     <th class="n">F</th><th class="n">Close</th><th class="n">Pivot</th><th class="n">vs piv</th>
     <th class="n">ADV$M</th><th class="n">Max order $</th><th class="n">DD</th><th>Legs %</th>
-    <th class="n">Depth&times;mkt</th><th>Chart notes</th></tr>
+    <th class="n">Depth&times;mkt</th><th>Base reads</th><th>Chart notes</th></tr>
   </thead><tbody>{full_tr}</tbody></table>
   </div>
 
   <p class="foot">Q = mechanical VCP quality &middot; RS = relative strength &middot; F = fundamental
   checks 0&ndash;8 (0&ndash;4 on a scan from before the eight) &middot; vs piv = close relative to detected pivot &middot; ADV$M = 20-day average
-  dollar volume &middot; DD = distribution days, last 25 sessions &middot; Legs = detected contraction
+  dollar volume &middot; DD = distribution days, last 25 sessions &middot; Base reads: DU = the final
+  tight area's volume over its 50-day average / near-silent days, SO = shakeout, LL = an
+  undercut that stayed below, R = the right side's pace against the decline, H = each dip
+  at most ~half the one before &middot; Legs = detected contraction
   sequence, oldest first &middot; &#9733; = watchlist name. Chart verdicts are review notes against the
   SEPA checklist, not trade instructions.</p>
 </div>

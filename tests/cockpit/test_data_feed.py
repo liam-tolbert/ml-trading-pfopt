@@ -452,7 +452,7 @@ def test_fundamentals_refetch_after_report_date():
                              lambda s, force=False: forced.append(force)):
             def cached(report):
                 p.write_text(_json.dumps({"revenue_yoy": 1.0, "next_earnings": report,
-                                          "last_surprise_pct": None}))
+                                          "last_surprise_pct": None, "est_rev_90d": None}))
             cached(day(1))
             assert dfeed.get_fundamentals("TSTX", today=day(1))["revenue_yoy"] == 1.0
             assert dfeed.get_fundamentals("TSTX", today=day(2))["revenue_yoy"] == 99.0
@@ -462,6 +462,52 @@ def test_fundamentals_refetch_after_report_date():
             assert dfeed.get_fundamentals("TSTX", today=day(2))["revenue_yoy"] == 1.0
             cached(None)
             assert dfeed.get_fundamentals("TSTX", today=day(2))["revenue_yoy"] == 1.0
+
+
+def test_fundamentals_refetch_old_step2_cache():
+    """§6.90: on 2026-09-26 the Pi still showed F out of 4. Friday's screen ran before the
+    eight-check code was promoted and rewrote ~450 passers' caches in the old schema, and a
+    cache under 7 days old was served whatever it held, so F would have read ≤ 4 until
+    ~Oct 2. A cache without `est_rev_90d` is now refetched at once; one holding it as None
+    is served."""
+    import json as _json
+    import tempfile
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    fresh = {"revenue_yoy": 99.0, "next_earnings": None, "last_surprise_pct": None,
+             "est_rev_90d": 7.0}
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "TSTX.json"
+        with patch.object(dfeed, "FUNDAMENTALS_DIR", Path(tmp)), \
+                patch.object(dfeed, "_fetch_fundamentals", lambda s: dict(fresh)), \
+                patch.object(dfeed, "_edgar_backfill", lambda s, force=False: None):
+            p.write_text(_json.dumps({"revenue_yoy": 1.0, "next_earnings": None,
+                                      "last_surprise_pct": None}))
+            assert dfeed.get_fundamentals("TSTX")["revenue_yoy"] == 99.0
+            p.write_text(_json.dumps({"revenue_yoy": 1.0, "next_earnings": None,
+                                      "last_surprise_pct": None, "est_rev_90d": None}))
+            assert dfeed.get_fundamentals("TSTX")["revenue_yoy"] == 1.0
+
+
+def test_edgar_refetch_old_cache():
+    """§6.90: a fresh EDGAR cache from before Code 33 and the release date is refetched,
+    not served for the rest of its 7 days."""
+    import json as _json
+    import tempfile
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "TSTX.json"
+        with patch.object(dfeed, "EDGAR_DIR", Path(tmp)), \
+                patch.object(dfeed, "_edgar_cik", lambda s: 1), \
+                patch.object(dfeed, "_edgar_get_json", lambda url: {"facts": {}}):
+            p.write_text(_json.dumps({"eps_yoy": 5.0}))
+            out = dfeed._edgar_backfill("TSTX")
+            assert "code33" in out and out["eps_yoy"] is None      # refetched
+            p.write_text(_json.dumps({"eps_yoy": 5.0, "code33": None, "last_report": None}))
+            assert dfeed._edgar_backfill("TSTX")["eps_yoy"] == 5.0   # served
 
 
 def test_margin_aligns_num_and_den_quarters():

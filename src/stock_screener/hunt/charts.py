@@ -104,8 +104,10 @@ def _panel(fig, gs, j, bundle: ScanBundle, r: dict, bars: int) -> None:
         ern = f"{int(float(r['earnings_in']))}d"
     except (TypeError, ValueError):
         ern = "-"
+    s3 = r.get("step3")
+    s3 = f"  {s3}" if isinstance(s3, str) and s3 else ""
     axp.set_title(
         f"#{r['rank']} {t}{star}  q={r['q']:.0f} RS={r['rs']} F={r['fund']}  "
         f"c={r['close']:.2f} piv={r['pivot']:.2f} ({r['vs_pivot_pct']:+.1f}%)  "
-        f"ADV${r['adv_musd']:.1f}M  DD={r['dist_days']}  ern={ern}",
+        f"ADV${r['adv_musd']:.1f}M  DD={r['dist_days']}  ern={ern}{s3}",
         fontsize=9, loc="left")

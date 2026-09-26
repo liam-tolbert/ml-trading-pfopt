@@ -72,6 +72,16 @@ def test_build_chart_returns_figure_with_expected_traces():
     assert zoom_n < full_n, f"lookback did not slice the view ({zoom_n} vs {full_n})"
     assert sum(isinstance(tr, go.Scatter) for tr in
                build_chart(ticker, df, lookback_days=90).data) >= 3
+    # §6.91: Step-3 marks become one marker trace per pane/symbol, daily view only; a date
+    # outside the frame is skipped
+    marks = [{"date": df.index[-3], "pane": "volume", "symbol": "circle", "text": "q"},
+             {"date": df.index[-2], "pane": "volume", "symbol": "circle", "text": "q"},
+             {"date": "1990-01-02", "pane": "price", "text": "gone"}]
+    plain = len(build_chart(ticker, df).data)
+    marked = build_chart(ticker, df, marks=marks)
+    assert len(marked.data) == plain + 1 and len(marked.data[-1].x) == 2
+    assert len(build_chart(ticker, df, marks=marks, weekly=True).data) == \
+        len(build_chart(ticker, df, weekly=True).data)
 
 
 def test_rs_ratings_ibd_weighted():
@@ -553,8 +563,11 @@ def test_screen_universe_rows_carry_step1_reads():
     prices, spy, _ = _synthetic_slice()
     res = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
     for col in ("rs_trend", "rs_slope_13w", "sma200_rising_m", "criteria",
-                "depth_vs_spy", "depth_flag"):
+                "depth_vs_spy", "depth_flag", "dryup_ratio", "dryup", "shakeout",
+                "undercut_broken", "v_speed", "book_tight"):
         assert col in res.candidates.columns, col
+    assert all(k in p for p in res.payloads.values()
+               for k in ("dryup", "shakeouts", "v_recovery", "book_tightening"))
     for v in res.candidates["depth_vs_spy"].dropna():
         assert v > 0
     assert all("depth" in p for p in res.payloads.values())

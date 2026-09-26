@@ -32,8 +32,9 @@ from src.stock_screener.cockpit.doctrine import (ADV_DAYS, MAX_ORDER_ADV_PCT,
                                                  EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
                                                  NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS,
                                                  VOL_CONFIRM_RATIO)
-from src.stock_screener.cockpit.advisories import (earnings_reaction, stop_room,
-                                                   typical_day_range)
+from src.stock_screener.cockpit.advisories import (book_tightening, earnings_reaction,
+                                                   shakeouts, stop_room, typical_day_range,
+                                                   v_recovery, volume_dryup)
 from src.stock_screener.cockpit.scan import code33_parts, inventory_flag
 from src.stock_screener.cockpit.indicators import (dollar_adv, prior_volume_average,
                                                    volume_ratio)
@@ -118,6 +119,27 @@ def _watchlist_tickers() -> List[str]:
         return []
 
 
+def step3_summary(dryup: Optional[dict], shake: Optional[dict] = None,
+                  vrec: Optional[dict] = None, tight: Optional[dict] = None) -> str:
+    """The review sheet's and report's short Step-3 read, e.g. ``'DU 0.62x/2 SO R0.7x H'``:
+    window volume over the 50-day average / near-silent days; ``SO`` a shakeout, ``LL`` an
+    undercut that stayed below (a lower low); ``R`` the right side's pace against the
+    decline; ``H`` each dip at most ~half the one before (the books' rule). Empty when
+    nothing is known."""
+    parts = []
+    if dryup:
+        parts.append(f"DU {dryup['avg_ratio']:.2f}x/{dryup['quiet_days']}")
+    if shake and shake["shakeouts"]:
+        parts.append("SO")
+    if shake and shake["broken"]:
+        parts.append("LL")
+    if vrec:
+        parts.append(f"R{vrec['speed']:.1f}x")
+    if tight and tight["book_tight"]:
+        parts.append("H")
+    return " ".join(parts)
+
+
 def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
     """One row per candidate in ``cand``, with every column the review, gates and report read.
 
@@ -153,6 +175,11 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         fu = p.get("fundamentals") or {}
         adv = dollar_adv(df, ADV_DAYS)
         react = earnings_reaction(df, fu.get("last_report"), fu.get("last_report_time")) or {}
+        # Step-3 reads from the frame and contractions, so an older pickle gets them too.
+        du = volume_dryup(df, v["contractions"]) or {}
+        so = shakeouts(df, v["contractions"])
+        vr_ = v_recovery(df, v["contractions"])
+        bt = book_tightening(v["contractions"], v.get("base_length_weeks"))
         rows.append({
             "rank": rank, "ticker": t, "wl": int(t in wl),
             "q": float(c["vcp_quality"]), "rs": int(c["rs"]),
@@ -192,6 +219,12 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "code33": code33_parts(fu), "inv_flag": inventory_flag(fu),
             "earn_react": react.get("day_pct"), "earn_flag": react.get("flag"),
             "est_rev_90d": fu.get("est_rev_90d"), "inst_count": fu.get("inst_count"),
+            "dryup_ratio": du.get("avg_ratio"), "quiet_days": du.get("quiet_days"),
+            "dryup": du.get("verdict"),
+            "shakeout": int(bool(so and so["shakeouts"])),
+            "v_speed": (vr_ or {}).get("speed"),
+            "book_tight": None if bt is None else int(bt["book_tight"]),
+            "step3": step3_summary(du, so, vr_, bt),
         })
     return pd.DataFrame(rows)
 

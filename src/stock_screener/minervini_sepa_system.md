@@ -173,7 +173,12 @@ prior advance and consolidates in a series of progressively tighter pullbacks:
 ```
 
 Each contraction (C1, C2, C3...) must be:
-- Smaller than the previous one (if C1 is 18%, C2 must be less than 18%)
+- Smaller than the previous one (if C1 is 18%, C2 must be less than 18%). The books'
+  rule of thumb is about **half** each time (32% → 14% → 7% → 3%). The scan accepts
+  gentler shrinking on purpose, so it never misses a real base; the Step-3 caption
+  shows each dip's ratio to the last and marks the books' halving ✅. It also shows the
+  base length against the books' 3-week minimum; the scan's own measure can read short,
+  so check the length on the chart
 - Accompanied by declining volume on the down leg
 - Followed by a recovery that does not need high volume — the stock just firms up
 
@@ -186,10 +191,21 @@ Each contraction (C1, C2, C3...) must be:
       (>50% corrections create heavy overhead supply)
 - [ ] Closes near the top of the daily range during the tightest part of the base
       ("tennis ball action" — quick bounces off lows, not grinding recoveries)
+- [ ] A **shakeout** is fine, even good: a quick dip under an earlier low of the base
+      that closes back above it within a few days scares out weak holders. A dip that
+      *stays* below is a lower low. Judge it on the chart: the cockpit's attempt to
+      detect it didn't separate good bases from bad on the labelled test charts, so
+      it isn't shown
 
 **Volume structure:**
 - [ ] Volume declines on each successive down leg — selling pressure fading
-- [ ] Volume is near its lowest point during the final, tightest contraction
+- [ ] Volume is near its lowest point during the final, tightest contraction.
+      The cockpit measures this: the "Dry-up" column is the final tight area's
+      volume against its 50-day average (under 1 = drying up), and the Step-3
+      caption counts the near-silent days (at or under half the average), which
+      the chart marks on the volume pane. A dry-up alone doesn't make a setup: on
+      the 200 labelled test charts it appears about as often in rejected bases as
+      in good ones
 - [ ] Up days in the base show higher volume than down days (accumulation signal)
 - [ ] No heavy volume spikes on down days (which would signal distribution/selling)
 
