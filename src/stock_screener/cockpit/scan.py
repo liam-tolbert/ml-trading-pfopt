@@ -126,16 +126,19 @@ def _rs_ratings(prices: Dict[str, pd.DataFrame], period: int) -> Dict[str, int]:
     return {t: int(round(v)) for t, v in pr.items()}
 
 
-def _step2_summary(f: Optional[dict]) -> dict:
-    """SEPA Step 2 as a set of pass/fail checks + a 0-4 pass-count. YoY preferred,
-    QoQ used as a fallback when yfinance exposes too few quarters for YoY. Returns
-    ``{score, checks, available}``; ``available`` is False when ``f`` is empty."""
+def _step2_summary(f: Optional[dict], reaction: Optional[dict] = None) -> dict:
+    """SEPA Step 2 as eight pass/fail checks and their pass count, F (0-8). YoY preferred,
+    QoQ used as a fallback when yfinance exposes too few quarters for YoY. ``reaction`` is
+    the ``advisories.earnings_reaction`` read; the last check fails without one. A missing
+    figure fails its check. Returns ``{score, checks, available}``; ``available`` is False
+    when ``f`` is empty."""
     if not f:
         return {"score": 0, "checks": {}, "available": False}
     rev = f.get("revenue_yoy")
     rev = rev if rev is not None else f.get("revenue_qoq")
     eps = f.get("eps_yoy")
     eps = eps if eps is not None else f.get("eps_qoq")
+    est = f.get("est_rev_90d")
     checks = {
         "revenue_growth": rev is not None and rev >= 20.0,
         "eps_growth": eps is not None and eps >= 20.0,
@@ -143,8 +146,85 @@ def _step2_summary(f: Optional[dict]) -> dict:
                              and f.get("eps_yoy_prev") is not None
                              and f["eps_yoy"] >= f["eps_yoy_prev"]),
         "margin_expanding": f.get("margin_trend") is not None and f["margin_trend"] >= 0.0,
+        "code33": (f.get("code33") or {}).get("all") is True,
+        "annual_eps_up": f.get("eps_fy_up") is True,
+        "estimates_raised": est is not None and est >= ESTIMATE_RAISE_MIN_PCT,
+        "report_held": reaction is not None and reaction.get("flag") != "hard_drop",
     }
     return {"score": int(sum(checks.values())), "checks": checks, "available": True}
+
+
+# Inventory growing this many points faster than sales, quarter on quarter, is the books'
+# "inventory piling up" warning. The books give no number; this is an operating choice.
+INVENTORY_VS_SALES_PTS = 10.0
+# The guide's "upward estimate revisions >= 5% over the past 3 months".
+ESTIMATE_RAISE_MIN_PCT = 5.0
+
+
+def code33_parts(f: Optional[dict]) -> Optional[int]:
+    """How many of Code 33's three legs (EPS growth, sales growth, net margin) rose over
+    the last three quarters, 0-3; 3 is Code 33. None when a leg is unknown."""
+    c = (f or {}).get("code33")
+    if not isinstance(c, dict):
+        return None
+    return int(sum(bool(c.get(k)) for k in ("eps", "sales", "margin")))
+
+
+def inventory_flag(f: Optional[dict]) -> Optional[bool]:
+    """True when inventory grew ``INVENTORY_VS_SALES_PTS`` or more faster than sales last
+    quarter; None when either figure is missing (most service companies carry none)."""
+    inv, rev = (f or {}).get("inventory_qoq"), (f or {}).get("revenue_qoq")
+    if inv is None or rev is None:
+        return None
+    return bool(inv - rev >= INVENTORY_VS_SALES_PTS)
+
+
+def step2_lines(f: Optional[dict]) -> List[str]:
+    """Markdown lines for the Step-2 panel's Code 33, annual-EPS and warning reads, in
+    display order. Empty when ``f`` has none of them (an older cache)."""
+    f = f or {}
+    out = []
+
+    def run(v, fmt):
+        return "→".join(fmt.format(x) for x in v) if v else "n/a"
+
+    c = f.get("code33")
+    if isinstance(c, dict):
+        head = "✅" if c.get("all") else f"{code33_parts(f)}/3"
+        out.append(
+            f"**Code 33** {head} · EPS {run(f.get('eps_g3'), '{:+.0f}%')} "
+            f"{'✅' if c.get('eps') else '—'} · sales {run(f.get('rev_g3'), '{:+.0f}%')} "
+            f"{'✅' if c.get('sales') else '—'} · net margin "
+            f"{run(f.get('margin3'), '{:.1f}%')} {'✅' if c.get('margin') else '—'}")
+    up, up3 = f.get("eps_fy_up"), f.get("eps_fy_up_3y")
+    if up is not None:
+        out.append(f"**Annual EPS** {'↑ ✅' if up else '↓ —'}"
+                   + ("" if up3 is None else
+                      " · 3 years rising ✅" if up3 else " · not 3 years rising"))
+    if f.get("eps_decel_2q"):
+        out.append(f"⚠️ EPS growth slowed two quarters running "
+                   f"({run(f.get('eps_g3'), '{:+.0f}%')}), a sign the books disqualify on")
+    if inventory_flag(f):
+        out.append(f"⚠️ Inventory {f['inventory_qoq']:+.1f}% vs sales "
+                   f"{f['revenue_qoq']:+.1f}% last quarter: stock is piling up faster "
+                   f"than it sells")
+    est = f.get("est_rev_90d")
+    if est is not None:
+        mark = (" ✅" if est >= ESTIMATE_RAISE_MIN_PCT
+                else " ⚠️ analysts are cutting" if est <= -ESTIMATE_RAISE_MIN_PCT else "")
+        e30 = f.get("est_rev_30d")
+        recent = "" if e30 is None else f" ({e30:+.1f}% over 30)"
+        out.append(f"**Estimates** this year's EPS {est:+.1f}% over 90 days{recent}{mark}")
+    cnt, pct = f.get("inst_count"), f.get("inst_pct")
+    if cnt is not None:
+        hist = f.get("inst_history") or []
+        trend = ""
+        if len(hist) >= 2:
+            (d0, c0) = hist[-2]
+            trend = f" ({'↑' if cnt > c0 else '↓'} from {c0} on {d0})"
+        held = "" if pct is None else f" holding {pct:.0f}%"
+        out.append(f"**Funds** {cnt}{held}{trend}")
+    return out
 
 
 def _days_to_earnings(f: Optional[dict],
@@ -416,7 +496,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     recorded in ``errors`` and never aborts the scan.
     """
     from . import breadth_store
-    from .advisories import depth_vs_market
+    from .advisories import depth_vs_market, earnings_reaction
     cfg = cfg or ScanConfig()
     errors: List[str] = []
     spy_cp = float(spy["Close"].iloc[-1])
@@ -467,7 +547,9 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 sect = (get_sector(t) if get_sector else None) or {}
             except Exception:
                 sect = {}
-            s2 = _step2_summary(fund)
+            reaction = earnings_reaction(df, (fund or {}).get("last_report"),
+                                         (fund or {}).get("last_report_time"))
+            s2 = _step2_summary(fund, reaction)
             if s2["score"] < cfg.min_fundamental_score:
                 continue
             earnings_in = _days_to_earnings(fund)
@@ -512,6 +594,11 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "rev_yoy": _fmt(fund and fund.get("revenue_yoy")),
                 "eps_yoy": _fmt(fund and fund.get("eps_yoy")),
                 "op_margin": _fmt(fund and fund.get("operating_margin")),
+                "code33": code33_parts(fund),
+                "inv_flag": inventory_flag(fund),
+                "earn_react": (reaction or {}).get("day_pct"),
+                "earn_react_flag": (reaction or {}).get("flag"),
+                "est_rev_90d": _fmt(fund and fund.get("est_rev_90d")),
                 "earnings_in": earnings_in,
                 "tier": vcp.get("tier", "B"),
                 "vcp": bool(vcp.get("is_vcp")),
@@ -534,7 +621,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "step2": s2, "rs": rsr, "rs_nh": rs_nh, "template": tmpl,
                 "book_template": book, "rs_trend": rs_trend,
                 "sma200_rising_m": sma200_m, "adv_usd": adv_usd, "depth": depth,
-                "earnings_in": earnings_in,
+                "earnings_in": earnings_in, "reaction": reaction,
             }
         except Exception as e:                                  # never let one name kill the scan
             errors.append(f"{t}: {e}")

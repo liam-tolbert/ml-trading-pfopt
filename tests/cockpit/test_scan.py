@@ -107,13 +107,58 @@ def test_rs_ratings_ibd_weighted():
 
 
 def test_step2_summary_logic():
+    """§6.89: F counts eight checks. The four original ones, then Code 33, annual EPS up,
+    estimates raised >= 5% over 90 days, and the last report held (no hard drop on heavy
+    volume). A missing figure fails its check; a missing reaction fails only the last."""
     s = scan_mod._step2_summary(None)
     assert s["score"] == 0 and s["available"] is False
-    strong = scan_mod._step2_summary(
-        {"revenue_yoy": 35.0, "eps_yoy": 50.0, "eps_yoy_prev": 40.0, "margin_trend": 2.0})
-    assert strong["score"] == 4
+    old = {"revenue_yoy": 35.0, "eps_yoy": 50.0, "eps_yoy_prev": 40.0, "margin_trend": 2.0}
+    strong = scan_mod._step2_summary(old)
+    assert strong["score"] == 4 and len(strong["checks"]) == 8
+    full = {**old, "code33": {"eps": True, "sales": True, "margin": True, "all": True},
+            "eps_fy_up": True, "est_rev_90d": 5.0}
+    held = {"flag": None, "day_pct": 1.0}
+    assert scan_mod._step2_summary(full, held)["score"] == 8
+    no_react = scan_mod._step2_summary(full)
+    assert no_react["score"] == 7 and no_react["checks"]["report_held"] is False
+    dropped = scan_mod._step2_summary(full, {"flag": "hard_drop"})
+    assert dropped["checks"]["report_held"] is False
+    assert scan_mod._step2_summary(full, {"flag": "strong"})["checks"]["report_held"]
+    part = {**full, "code33": {"eps": True, "sales": True, "margin": False, "all": False},
+            "est_rev_90d": 4.9, "eps_fy_up": None}
+    assert scan_mod._step2_summary(part, held)["score"] == 5
     weak = scan_mod._step2_summary({"revenue_qoq": 1.0, "eps_qoq": -5.0})
     assert weak["score"] == 0
+
+
+def test_code33_inventory_and_step2_lines():
+    """§6.86: the scan's Code 33 count, the inventory warning and the Step-2 panel lines,
+    from a fundamentals dict; an older cache without the keys yields None and no lines."""
+    f = {"code33": {"eps": True, "sales": False, "margin": True, "all": False},
+         "eps_g3": [40.0, 30.0, 20.0], "rev_g3": [10.0, 12.0, 11.0], "margin3": [8.0, 9.0, 9.5],
+         "eps_decel_2q": True, "eps_fy_up": False, "eps_fy_up_3y": None,
+         "inventory_qoq": 15.0, "revenue_qoq": 2.0}
+    assert scan_mod.code33_parts(f) == 2
+    assert scan_mod.inventory_flag(f) is True
+    assert scan_mod.inventory_flag({**f, "inventory_qoq": 11.9}) is False
+    assert scan_mod.inventory_flag({"revenue_qoq": 2.0}) is None
+    lines = scan_mod.step2_lines(f)
+    assert lines[0].startswith("**Code 33** 2/3 · EPS +40%→+30%→+20% ✅ · sales"), lines
+    assert "sales +10%→+12%→+11% —" in lines[0]
+    assert lines[1] == "**Annual EPS** ↓ —"
+    assert lines[2].startswith("⚠️ EPS growth slowed two quarters running")
+    assert lines[3].startswith("⚠️ Inventory +15.0% vs sales +2.0%")
+    assert scan_mod.code33_parts({"revenue_yoy": 1.0}) is None
+    # §6.88: estimates and funds
+    est = scan_mod.step2_lines({"est_rev_90d": 84.6, "est_rev_30d": -14.4, "inst_count": 235,
+                                "inst_pct": 96.0,
+                                "inst_history": [["2026-07-02", 221], ["2026-09-25", 235]]})
+    assert est == ["**Estimates** this year's EPS +84.6% over 90 days (-14.4% over 30) ✅",
+                   "**Funds** 235 holding 96% (↑ from 221 on 2026-07-02)"], est
+    cut = scan_mod.step2_lines({"est_rev_90d": -6.0, "inst_count": 10})
+    assert cut == ["**Estimates** this year's EPS -6.0% over 90 days ⚠️ analysts are cutting",
+                   "**Funds** 10"], cut
+    assert scan_mod.step2_lines({"revenue_yoy": 1.0}) == [] and scan_mod.step2_lines(None) == []
 
 
 def test_entry_levels_stop_clamped_to_pivot():
@@ -179,10 +224,12 @@ def test_filter_candidates_matches_scan_gates():
 
     def _fund(t):
         # Varied fundamentals so min_fund actually splits the fixture: even-digit names
-        # score 4/4 checks, the rest have no data (score 0).
+        # pass 7 of 8 checks (no release date, so no reaction), the rest have no data (0).
         if t and t[-1] in "02468":
             return {"revenue_yoy": 40.0, "eps_yoy": 60.0, "eps_yoy_prev": 50.0,
-                    "margin_trend": 1.0, "operating_margin": 25.0}
+                    "margin_trend": 1.0, "operating_margin": 25.0,
+                    "code33": {"eps": True, "sales": True, "margin": True, "all": True},
+                    "eps_fy_up": True, "est_rev_90d": 12.0}
         return None
 
     loosest = screen_universe(list(prices), prices, spy, get_fundamentals=_fund,
@@ -191,6 +238,7 @@ def test_filter_candidates_matches_scan_gates():
 
     cases = [dict(min_rs=r) for r in (0.0, 60.0, 70.0, 90.0, 99.0)]
     cases += [dict(require_vcp=True), dict(min_fundamental_score=1),
+              dict(min_fundamental_score=6), dict(min_fundamental_score=8),
               dict(min_rs=70.0, min_fundamental_score=1)]
     for kw in cases:
         gated = screen_universe(list(prices), prices, spy, get_fundamentals=_fund,

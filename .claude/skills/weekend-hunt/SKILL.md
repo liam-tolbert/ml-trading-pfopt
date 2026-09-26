@@ -48,7 +48,9 @@ mamba run -n ml-trading python -m src.stock_screener.hunt <cmd>
 6. **`validate-verdicts`** — must report `ok: true` (every candidate exactly
    once). Fix any problems it lists before proceeding.
 7. **`gates --min-fund N`** — N is the user's choice (ask or default 0; report
-   the F distribution rather than silently gating). Output has the buckets
+   the F distribution rather than silently gating). F runs 0–8 (a scan from
+   before the eight checks runs 0–4; the report's F column shows which). A
+   missing figure fails its check, so a low F can mean thin data. Output has the buckets
    (buy_zone / approaching / below / past_entry), earnings-blocked names,
    volume-confirmed names, and the watchlist audit.
 8. **`report --min-fund N`** — writes `report.html` in the hunt dir. Publish it

@@ -395,5 +395,60 @@ def test_depth_vs_market():
     assert advisories.depth_vs_market(tz, frame(spy), cons)["ratio"] == 2.3
 
 
+def _reaction_frame(moves=None, n=80):
+    """A flat 100.0 tape of 1,000-share days from 2026-07-01, with ``moves`` =
+    ``{date: (open, close, volume)}`` overriding single bars."""
+    import pandas as pd
+    idx = pd.bdate_range("2026-07-01", periods=n)
+    df = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0, "Close": 100.0,
+                       "Volume": 1000.0}, index=idx)
+    for d, (o, c, v) in (moves or {}).items():
+        df.loc[pd.Timestamp(d), ["Open", "Close", "Volume"]] = [o, c, v]
+    return df
+
+
+def test_earnings_reaction_session_timing():
+    """§6.87 (audit Step-2 #3): the reaction session is the release day's bar for a
+    release before the open or during the session, and the next bar for one at or after
+    16:00 New York time: a Friday-evening release reacts on Monday."""
+    from src.stock_screener.cockpit import advisories
+
+    df = _reaction_frame({"2026-09-11": (100.0, 97.0, 3000.0),      # Friday
+                          "2026-09-14": (94.0, 92.0, 3000.0)})      # Monday
+    after = advisories.earnings_reaction(df, "2026-09-11", "16:05")
+    assert after["date"] == "2026-09-14"
+    assert after["day_pct"] == round((92.0 / 97.0 - 1) * 100, 1)
+    before = advisories.earnings_reaction(df, "2026-09-11", "08:00")
+    assert before["date"] == "2026-09-11" and before["day_pct"] == -3.0
+    assert advisories.earnings_reaction(df, "2026-09-11", "11:30")["date"] == "2026-09-11"
+    assert advisories.earnings_reaction(df, "2026-09-11")["date"] == "2026-09-11"
+    # the reaction bar hasn't printed yet: an after-close release on the last bar
+    last = df.index[-1].strftime("%Y-%m-%d")
+    assert advisories.earnings_reaction(df, last, "16:10") is None
+
+
+def test_earnings_reaction_flags():
+    """§6.87: −6% on 2× volume is a hard drop; −6% on 1.2× is not; +7% on 2× is strong. A
+    release outside the frame, or over 100 days before its last bar, reads None."""
+    from src.stock_screener.cockpit import advisories
+
+    df = _reaction_frame({"2026-09-15": (95.0, 94.0, 2000.0)})
+    r = advisories.earnings_reaction(df, "2026-09-15", "07:00")
+    assert r["flag"] == "hard_drop" and r["vol_ratio"] == 2.0 and r["gap_pct"] == -5.0
+    assert r["since_pct"] == round((100.0 / 94.0 - 1) * 100, 1)
+    text = advisories.earnings_reaction_text(r, "2026-09-15", "07:00")
+    assert text.startswith("**Last report** 2026-09-15 (before the open): -6.0% on 2.0×")
+    assert "⚠️ a hard drop" in text
+    light = _reaction_frame({"2026-09-15": (95.0, 94.0, 1200.0)})
+    assert advisories.earnings_reaction(light, "2026-09-15", "07:00")["flag"] is None
+    up = _reaction_frame({"2026-09-15": (104.0, 107.0, 2000.0)})
+    assert advisories.earnings_reaction(up, "2026-09-15", "07:00")["flag"] == "strong"
+    assert advisories.earnings_reaction(df, "2026-01-02", "07:00") is None
+    long = _reaction_frame({"2026-07-06": (95.0, 94.0, 2000.0)}, n=160)
+    assert advisories.earnings_reaction(long, "2026-07-06", "07:00") is None
+    assert advisories.earnings_reaction(df, None) is None
+    assert advisories.earnings_reaction_text(None) == ""
+
+
 if __name__ == "__main__":
     raise SystemExit(run_suite(globals(), "advisories"))

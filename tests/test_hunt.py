@@ -122,6 +122,16 @@ def test_diagnostics_and_gates():
     ok("step-1 reads absent from an older scan read as None",
        a["rs_trend"] is None and a["sma200_m"] is None and a["depth_vs_spy"] is None
        and a["industry"] is None)
+    # §6.86: Code 33 and the inventory flag come from the payload's fundamentals
+    ok("step-2 reads absent from older fundamentals read as None",
+       a["code33"] is None and a["inv_flag"] is None and a["earn_react"] is None)
+    # §6.87: the reaction is computed from the frame and the fundamentals' release date
+    b2 = _bundle()
+    rel = b2.result.payloads["AAA"]["df"].index[-5].strftime("%Y-%m-%d")
+    b2.result.payloads["AAA"]["fundamentals"].update(last_report=rel, last_report_time="07:00")
+    a2 = pl.diagnostics(b2, pl.candidates(b2)).set_index("ticker").loc["AAA"]
+    ok("earnings reaction read from the release date", a2["earn_react"] is not None
+       and a2["earn_flag"] is None)
     # §6.81: ADV through the shared helper, and the liquidity ceiling beside it
     _df = b.result.payloads["AAA"]["df"]
     _adv = float((_df["Close"] * _df["Volume"]).tail(20).mean())
@@ -200,8 +210,22 @@ def test_report_builds():
              "n_tier_a": 5, "n_eligible": 4, "min_rs": 70}))
         out = build_report(d, min_fund=0)
         html = out.read_text(encoding="utf-8")
+        # §6.89: the fixture's step2 holds the four older checks, so F reads out of 4
+        ok("F out of the payload's check count", "</b>/4</td>" in html
+           and "</b>/8</td>" not in html)
+        eight = diag.copy()
+        eight["f_max"] = 8
+        eight.to_csv(d / "diagnostics.csv", index=False)
+        ok("F out of 8 on a scan with the eight checks",
+           "</b>/8</td>" in build_report(d, min_fund=6).read_text(encoding="utf-8"))
+        # a diagnostics.csv from before the eight: no f_max, no new f_* columns
+        diag.drop(columns=["f_max", "f_code33", "f_fy", "f_est", "f_react"]).to_csv(
+            d / "diagnostics.csv", index=False)
+        ok("an older diagnostics.csv still renders",
+           "</b>/4</td>" in build_report(d).read_text(encoding="utf-8"))
+        diag.to_csv(d / "diagnostics.csv", index=False)
         for frag in ("Weekend Hunt", "In the buy zone", "Approaching pivot",
-                     "Volume-confirmed", "Step-2 fundamentals", "Full review",
+                     "Volume-confirmed", "Step-2 fundamentals", "Code&nbsp;33", "Full review",
                      "RS line", "Groups among PASS names", "AAA", "EEE"):
             ok(f"report contains {frag!r}", frag in html)
 

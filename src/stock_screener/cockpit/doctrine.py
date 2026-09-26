@@ -83,3 +83,8 @@ MARKET_TURN_REDUCE_FRACTION = 0.5
 # current bar MUST be excluded; it would dilute the spike being tested.
 VOL_CONFIRM_RATIO = 1.5
 VOL_AVG_DAYS = 50
+
+# The reaction to the last earnings report: a session that moved this many percent on
+# VOL_CONFIRM_RATIO volume. The books say a stock that "drops hard on huge volume" after
+# its report should be left alone, but give no number; 5% is an operating choice.
+EARNINGS_REACTION_PCT = 5.0

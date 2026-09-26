@@ -99,17 +99,20 @@ def test_edgar_backfill_parsing():
         r.json.return_value = cik_map if "company_tickers" in url else facts
         return r
 
+    today = pd.Timestamp("2026-06-01")
     with tempfile.TemporaryDirectory() as tmp:
         with patch.object(dfeed, "EDGAR_DIR", Path(tmp)), \
                 patch("requests.get", fake_get), patch("time.sleep", lambda s: None):
-            out = dfeed._edgar_backfill("TSTX")
+            out = dfeed._edgar_backfill("TSTX", today=today)
             # cached: a second call must not refetch (poison the network to prove it)
             with patch("requests.get", side_effect=AssertionError("refetched!")):
-                again = dfeed._edgar_backfill("TSTX")
+                again = dfeed._edgar_backfill("TSTX", today=today)
     assert again == out
 
     # YoY math off the AMENDED 2026-03-31 value: 1.47 vs 1.05 -> +40%
     assert abs(out["eps_yoy"] - 40.0) < 1e-6, out
+    assert out["eps_quarter_end"] == "2026-03-31"
+    assert out["revenue_quarter_end"] == "2026-03-31"
     # prev quarter: 1.50 vs 1.00 -> +50%
     assert abs(out["eps_yoy_prev"] - 50.0) < 1e-6
     # 3q acceleration: +40% (amended) vs +50% -> NOT strictly accelerating
@@ -123,8 +126,11 @@ def test_edgar_backfill_parsing():
 
 def test_fundamentals_surprise_and_edgar_merge():
     """(a) _last_earnings_surprise reads the newest REPORTED Surprise(%) row (future NaN
-    rows drop); (b) get_fundamentals merges the EDGAR backfill: yfinance values WIN,
-    EDGAR fills the Nones and adds its own keys; the merged dict is what gets cached;
+    rows drop) with its date, and drops one older than SURPRISE_MAX_AGE_DAYS: yfinance
+    0.2.65's earnings_dates stopped at May 2025, so the panel showed a 16-month-old
+    surprise (§6.85); (b) get_fundamentals merges the EDGAR backfill: yfinance values WIN,
+    EDGAR fills the Nones and adds its own keys, but a prior-quarter YoY only joins a
+    yfinance YoY describing the same quarter; the merged dict is what gets cached;
     (c) a pre-surprise-era cache (missing the new key) triggers one upgrade refetch."""
     import json as _json
     import tempfile
@@ -139,12 +145,13 @@ def test_fundamentals_surprise_and_edgar_merge():
             {"EPS Estimate": [1.0, 1.1, 1.2], "Surprise(%)": [4.0, 6.5, float("nan")]},
             index=pd.to_datetime(["2026-01-15", "2026-04-16", "2026-07-20"]))
 
-    assert dfeed._last_earnings_surprise(_Tk()) == 6.5
+    assert dfeed._last_earnings_surprise(_Tk(), today="2026-05-01") == ("2026-04-16", 6.5)
+    assert dfeed._last_earnings_surprise(_Tk(), today="2026-09-01") == (None, None)
 
     class _TkNone:
         earnings_dates = None
 
-    assert dfeed._last_earnings_surprise(_TkNone()) is None
+    assert dfeed._last_earnings_surprise(_TkNone()) == (None, None)
 
     # (b) + (c) merge & cache behavior with both fetchers patched
     yf_dict = {"revenue_yoy": None, "eps_yoy": 33.0, "eps_yoy_prev": None,
@@ -159,7 +166,7 @@ def test_fundamentals_surprise_and_edgar_merge():
             out = dfeed.get_fundamentals("TSTX")
             assert out["revenue_yoy"] == 12.0             # EDGAR fills the None
             assert out["eps_yoy"] == 33.0                 # yfinance wins when present
-            assert out["eps_yoy_prev"] == 8.0
+            assert out["eps_yoy_prev"] is None            # quarter unknown: not paired
             assert out["eps_fy_yoy"] == 22.5 and out["eps_accel_3q"] is True
             cached = _json.loads((Path(tmp) / "TSTX.json").read_text())
             assert cached == out                          # the MERGED dict is cached
@@ -169,6 +176,292 @@ def test_fundamentals_surprise_and_edgar_merge():
                 _json.dumps({"revenue_yoy": 1.0, "next_earnings": None}))
             out2 = dfeed.get_fundamentals("OLD")
             assert "last_surprise_pct" in out2 and out2["eps_fy_yoy"] == 22.5
+
+
+def _facts_q(end, val, days=91, filed="2026-01-01"):
+    import pandas as pd
+    start = (pd.Timestamp(end) - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    return {"start": start, "end": end, "val": val, "filed": filed}
+
+
+def test_edgar_picks_freshest_tag():
+    """§6.85: EDGAR took the first tag with ANY data. HALO's and GILD's `Revenues` stops at
+    2020-12-31 while `RevenueFromContract…` runs to 2026, so their revenue YoY pair came
+    from 2020. The tag whose newest period ends latest now wins."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    old = [_facts_q(e, v) for e, v in (("2019-12-31", 50.0), ("2020-12-31", 60.0))]
+    new = [_facts_q(e, v) for e, v in (("2025-06-30", 100.0), ("2026-06-30", 125.0))]
+    facts = {"facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": old}},
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": new}},
+    }}}
+    q, _a = dfeed._edgar_series(facts, dfeed.EDGAR_REVENUE_TAGS, ("USD",),
+                                today=pd.Timestamp("2026-09-25"))
+    assert [v for _, v in q] == [100.0, 125.0], q
+
+
+def test_edgar_ignores_proxy_statement_facts():
+    """§6.86: ANET's DEF 14A pay-versus-performance table tags net income in millions
+    (3511 for $3.5B). Filed after the 10-K, it won the latest-filed rule, and the derived
+    fiscal Q4 came out at −$2.6B. Only 10-Q/10-K facts count; a fact without a form
+    (older canned data) still does."""
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    ten_k = {**_facts_q("2025-12-31", 3.5114e9, days=364, filed="2026-02-17"), "form": "10-K"}
+    proxy = {**_facts_q("2025-12-31", 3511.0, days=364, filed="2026-04-16"), "form": "DEF 14A"}
+    q, a = dfeed._edgar_tag_series({"USD": [ten_k, proxy]}, ("USD",))
+    assert a[0][1] == 3.5114e9 and q == []
+    q, a = dfeed._edgar_tag_series({"USD": [_facts_q("2025-12-31", 7.0, days=364)]}, ("USD",))
+    assert a[0][1] == 7.0
+
+
+def test_edgar_stale_series_dropped():
+    """§6.85: GILD's quarterly `EarningsPerShareDiluted` ends 2010-06-30; with no fresher
+    tag the series is dropped rather than read as current. Annual facts have their own,
+    longer limit."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    eps = [_facts_q("2010-03-31", 1.0), _facts_q("2010-06-30", 1.2),
+           _facts_q("2025-12-31", 5.0, days=365), _facts_q("2024-12-31", 4.0, days=365)]
+    facts = {"facts": {"us-gaap": {"EarningsPerShareDiluted": {"units": {"USD/shares": eps}}}}}
+    q, a = dfeed._edgar_series(facts, dfeed.EDGAR_EPS_TAGS, ("USD/shares",),
+                               today=pd.Timestamp("2026-09-25"))
+    assert q == [] and [v for _, v in a] == [4.0, 5.0]
+    q, a = dfeed._edgar_series(facts, dfeed.EDGAR_EPS_TAGS, ("USD/shares",),
+                               today=pd.Timestamp("2028-01-01"))
+    assert q == [] and a == []
+
+
+def test_edgar_fills_fiscal_q4():
+    """§6.85: companies file the fourth quarter only inside the 10-K's year, so EDGAR had
+    no March quarter for MLAB (fiscal year ends in March), and '3 quarters running' spanned
+    a missing one. Q4 = FY − (Q1+Q2+Q3) when exactly three quarters sit inside the year."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    T = pd.Timestamp
+    quarterly = [(T("2025-06-30"), 1.0), (T("2025-09-30"), 2.0), (T("2025-12-31"), 3.0),
+                 (T("2026-06-30"), 5.0)]
+    annual = [(T("2026-03-31"), 10.0)]
+    filled = dfeed._edgar_fill_q4(quarterly, annual)
+    assert (T("2026-03-31"), 4.0) in filled and len(filled) == 5
+    assert dfeed._consecutive(filled, 3) == [3.0, 4.0, 5.0]
+    # only two quarters inside the year: no fill
+    assert dfeed._edgar_fill_q4(quarterly[1:], annual) == quarterly[1:]
+    # a Q4 already filed is kept, not derived
+    have = quarterly[:3] + [(T("2026-03-31"), 9.0)]
+    assert dfeed._edgar_fill_q4(have, annual) == have
+
+
+def test_eps_accel_3q_needs_consecutive_quarters():
+    """§6.85: `eps_accel_3q` compared the last three growth figures whatever their dates,
+    so a missing quarter made it span half a year. It now needs three consecutive quarters,
+    and a prior-quarter YoY must be the quarter immediately before."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    T = pd.Timestamp
+    run = [(T("2025-12-31"), 10.0), (T("2026-03-31"), 20.0), (T("2026-06-30"), 30.0)]
+    assert dfeed._consecutive(run, 3) == [10.0, 20.0, 30.0]
+    gap = [(T("2025-09-30"), 10.0), (T("2026-03-31"), 20.0), (T("2026-06-30"), 30.0)]
+    assert dfeed._consecutive(gap, 3) is None
+    assert dfeed._consecutive(gap, 2) == [20.0, 30.0]
+    assert dfeed._consecutive(run[:1], 2) is None
+
+
+def test_edgar_code33():
+    """§6.86 (audit Step-2 #2): Code 33 = EPS growth, sales growth and net margin each
+    higher in each of the three consecutive quarters ending at the newest EPS quarter.
+    A flat leg breaks it; a missing quarter makes it unknown; growth from a loss is not
+    growth; two falling EPS growth steps set the deceleration warning."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    ends = pd.to_datetime(["2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31",
+                           "2026-03-31", "2026-06-30"])
+
+    def ser(vals):
+        return list(zip(ends, vals))
+
+    eps = ser([1.0, 1.0, 1.0, 1.1, 1.3, 1.6])          # growth +10, +30, +60 on 1.0
+    # year-ago quarters: 2025-03..06 have no match, so growth starts at 2026-03-31;
+    # extend with a year of history so three growth quarters exist
+    hist = pd.to_datetime(["2024-09-30", "2024-12-31"])
+    eps = list(zip(hist, [1.0, 1.0])) + eps
+    rev = list(zip(hist, [100.0, 100.0])) + ser([100.0, 100.0, 100.0, 110, 125, 140])
+    ni = list(zip(hist, [10.0, 10.0])) + ser([10.0, 10.0, 10.0, 12.0, 15.0, 18.9])
+    out = dfeed._code33(eps, rev, ni)
+    assert out["eps_g3"] == [10.0, 30.0, 60.0], out
+    assert out["rev_g3"] == [10.0, 25.0, 40.0]
+    assert out["margin3"] == [10.9, 12.0, 13.5]
+    assert out["code33"] == {"eps": True, "sales": True, "margin": True, "all": True}
+    assert out["eps_decel_2q"] is False
+
+    flat = list(ni[:-1]) + [(ends[-1], 16.7)]           # margin 12.0 -> 11.9: not rising
+    c = dfeed._code33(eps, rev, flat)["code33"]
+    assert c["margin"] is False and c["all"] is False and c["eps"] is True
+
+    gap = [p for p in rev if p[0] != ends[-2]]
+    assert dfeed._code33(eps, gap, ni)["code33"] is None
+
+    loss = [(e, -1.0 if e == hist[1] else v) for e, v in eps]   # 2024-12-31 was a loss
+    assert dfeed._code33(loss, rev, ni)["code33"] is None
+
+    slowing = list(eps[:-3]) + [(ends[-3], 1.6), (ends[-2], 1.3), (ends[-1], 1.1)]
+    assert dfeed._code33(slowing, rev, ni)["eps_decel_2q"] is True
+    assert dfeed._code33([], rev, ni)["code33"] is None
+
+
+def test_edgar_annual_eps_runs():
+    """§6.86: annual EPS up on the year, and up three years running, over consecutive
+    fiscal years only."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    T = pd.Timestamp
+    fy = [(T("2022-12-31"), 1.0), (T("2023-12-31"), 1.5), (T("2024-12-31"), 2.0),
+          (T("2025-12-31"), 2.5)]
+    assert dfeed._annual_runs(fy) == {"eps_fy_up": True, "eps_fy_up_3y": True}
+    dip = fy[:2] + [(T("2024-12-31"), 1.2), (T("2025-12-31"), 2.5)]
+    assert dfeed._annual_runs(dip) == {"eps_fy_up": True, "eps_fy_up_3y": False}
+    missing = [fy[0], fy[1], fy[3]]
+    assert dfeed._annual_runs(missing) == {"eps_fy_up": None, "eps_fy_up_3y": None}
+    assert dfeed._annual_runs(fy[:1]) == {"eps_fy_up": None, "eps_fy_up_3y": None}
+
+
+def test_edgar_last_report_picks_newest_202():
+    """§6.87: the last earnings release is the newest 8-K carrying item 2.02, timed by its
+    EDGAR acceptance in New York. Yahoo's past dates stop at May 2025 (§6.85). Other 8-Ks,
+    10-Qs and 6-Ks don't count; a failed fetch reads None."""
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    recent = {"form": ["8-K", "10-Q", "8-K", "8-K", "6-K"],
+              "items": ["5.02", "", "2.02,9.01", "2.02", "2.02"],
+              "acceptanceDateTime": ["2026-09-01T12:00:00.000Z", "2026-08-07T20:00:00.000Z",
+                                     "2026-08-06T20:08:16.000Z", "2026-05-11T12:30:00.000Z",
+                                     "2026-09-10T12:00:00.000Z"]}
+    with patch.object(dfeed, "_edgar_get_json", lambda url: {"filings": {"recent": recent}}):
+        assert dfeed._edgar_last_report(1) == {"last_report": "2026-08-06",
+                                               "last_report_time": "16:08"}
+    with patch.object(dfeed, "_edgar_get_json", lambda url: None):
+        assert dfeed._edgar_last_report(1) == {"last_report": None, "last_report_time": None}
+
+
+def test_fundamentals_estimates_and_holders():
+    """§6.88 (audit Step-2 #4): the audit said analyst revisions and fund ownership had no
+    free source, but yfinance 0.2.65 returns both. The current-year estimate's change over
+    30/90 days, and the institutions' share and count; a raising property, an empty frame
+    or a zero base read None."""
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    class _Tk:
+        eps_trend = pd.DataFrame(
+            {"current": [2.24, 9.95], "7daysAgo": [2.73, 11.62], "30daysAgo": [2.73, 11.62],
+             "60daysAgo": [2.73, 11.62], "90daysAgo": [1.26, 5.39]},
+            index=pd.Index(["0q", "0y"], name="period"))
+        major_holders = pd.DataFrame(
+            {"Value": [0.0562, 0.96038, 1.01756, 235.0]},
+            index=pd.Index(["insidersPercentHeld", "institutionsPercentHeld",
+                            "institutionsFloatPercentHeld", "institutionsCount"],
+                           name="Breakdown"))
+
+    est = dfeed._estimate_revisions(_Tk())
+    assert round(est["est_rev_90d"], 1) == round((9.95 / 5.39 - 1) * 100, 1)
+    assert round(est["est_rev_30d"], 1) == round((9.95 / 11.62 - 1) * 100, 1)
+    assert dfeed._institutional(_Tk()) == {"inst_pct": 96.0, "inst_count": 235}
+
+    class _Raises:
+        @property
+        def eps_trend(self):
+            raise RuntimeError("yahoo down")
+        major_holders = pd.DataFrame()
+
+    assert dfeed._estimate_revisions(_Raises()) == {"est_rev_30d": None, "est_rev_90d": None}
+    assert dfeed._institutional(_Raises()) == {"inst_pct": None, "inst_count": None}
+
+    class _Zero:
+        eps_trend = pd.DataFrame({"current": [1.0], "30daysAgo": [0.0], "90daysAgo": [0.0]},
+                                 index=["0q"])
+    assert dfeed._estimate_revisions(_Zero()) == {"est_rev_30d": None, "est_rev_90d": None}
+
+
+def test_inst_history_carried_forward():
+    """§6.88: the fund count is a snapshot, so its trend is kept by carrying a dated list
+    across refetches: appended only when the count changes, the last 8 kept."""
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    out = dfeed._carry_inst_history({"inst_count": 221}, None, today="2026-07-02")
+    assert out["inst_history"] == [["2026-07-02", 221]]
+    same = dfeed._carry_inst_history({"inst_count": 221}, out, today="2026-07-09")
+    assert same["inst_history"] == [["2026-07-02", 221]]
+    up = dfeed._carry_inst_history({"inst_count": 235}, same, today="2026-09-25")
+    assert up["inst_history"] == [["2026-07-02", 221], ["2026-09-25", 235]]
+    gone = dfeed._carry_inst_history({"inst_count": None}, up, today="2026-10-02")
+    assert gone["inst_history"] == up["inst_history"]
+    prior = {"inst_history": [[f"2026-0{m}-01", m] for m in range(1, 10)]}
+    capped = dfeed._carry_inst_history({"inst_count": 99}, prior, today="2026-10-01")
+    assert len(capped["inst_history"]) == 8 and capped["inst_history"][-1] == ["2026-10-01", 99]
+
+
+def test_prev_pair_from_one_source():
+    """§6.85: a yfinance YoY was paired with an EDGAR prior-quarter YoY from whatever
+    quarter EDGAR had, so "EPS accelerating" could compare 2026 with 2010. The EDGAR prior
+    joins only when both describe the same quarter; with no yfinance YoY, EDGAR supplies the
+    whole pair."""
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    ed = {"eps_yoy": 50.0, "eps_yoy_prev": 20.0, "eps_quarter_end": "2026-03-31",
+          "revenue_yoy": 30.0, "revenue_yoy_prev": 25.0, "revenue_quarter_end": "2026-03-31",
+          "eps_fy_yoy": 12.0}
+    same = dfeed._merge_edgar({"eps_yoy": 40.0, "eps_yoy_prev": None,
+                               "eps_quarter_end": "2026-03-31"}, dict(ed))
+    assert same["eps_yoy"] == 40.0 and same["eps_yoy_prev"] == 20.0
+    ahead = dfeed._merge_edgar({"eps_yoy": 40.0, "eps_yoy_prev": None,
+                                "eps_quarter_end": "2026-06-30"}, dict(ed))
+    assert ahead["eps_yoy"] == 40.0 and ahead["eps_yoy_prev"] is None
+    none = dfeed._merge_edgar({"revenue_yoy": None, "revenue_yoy_prev": None}, dict(ed))
+    assert (none["revenue_yoy"], none["revenue_yoy_prev"], none["revenue_quarter_end"]) == \
+        (30.0, 25.0, "2026-03-31")
+    assert none["eps_fy_yoy"] == 12.0
+    assert dfeed._merge_edgar({"eps_yoy": 1.0}, None) == {"eps_yoy": 1.0}
+
+
+def test_fundamentals_refetch_after_report_date():
+    """§6.85: a cache written on or before its `next_earnings` date is refetched once that
+    date has passed, rather than serving the pre-report quarter for up to 7 days."""
+    import json as _json
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import data_feed as dfeed
+
+    written = pd.Timestamp.now().normalize()          # the file's mtime is "now"
+    day = lambda n: (written + pd.Timedelta(days=n)).strftime("%Y-%m-%d")   # noqa: E731
+    fresh = {"revenue_yoy": 99.0, "next_earnings": day(9), "last_surprise_pct": None}
+    forced = []
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "TSTX.json"
+        with patch.object(dfeed, "FUNDAMENTALS_DIR", Path(tmp)), \
+                patch.object(dfeed, "_fetch_fundamentals", lambda s: dict(fresh)), \
+                patch.object(dfeed, "_edgar_backfill",
+                             lambda s, force=False: forced.append(force)):
+            def cached(report):
+                p.write_text(_json.dumps({"revenue_yoy": 1.0, "next_earnings": report,
+                                          "last_surprise_pct": None}))
+            cached(day(1))
+            assert dfeed.get_fundamentals("TSTX", today=day(1))["revenue_yoy"] == 1.0
+            assert dfeed.get_fundamentals("TSTX", today=day(2))["revenue_yoy"] == 99.0
+            # §6.87: EDGAR is refetched past its own cache, for the new release date
+            assert forced == [True]
+            cached(day(-1))                            # written after the report
+            assert dfeed.get_fundamentals("TSTX", today=day(2))["revenue_yoy"] == 1.0
+            cached(None)
+            assert dfeed.get_fundamentals("TSTX", today=day(2))["revenue_yoy"] == 1.0
 
 
 def test_margin_aligns_num_and_den_quarters():

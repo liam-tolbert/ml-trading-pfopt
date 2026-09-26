@@ -407,3 +407,80 @@ def stop_room_text(room: Optional[dict], day_range) -> str:
     tail = " — inside ordinary daily noise" if room["warn"] else ""
     return (f"{head}stop {room['room_days']:.1f} typical days away "
             f"({float(day_range) * 100:.1f}%/day){tail}")
+
+
+REPORT_MAX_AGE_DAYS = 100   # older than this, the release is not "the last report" any more
+
+
+def earnings_reaction(df, report_date, report_time=None) -> Optional[dict]:
+    """How the stock took its last earnings release: ``{date, gap_pct, day_pct, vol_ratio,
+    since_pct, flag}``.
+
+    The reaction session is the release date's bar, or the next bar when the release came
+    at or after 16:00 New York time (``report_time`` 'HH:MM'). ``day_pct`` is its close
+    against the prior close and ``gap_pct`` its open; ``vol_ratio`` is its volume over the
+    ``VOL_AVG_DAYS`` bars before it; ``since_pct`` is the last close against the reaction
+    close. ``flag`` is ``"hard_drop"`` for a fall of ``EARNINGS_REACTION_PCT`` or more on
+    ``VOL_CONFIRM_RATIO`` volume, ``"strong"`` for the same rise, else None. None when the
+    date is missing, outside ``df``, its reaction bar hasn't printed, or the release is more
+    than ``REPORT_MAX_AGE_DAYS`` before the last bar."""
+    if df is None or not report_date or len(df) < 2:
+        return None
+    import pandas as pd
+    from .indicators import prior_volume_average
+    try:
+        day = pd.Timestamp(report_date).normalize()
+    except Exception:
+        return None
+    idx = _naive_index(df).normalize()
+    if day < idx[0] or (idx[-1] - day).days > REPORT_MAX_AGE_DAYS:
+        return None
+    after_close = bool(report_time) and str(report_time) >= "16:00"
+    later = (idx > day) if after_close else (idx >= day)
+    if not later.any():
+        return None
+    pos = int(later.argmax())
+    if pos == 0:
+        return None
+    close = df["Close"].astype(float).to_numpy()
+    prev = close[pos - 1]
+    if prev <= 0:
+        return None
+    avg = prior_volume_average(df["Volume"].astype(float), doctrine.VOL_AVG_DAYS).iloc[pos]
+    vol_ratio = (float(df["Volume"].iloc[pos]) / float(avg)
+                 if pd.notna(avg) and avg > 0 else None)
+    day_pct = (close[pos] / prev - 1.0) * 100.0
+    heavy = vol_ratio is not None and vol_ratio >= doctrine.VOL_CONFIRM_RATIO
+    flag = None
+    if heavy and day_pct <= -doctrine.EARNINGS_REACTION_PCT:
+        flag = "hard_drop"
+    elif heavy and day_pct >= doctrine.EARNINGS_REACTION_PCT:
+        flag = "strong"
+    return {"date": idx[pos].strftime("%Y-%m-%d"),
+            "gap_pct": round((float(df["Open"].iloc[pos]) / prev - 1.0) * 100.0, 1),
+            "day_pct": round(day_pct, 1),
+            "vol_ratio": round(vol_ratio, 1) if vol_ratio is not None else None,
+            "since_pct": round((close[-1] / close[pos] - 1.0) * 100.0, 1),
+            "flag": flag}
+
+
+def earnings_reaction_text(reaction: Optional[dict], report_date=None,
+                           report_time=None) -> str:
+    """A Step-2 caption for an :func:`earnings_reaction` result, e.g. ``'Last report
+    2026-08-06 (after the close): -9.2% on 3.4× volume (gap -7.0%) ⚠️ …; since then
+    +4.1%'``. Empty when unknown."""
+    if not reaction:
+        return ""
+    when = ""
+    if report_time:
+        when = (" (after the close)" if str(report_time) >= "16:00"
+                else " (before the open)" if str(report_time) < "09:30"
+                else " (during the session)")
+    vol = ("" if reaction.get("vol_ratio") is None
+           else f" on {reaction['vol_ratio']:.1f}× volume")
+    note = {"hard_drop": " ⚠️ a hard drop on heavy volume; the books say big money knew "
+                         "something",
+            "strong": " ✅ a strong move on heavy volume"}.get(reaction.get("flag"), "")
+    return (f"**Last report** {report_date or reaction['date']}{when}: "
+            f"{reaction['day_pct']:+.1f}%{vol} (gap {reaction['gap_pct']:+.1f}%){note}; "
+            f"since then {reaction['since_pct']:+.1f}%")

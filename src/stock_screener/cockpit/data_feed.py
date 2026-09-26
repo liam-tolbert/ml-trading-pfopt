@@ -812,23 +812,37 @@ def _next_earnings_date(tk) -> Optional[str]:
         return None
 
 
-def _last_earnings_surprise(tk) -> Optional[float]:
-    """Latest reported EPS surprise %, from the ``'Surprise(%)'`` column of
-    ``yf.Ticker.earnings_dates``. Unreported rows are NaN and drop out. None on any miss;
-    never raises."""
+def _today(today=None) -> pd.Timestamp:
+    return pd.Timestamp(today if today is not None else pd.Timestamp.now()).normalize()
+
+
+# A surprise older than this is a quarter or more behind, not "the last report".
+SURPRISE_MAX_AGE_DAYS = 120
+
+
+def _last_earnings_surprise(tk, today=None) -> tuple:
+    """``(date, pct)`` of the latest reported EPS surprise, from the ``'Surprise(%)'``
+    column of ``yf.Ticker.earnings_dates``; ``date`` is ``'YYYY-MM-DD'``. Unreported rows
+    are NaN and drop out. ``(None, None)`` on any miss, or when the newest reported row is
+    older than ``SURPRISE_MAX_AGE_DAYS``. Never raises."""
     try:
         ed = tk.earnings_dates
         if ed is None or getattr(ed, "empty", True):
-            return None
+            return None, None
         col = next((c for c in ed.columns if "surprise" in str(c).lower()), None)
         if col is None:
-            return None
+            return None, None
         s = ed[col].dropna()
         if not len(s):
-            return None
-        return float(s.sort_index().iloc[-1])          # newest REPORTED quarter
+            return None, None
+        s = s.sort_index()
+        when = pd.Timestamp(s.index[-1])
+        when = when.tz_localize(None) if when.tzinfo is not None else when
+        if (_today(today) - when.normalize()).days > SURPRISE_MAX_AGE_DAYS:
+            return None, None
+        return when.strftime("%Y-%m-%d"), float(s.iloc[-1])
     except Exception:
-        return None
+        return None, None
 
 
 # --------------------------------------------------------------------------- #
@@ -840,10 +854,18 @@ def _last_earnings_surprise(tk) -> Optional[float]:
 EDGAR_UA = {"User-Agent": "ml-trading-pfopt cockpit (treblotmail@gmail.com)"}
 EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 # Tags tried in order, as in the repo's Main.ipynb EDGAR pipeline.
 EDGAR_REVENUE_TAGS = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
                       "SalesRevenueNet")
 EDGAR_EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
+EDGAR_NET_INCOME_TAGS = ("NetIncomeLoss", "ProfitLoss",
+                         "NetIncomeLossAvailableToCommonStockholdersBasic")
+# A company that changes tags leaves the old one frozen in its facts: HALO's `Revenues`
+# ends in 2020 and GILD's quarterly `EarningsPerShareDiluted` in 2010. A series whose
+# newest period ended longer ago than these is not the company's current reporting.
+EDGAR_MAX_STALE_DAYS = 200
+EDGAR_MAX_STALE_FY_DAYS = 500
 
 
 def _edgar_get_json(url: str) -> Optional[dict]:
@@ -887,68 +909,219 @@ def _edgar_cik(sym: str) -> Optional[int]:
     return None
 
 
-def _edgar_series(facts: dict, tags, unit_keys) -> tuple:
+def _edgar_tag_series(units: dict, unit_keys) -> tuple:
+    """``(quarterly, annual)`` for one tag's ``units``; see ``_edgar_series``."""
+    entries = None
+    for uk in unit_keys:
+        if units.get(uk):
+            entries = units[uk]
+            break
+    if not entries:
+        return [], []
+    q: dict = {}
+    a: dict = {}
+    for e in entries:
+        # Only the 10-Q/10-K financial statements. A proxy's pay-versus-performance table
+        # repeats net income in millions (ANET: 3511 for $3.5B) and, filed later, would win.
+        if not str(e.get("form") or "10-").startswith("10-"):
+            continue
+        try:
+            dur = (pd.Timestamp(e["end"]) - pd.Timestamp(e["start"])).days
+            end = pd.Timestamp(e["end"])
+            val = float(e["val"])
+        except Exception:
+            continue
+        bucket = q if 60 <= dur <= 120 else (a if 300 <= dur <= 400 else None)
+        if bucket is None:
+            continue
+        filed = str(e.get("filed") or "")
+        if end not in bucket or filed >= bucket[end][0]:
+            bucket[end] = (filed, val)
+    return (sorted((k, v[1]) for k, v in q.items()),
+            sorted((k, v[1]) for k, v in a.items()))
+
+
+def _edgar_series(facts: dict, tags, unit_keys, today=None) -> tuple:
     """``(quarterly, annual)`` lists of ``(end_Timestamp, value)``, ascending by period end,
-    from the first us-gaap tag with usable data. ``([], [])`` when no tag has any.
+    from the us-gaap tag whose newest period ends latest (ties go to ``tags`` order).
+    ``([], [])`` when no tag has any.
 
     Quarterly means a 60-120 day period, annual 300-400 days; other durations, such as
-    10-K YTD, are dropped. A repeated period end keeps the latest ``filed``, so amended
-    figures win."""
+    10-K YTD, are dropped, and so are facts from forms other than 10-Q/10-K. A repeated
+    period end keeps the latest ``filed``, so amended figures win. A missing fiscal Q4 is
+    derived (``_edgar_fill_q4``). Either list is
+    emptied when its newest period ended more than ``EDGAR_MAX_STALE_DAYS`` (quarterly) or
+    ``EDGAR_MAX_STALE_FY_DAYS`` (annual) before ``today``."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
+    best, best_end = ([], []), None
     for tag in tags:
-        units = (gaap.get(tag) or {}).get("units") or {}
-        entries = None
-        for uk in unit_keys:
-            if units.get(uk):
-                entries = units[uk]
-                break
-        if not entries:
+        q, a = _edgar_tag_series((gaap.get(tag) or {}).get("units") or {}, unit_keys)
+        if not (q or a):
             continue
-        q: dict = {}
-        a: dict = {}
-        for e in entries:
-            try:
-                dur = (pd.Timestamp(e["end"]) - pd.Timestamp(e["start"])).days
-                end = pd.Timestamp(e["end"])
-                val = float(e["val"])
-            except Exception:
-                continue
-            bucket = q if 60 <= dur <= 120 else (a if 300 <= dur <= 400 else None)
-            if bucket is None:
-                continue
-            filed = str(e.get("filed") or "")
-            if end not in bucket or filed >= bucket[end][0]:
-                bucket[end] = (filed, val)
-        if q or a:
-            return (sorted((k, v[1]) for k, v in q.items()),
-                    sorted((k, v[1]) for k, v in a.items()))
-    return [], []
+        newest = max(x[-1][0] for x in (q, a) if x)
+        if best_end is None or newest > best_end:
+            best, best_end = (q, a), newest
+    q, a = best
+    q = _edgar_fill_q4(q, a)
+    now = _today(today)
+    if q and (now - q[-1][0]).days > EDGAR_MAX_STALE_DAYS:
+        q = []
+    if a and (now - a[-1][0]).days > EDGAR_MAX_STALE_FY_DAYS:
+        a = []
+    return q, a
 
 
-def _edgar_yoy_series(quarterly) -> list:
+def _edgar_fill_q4(quarterly, annual) -> list:
+    """``quarterly`` with each missing fiscal Q4 derived as FY − (Q1 + Q2 + Q3).
+
+    Companies file the fourth quarter only inside the 10-K's full year, so without this the
+    series skips every fiscal Q4 and "three quarters running" compares quarters a year
+    apart. A Q4 is derived only when exactly three quarters end inside the fiscal year
+    (70-310 days before its end). For per-share figures the result is approximate, since
+    the share count differs between quarters."""
+    if not annual:
+        return list(quarterly)
+    have = {end for end, _ in quarterly}
+    out = list(quarterly)
+    for fy_end, fy_val in annual:
+        if any(abs((fy_end - e).days) <= 10 for e in have):
+            continue
+        inside = [v for e, v in quarterly if 70 <= (fy_end - e).days <= 310]
+        if len(inside) == 3:
+            out.append((fy_end, fy_val - sum(inside)))
+    return sorted(out)
+
+
+def _consecutive(series, n: int) -> Optional[list]:
+    """The last ``n`` values of an ascending ``[(end, value)]`` series, oldest first, when
+    each is one quarter (60-120 days) after the one before; else None."""
+    if len(series) < n:
+        return None
+    tail = series[-n:]
+    for (e0, _), (e1, _) in zip(tail, tail[1:]):
+        if not 60 <= (e1 - e0).days <= 120:
+            return None
+    return [v for _, v in tail]
+
+
+def _edgar_yoy_series(quarterly, positive_base: bool = False) -> list:
     """``[(end, yoy_pct)]``: each quarter against the most recent one 330-400 days earlier.
     Matching by date, not a fixed 4-step lag, keeps a missing quarter from shifting the
-    comparison. A quarter with no usable match is skipped."""
+    comparison. A quarter with no usable match is skipped, and so is one whose year-ago
+    value is not above zero when ``positive_base`` (growth from a loss is not growth)."""
     out = []
     for i, (end, val) in enumerate(quarterly):
         prior = next((v for e2, v in reversed(quarterly[:i])
                       if 330 <= (end - e2).days <= 400), None)
+        if positive_base and (prior is None or prior <= 0):
+            continue
         g = _pct(val, prior)
         if g is not None:
             out.append((end, g))
     return out
 
 
-def _edgar_backfill(sym: str) -> Optional[dict]:
+def _last_n_at(series, n: int, anchor) -> Optional[list]:
+    """``_consecutive(series, n)`` for the stretch ending at ``anchor`` (within 10 days);
+    None when ``series`` has no point there."""
+    head = [p for p in series if p[0] <= anchor + pd.Timedelta(days=10)]
+    if not head or abs((head[-1][0] - anchor).days) > 10:
+        return None
+    return _consecutive(head, n)
+
+
+def _edgar_margins(net_income, revenue) -> list:
+    """``[(end, net_margin_pct)]`` for quarters both series report with revenue above zero."""
+    rev = dict(revenue)
+    return [(e, ni / rev[e] * 100.0) for e, ni in net_income if rev.get(e, 0) > 0]
+
+
+def _code33(eps_q, rev_q, ni_q) -> dict:
+    """Minervini's "Code 33" over the three consecutive quarters ending at the newest EPS
+    quarter: EPS growth, sales growth and net margin each higher every quarter.
+
+    Returns ``eps_g3`` / ``rev_g3`` (YoY %) and ``margin3`` (net margin %), each oldest
+    first or None; ``code33`` = ``{"eps", "sales", "margin", "all"}`` booleans, None unless
+    all three series are known; and ``eps_decel_2q`` (EPS growth lower two quarters
+    running), None without the EPS series."""
+    out = {"eps_g3": None, "rev_g3": None, "margin3": None, "code33": None,
+           "eps_decel_2q": None}
+    if not eps_q:
+        return out
+    anchor = eps_q[-1][0]
+    e3 = _last_n_at(_edgar_yoy_series(eps_q, positive_base=True), 3, anchor)
+    r3 = _last_n_at(_edgar_yoy_series(rev_q, positive_base=True), 3, anchor)
+    m3 = _last_n_at(_edgar_margins(ni_q, rev_q), 3, anchor)
+
+    def rising(v):
+        return bool(v[0] < v[1] < v[2])
+
+    for key, v in (("eps_g3", e3), ("rev_g3", r3), ("margin3", m3)):
+        out[key] = [round(x, 1) for x in v] if v else None
+    if e3 is not None:
+        out["eps_decel_2q"] = bool(e3[0] > e3[1] > e3[2])
+    if None not in (e3, r3, m3):
+        parts = {"eps": rising(e3), "sales": rising(r3), "margin": rising(m3)}
+        out["code33"] = {**parts, "all": all(parts.values())}
+    return out
+
+
+def _edgar_last_report(cik: int) -> dict:
+    """``{"last_report": 'YYYY-MM-DD', "last_report_time": 'HH:MM'}`` of the newest 8-K
+    carrying item 2.02 (results of operations), which is the earnings release. The time is
+    EDGAR's acceptance time in New York, so it tells a release before the open from one
+    after the close. Both None when there is no such filing or the fetch fails; foreign
+    filers report on 6-K and get None.
+
+    Yahoo's past report dates stop at May 2025 on yfinance 0.2.65 (§6.85), so they can't be
+    used."""
+    none = {"last_report": None, "last_report_time": None}
+    data = _edgar_get_json(EDGAR_SUBMISSIONS_URL.format(cik=cik))
+    try:
+        rec = data["filings"]["recent"]
+        best = None
+        for form, items, accepted in zip(rec["form"], rec["items"],
+                                         rec["acceptanceDateTime"]):
+            if form != "8-K" or "2.02" not in str(items or "").split(","):
+                continue
+            ts = pd.Timestamp(accepted)
+            if best is None or ts > best:
+                best = ts
+        if best is None:
+            return none
+        ny = (best if best.tzinfo else best.tz_localize("UTC")).tz_convert("America/New_York")
+        return {"last_report": ny.strftime("%Y-%m-%d"), "last_report_time": ny.strftime("%H:%M")}
+    except Exception:
+        return none
+
+
+def _annual_runs(annual) -> dict:
+    """``eps_fy_up``: the latest fiscal year above the one before; ``eps_fy_up_3y``: three
+    such rises in a row. Years must be consecutive (330-400 days apart); None when too few."""
+    def run(n):
+        if len(annual) < n + 1:
+            return None
+        tail = annual[-(n + 1):]
+        if any(not 330 <= (b[0] - a[0]).days <= 400 for a, b in zip(tail, tail[1:])):
+            return None
+        return all(b[1] > a[1] for a, b in zip(tail, tail[1:]))
+    return {"eps_fy_up": run(1), "eps_fy_up_3y": run(3)}
+
+
+def _edgar_backfill(sym: str, today=None, force: bool = False) -> Optional[dict]:
     """EDGAR growth metrics for ``sym``, cached 7 days as JSON in ``EDGAR_DIR``.
 
     Keys: ``revenue_yoy``, ``revenue_yoy_prev``, ``eps_yoy``, ``eps_yoy_prev``,
-    ``eps_fy_yoy`` and ``eps_accel_3q`` (EPS YoY rising across the last 3 quarters). A
-    key is None when the facts can't support it. With no CIK or a failed fetch, returns
-    the stale cache if any, else None; foreign listings and funds have no CIK."""
+    ``eps_fy_yoy``, ``eps_accel_3q`` (EPS YoY rising across the last 3 consecutive
+    quarters), ``revenue_quarter_end`` / ``eps_quarter_end`` (``'YYYY-MM-DD'`` of the
+    quarter each ``*_yoy`` describes), and the ``_code33``, ``_annual_runs`` and
+    ``_edgar_last_report`` keys. A ``*_prev`` is the quarter immediately before. A key is
+    None when the facts can't support it. ``force`` skips the fresh cache. With no CIK or a
+    failed fetch, returns the stale cache if any, else None; foreign listings and funds
+    have no CIK."""
     ensure_dirs()
     path = EDGAR_DIR / f"{sym}.json"
-    if age_days(path) <= 7.0:
+    if not force and age_days(path) <= 7.0:
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -962,19 +1135,25 @@ def _edgar_backfill(sym: str) -> Optional[dict]:
             except Exception:
                 return None
         return None
-    eps_q, eps_fy = _edgar_series(facts, EDGAR_EPS_TAGS, ("USD/shares",))
-    rev_q, _rev_fy = _edgar_series(facts, EDGAR_REVENUE_TAGS, ("USD",))
+    eps_q, eps_fy = _edgar_series(facts, EDGAR_EPS_TAGS, ("USD/shares",), today)
+    rev_q, _rev_fy = _edgar_series(facts, EDGAR_REVENUE_TAGS, ("USD",), today)
+    ni_q, _ni_fy = _edgar_series(facts, EDGAR_NET_INCOME_TAGS, ("USD",), today)
     eps_g = _edgar_yoy_series(eps_q)
     rev_g = _edgar_yoy_series(rev_q)
+    rev2, eps2, eps3 = _consecutive(rev_g, 2), _consecutive(eps_g, 2), _consecutive(eps_g, 3)
     out = {
         "revenue_yoy": _jsonable(rev_g[-1][1]) if rev_g else None,
-        "revenue_yoy_prev": _jsonable(rev_g[-2][1]) if len(rev_g) >= 2 else None,
+        "revenue_yoy_prev": _jsonable(rev2[0]) if rev2 else None,
+        "revenue_quarter_end": rev_g[-1][0].strftime("%Y-%m-%d") if rev_g else None,
         "eps_yoy": _jsonable(eps_g[-1][1]) if eps_g else None,
-        "eps_yoy_prev": _jsonable(eps_g[-2][1]) if len(eps_g) >= 2 else None,
+        "eps_yoy_prev": _jsonable(eps2[0]) if eps2 else None,
+        "eps_quarter_end": eps_g[-1][0].strftime("%Y-%m-%d") if eps_g else None,
         "eps_fy_yoy": (_jsonable(_pct(eps_fy[-1][1], eps_fy[-2][1]))
                        if len(eps_fy) >= 2 else None),
-        "eps_accel_3q": (bool(eps_g[-1][1] > eps_g[-2][1] > eps_g[-3][1])
-                         if len(eps_g) >= 3 else None),
+        "eps_accel_3q": bool(eps3[0] < eps3[1] < eps3[2]) if eps3 else None,
+        **_code33(eps_q, rev_q, ni_q),
+        **_annual_runs(eps_fy),
+        **_edgar_last_report(cik),
     }
     try:
         path.write_text(json.dumps(out), encoding="utf-8")
@@ -983,11 +1162,12 @@ def _edgar_backfill(sym: str) -> Optional[dict]:
     return out
 
 
-def _fetch_fundamentals(sym: str) -> Optional[dict]:
-    """Quarterly growth and margin metrics from yfinance, uncached, plus ``next_earnings``
-    and ``last_surprise_pct``. A key is None when its metric can't be computed. yfinance
-    often has only ~4 quarters, so YoY may be missing; QoQ is the reliable fallback. None
-    when nothing could be fetched."""
+def _fetch_fundamentals(sym: str, today=None) -> Optional[dict]:
+    """Quarterly growth and margin metrics from yfinance, uncached, plus ``next_earnings``,
+    ``last_surprise_pct`` / ``last_surprise_date``, and ``revenue_quarter_end`` /
+    ``eps_quarter_end`` (``'YYYY-MM-DD'`` of the quarter each ``*_yoy`` describes). A key is
+    None when its metric can't be computed. yfinance often has only ~4 quarters, so YoY may
+    be missing; QoQ is the reliable fallback. None when nothing could be fetched."""
     try:
         import yfinance as yf
         tk = yf.Ticker(sym)
@@ -1016,40 +1196,144 @@ def _fetch_fundamentals(sym: str) -> Optional[dict]:
         "inventory_qoq": _qoq(inv),
     }
     out = {k: _jsonable(v) for k, v in out.items()}
-    # Added after the float coercion, which would turn the date string into None.
+    # Added after the float coercion, which would turn the date strings into None.
+    out["revenue_quarter_end"] = rev.index[-1].strftime("%Y-%m-%d") if rev is not None else None
+    out["eps_quarter_end"] = eps.index[-1].strftime("%Y-%m-%d") if eps is not None else None
     out["next_earnings"] = _next_earnings_date(tk)
-    out["last_surprise_pct"] = _last_earnings_surprise(tk)
+    out["last_surprise_date"], out["last_surprise_pct"] = _last_earnings_surprise(tk, today)
+    out.update(_estimate_revisions(tk))
+    out.update(_institutional(tk))
     return out
 
 
+def _estimate_revisions(tk) -> dict:
+    """``est_rev_30d`` / ``est_rev_90d``: % change in the consensus EPS estimate for the
+    current fiscal year (the current quarter when the year is missing) against 30 and 90
+    days ago, from ``Ticker.eps_trend``. None on any miss; never raises."""
+    out = {"est_rev_30d": None, "est_rev_90d": None}
+    try:
+        et = tk.eps_trend
+        if et is None or getattr(et, "empty", True) or "current" not in et.columns:
+            return out
+        row = next((et.loc[p] for p in ("0y", "0q") if p in et.index), None)
+        if row is None:
+            return out
+        for key, col in (("est_rev_30d", "30daysAgo"), ("est_rev_90d", "90daysAgo")):
+            if col in row.index:
+                out[key] = _jsonable(_pct(row["current"], row[col]))
+    except Exception:
+        pass
+    return out
+
+
+def _institutional(tk) -> dict:
+    """``inst_pct`` (% of shares held by institutions) and ``inst_count`` (how many hold
+    it), from ``Ticker.major_holders``. None on any miss; never raises. A snapshot: the
+    trend comes from ``inst_history`` across refetches."""
+    out = {"inst_pct": None, "inst_count": None}
+    try:
+        mh = tk.major_holders
+        if mh is None or getattr(mh, "empty", True):
+            return out
+        col = mh["Value"] if "Value" in mh.columns else mh.iloc[:, 0]
+        pct = _jsonable(col.get("institutionsPercentHeld"))
+        cnt = _jsonable(col.get("institutionsCount"))
+        out["inst_pct"] = round(pct * 100.0, 1) if pct is not None else None
+        out["inst_count"] = int(cnt) if cnt is not None else None
+    except Exception:
+        pass
+    return out
+
+
+INST_HISTORY_KEEP = 8
+
+
+def _carry_inst_history(out: dict, prior: Optional[dict], today=None) -> dict:
+    """``out`` with ``inst_history`` carried forward from the cache it replaces: a list of
+    ``[date, count]``, appended when ``inst_count`` changed, the last
+    ``INST_HISTORY_KEEP`` kept."""
+    hist = list((prior or {}).get("inst_history") or [])
+    cnt = out.get("inst_count")
+    if cnt is not None and (not hist or hist[-1][1] != cnt):
+        hist.append([_today(today).strftime("%Y-%m-%d"), cnt])
+    out["inst_history"] = hist[-INST_HISTORY_KEEP:]
+    return out
+
+
+# Each growth pair (latest YoY, the quarter before) MUST come from one source. yfinance's
+# newest quarter can be a quarter ahead of EDGAR's, whose 10-Q lags the release.
+_PAIRS = (("revenue_yoy", "revenue_yoy_prev", "revenue_quarter_end"),
+          ("eps_yoy", "eps_yoy_prev", "eps_quarter_end"))
+
+
+def _merge_edgar(out: dict, ed: Optional[dict]) -> dict:
+    """``out`` (yfinance) with the EDGAR backfill merged in, in place.
+
+    yfinance values win. For each growth pair: with no yfinance YoY, EDGAR supplies the
+    whole pair; with a yfinance YoY but no prior quarter, EDGAR supplies the prior only when
+    both describe the same quarter. Every other key: EDGAR fills Nones and adds its own."""
+    if not ed:
+        return out
+    paired = set()
+    for yoy, prev, qend in _PAIRS:
+        paired.update((yoy, prev, qend))
+        if out.get(yoy) is None and ed.get(yoy) is not None:
+            for k in (yoy, prev, qend):
+                out[k] = ed.get(k)
+        elif out.get(prev) is None and ed.get(prev) is not None \
+                and out.get(qend) is not None and out.get(qend) == ed.get(qend):
+            out[prev] = ed[prev]
+    for k, v in ed.items():
+        if k not in paired and out.get(k) is None and v is not None:
+            out[k] = v
+    return out
+
+
+def _reported_since_written(cached: dict, path: Path, today=None) -> bool:
+    """True when the cache's ``next_earnings`` date has passed and the cache was written on
+    or before that date, so it holds the numbers from before the report."""
+    try:
+        report = pd.Timestamp(cached.get("next_earnings")).normalize()
+        written = pd.Timestamp.fromtimestamp(path.stat().st_mtime).normalize()
+    except Exception:
+        return False
+    return written <= report < _today(today)
+
+
 def get_fundamentals(ticker: str, force: bool = False,
-                     max_age_days: float = 7.0) -> Optional[dict]:
+                     max_age_days: float = 7.0, today=None) -> Optional[dict]:
     """Quarterly fundamentals for ``ticker`` as a dict, from a per-ticker JSON cache up to
-    ``max_age_days`` old. A live fetch is backfilled from EDGAR and written to the cache.
-    Falls back to a stale cache when the fetch fails; None when there is none."""
+    ``max_age_days`` old, or younger when a report has come out since it was written. A
+    live fetch is backfilled from EDGAR (``_merge_edgar``) and written to the cache. Falls
+    back to a stale cache when the fetch fails; None when there is none."""
     ensure_dirs()
     sym = normalize(ticker)
     path = FUNDAMENTALS_DIR / f"{sym}.json"
+    reported = False
     if not force and age_days(path) <= max_age_days:
         try:
             cached = json.loads(path.read_text())
+            reported = _reported_since_written(cached, path, today)
             # A cache without these keys has an older schema and is refetched at once,
             # not after max_age_days. A key present as None is a valid cache.
-            if "next_earnings" in cached and "last_surprise_pct" in cached:
+            if "next_earnings" in cached and "last_surprise_pct" in cached and not reported:
                 return cached
         except Exception:
             pass
     out = _fetch_fundamentals(sym)
     if out is not None:
-        # yfinance values win. EDGAR fills the Nones and adds its own keys (FY EPS
-        # growth, 3q accel). Any EDGAR failure leaves the yfinance dict as is.
+        # Any EDGAR failure leaves the yfinance dict as is. After a report, EDGAR is
+        # refetched too, for the new release date.
         try:
-            ed = _edgar_backfill(sym)
+            ed = _edgar_backfill(sym, force=True) if reported else _edgar_backfill(sym)
         except Exception:
             ed = None
-        for k, v in (ed or {}).items():
-            if out.get(k) is None and v is not None:
-                out[k] = v
+        _merge_edgar(out, ed)
+        try:
+            prior = json.loads(path.read_text()) if path.exists() else None
+        except Exception:
+            prior = None
+        _carry_inst_history(out, prior, today)
         try:
             path.write_text(json.dumps(out))
         except Exception:

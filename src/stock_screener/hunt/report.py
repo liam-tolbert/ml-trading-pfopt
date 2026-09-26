@@ -64,6 +64,10 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
         for k in ("rs", "fund", "wl", "dist_days", "breakout_today",
                   "f_rev", "f_eps", "f_accel", "f_margin"):
             r[k] = int(float(r[k]))
+        # Absent from a diagnostics.csv written while F had four checks.
+        r["f_max"] = int(float(r.get("f_max") or 4))
+        for k in ("f_code33", "f_fy", "f_est", "f_react"):
+            r[k] = int(float(r.get(k) or 0))
 
     n = {"PASS": 0, "PASS-": 0, "FAIL": 0}
     for v in verdicts.values():
@@ -92,10 +96,17 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
     fund_tr = "".join(
         f'<tr><td class="tk">{_esc(r["ticker"])}</td>'
         f'<td>{ {"buy_zone": "buy zone", "approaching": "approaching", "below": "below pivot", "past_entry": "past entry"}[pl.bucket(r["vs_pivot_pct"])] }</td>'
-        f'<td class="n"><b>{r["fund"]}</b>/4</td>'
-        + chk(r["f_rev"]) + chk(r["f_eps"]) + chk(r["f_accel"]) + chk(r["f_margin"]) +
+        f'<td class="n"><b>{r["fund"]}</b>/{r["f_max"]}</td>'
+        + chk(r["f_rev"]) + chk(r["f_eps"]) + chk(r["f_accel"]) + chk(r["f_margin"])
+        + chk(r["f_code33"]) + chk(r["f_fy"]) + chk(r["f_est"]) + chk(r["f_react"]) +
         f'<td class="n">{_f(r["rev_yoy"], "{:+.1f}%")}</td>'
-        f'<td class="n">{_f(r["eps_yoy"], "{:+.1f}%")}</td></tr>'
+        f'<td class="n">{_f(r["eps_yoy"], "{:+.1f}%")}</td>'
+        f'<td class="n">{_f(r.get("code33"), "{:.0f}/3")}</td>'
+        f'<td class="n">{"&#9888;" if r.get("inv_flag") == "True" else ""}</td>'
+        f'<td class="n">{_f(r.get("earn_react"), "{:+.1f}%")}'
+        f'{" &#9888;" if r.get("earn_flag") == "hard_drop" else ""}</td>'
+        f'<td class="n">{_f(r.get("est_rev_90d"), "{:+.1f}%")}</td>'
+        f'<td class="n">{_f(r.get("inst_count"), "{:.0f}")}</td></tr>'
         for r in sorted(passing, key=lambda r: -r["fund"]))
 
     ern_tr = "".join(
@@ -304,7 +315,11 @@ th.n {{ text-align:right; }}
   <div class="scroll"><table>
     <tr><th>Ticker</th><th>Position</th><th class="n">F</th><th class="n">Rev&nbsp;grw</th>
     <th class="n">EPS&nbsp;grw</th><th class="n">EPS&nbsp;accel</th><th class="n">Margin</th>
-    <th class="n">Rev YoY</th><th class="n">EPS YoY</th></tr>{fund_tr}
+    <th class="n">C33</th><th class="n">FY&nbsp;EPS</th><th class="n">Est&nbsp;&uarr;</th>
+    <th class="n">Report held</th>
+    <th class="n">Rev YoY</th><th class="n">EPS YoY</th><th class="n">Code&nbsp;33</th>
+    <th class="n">Inventory</th><th class="n">Last report</th><th class="n">Est&nbsp;90d</th>
+    <th class="n">Funds</th></tr>{fund_tr}
   </table></div>
 
   <h2>Watchlist audit</h2>
@@ -330,7 +345,7 @@ th.n {{ text-align:right; }}
   </div>
 
   <p class="foot">Q = mechanical VCP quality &middot; RS = relative strength &middot; F = fundamental
-  checks 0&ndash;4 &middot; vs piv = close relative to detected pivot &middot; ADV$M = 20-day average
+  checks 0&ndash;8 (0&ndash;4 on a scan from before the eight) &middot; vs piv = close relative to detected pivot &middot; ADV$M = 20-day average
   dollar volume &middot; DD = distribution days, last 25 sessions &middot; Legs = detected contraction
   sequence, oldest first &middot; &#9733; = watchlist name. Chart verdicts are review notes against the
   SEPA checklist, not trade instructions.</p>

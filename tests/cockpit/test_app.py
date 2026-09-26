@@ -30,7 +30,10 @@ def test_streamlit_app_renders_offline():
 
     def _fund(_t):
         return {"revenue_yoy": 40.0, "eps_yoy": 60.0, "eps_yoy_prev": 50.0,
-                "margin_trend": 1.0, "operating_margin": 25.0, "next_earnings": soon}
+                "margin_trend": 1.0, "operating_margin": 25.0, "next_earnings": soon,
+                "code33": {"eps": True, "sales": True, "margin": True, "all": True},
+                "eps_g3": [12.0, 25.0, 48.0], "rev_g3": [18.0, 22.0, 31.0],
+                "margin3": [9.1, 10.4, 12.0], "eps_fy_up": True, "eps_fy_up_3y": False}
 
     result = screen_universe(list(prices), prices, spy, get_fundamentals=_fund,
                              cfg=ScanConfig(min_rs=0.0))
@@ -72,6 +75,9 @@ def test_streamlit_app_renders_offline():
             assert "RS line " in rendered and "200-day rising " in rendered
             # §6.82: the books' breadth read in the banner (no arrow without history)
             assert "NH/NL " in rendered and "↑" not in rendered.split("NH/NL ")[1][:6]
+            # §6.86: the Step-2 panel's Code 33 and annual-EPS lines
+            assert "**Code 33** ✅ · EPS +12%→+25%→+48%" in rendered, rendered[:400]
+            assert "**Annual EPS** ↑ ✅ · not 3 years rising" in rendered
             at.run()                                     # rerun -> memo hit, no replay
     assert not at.exception, f"app raised on the memoized rerun: {at.exception}"
     assert calls["n"] == 1, f"scan should run once and memoize, ran {calls['n']}x"

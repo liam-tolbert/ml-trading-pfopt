@@ -32,7 +32,8 @@ from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
     watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
-from src.stock_screener.cockpit.scan import filter_candidates, leading_groups  # noqa: E402
+from src.stock_screener.cockpit.scan import (filter_candidates, leading_groups,  # noqa: E402
+                                             step2_lines)
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, cancel_pending_buys,
     fetch_account_summary, fetch_gate_inputs, fetch_held_shares, fill_floor, freshen_prices,
@@ -88,8 +89,21 @@ INFO_STEP2 = """
 Look for:
 - **EPS & revenue YoY ≥ ~20%** and **accelerating** (this quarter ≥ last),
 - **stable or expanding margins** (positive *margin trend*).
+- **Code 33**: EPS growth, sales growth *and* net margin all rising for three quarters
+  running, Minervini's favourite pattern in the numbers (from SEC filings).
+- **Annual EPS** higher than the year before, ideally three years running.
+- ⚠️ **EPS growth slowing two quarters running**, or **inventory growing faster than
+  sales**: the books' warning signs.
+- **How the stock took its last report.** A drop of 5% or more on heavy volume after
+  the release means big investors were selling the news: the books say stay away.
+- **Analyst estimates raised** ≥ 5% over 90 days, and **fund ownership** (how many
+  institutions hold it, and whether that count is rising). Fund *quality* still needs a
+  look by hand.
 
-`fund_score` (0–4) counts how many checks pass. yfinance often exposes only ~4
+`fund_score` (0–8) counts how many of eight checks pass: revenue ≥ 20%, EPS ≥ 20%,
+EPS accelerating, margin expanding, Code 33, annual EPS up, estimates raised ≥ 5%, and
+the last report *held* (no hard drop on heavy volume). A missing figure counts as a
+fail, so read the numbers, not just the score. yfinance often exposes only ~4
 quarters, so **YoY may read n/a** — QoQ is the fallback. Use this to rank the
 Step-1 list, not as a hard cutoff unless you set "min fundamental checks".
 
@@ -151,10 +165,13 @@ READABLE_COLS = {
     "rs_trend": "RS line trend",
     "sma200_rising_m": "200-day rising (months)",
     "criteria": "Trend criteria (/8)",
-    "fund_score": "Fundamental score (0-4)",
+    "fund_score": "Fundamental score (0-8)",
     "rev_yoy": "Revenue YoY (%)",
     "eps_yoy": "EPS YoY (%)",
     "op_margin": "Operating margin (%)",
+    "code33": "Code 33 (of 3)",
+    "earn_react": "Last report reaction (%)",
+    "est_rev_90d": "EPS estimate 90d (%)",
     "earnings_in": "Earnings in (days)",
     "tier": "Tier",
     "vcp": "VCP detected",
@@ -194,12 +211,23 @@ COL_HELP = {
     "sma200_rising_m": "How many months the 200-day SMA has risen without a pause, counted "
                        "the way the template tests it (above its value ~1 month earlier). "
                        "1 month is the gate; the books' best names show 4–5.",
-    "fund_score": "Step-2 fundamental checks passed (0–4): revenue ≥20%, EPS ≥20%, EPS "
-                  "accelerating, margins expanding.",
+    "fund_score": "Step-2 fundamental checks passed (0–8): revenue ≥20%, EPS ≥20%, EPS "
+                  "accelerating, margins expanding, Code 33, annual EPS up, estimates "
+                  "raised ≥5% over 90 days, last report held. Missing data counts as a fail. "
+                  "A scan from before the eight counts four.",
     "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
                "(unknown, not zero).",
     "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",
     "op_margin": "Current operating margin. Look for stable or expanding.",
+    "code33": "Minervini's 'Code 33': over the last three quarters, EPS growth, sales growth "
+              "and net profit margin each rose every quarter. This counts how many of the "
+              "three did; 3 is Code 33. Blank = too little SEC history (e.g. foreign filers).",
+    "earn_react": "How the stock closed on the session after its last earnings release "
+                  "(SEC 8-K), vs the day before. The books: a stock that drops hard on heavy "
+                  "volume after its report is one big money is leaving — the Step-2 panel "
+                  "warns at −5% on ≥1.5× volume. Blank = no release in the last ~100 days.",
+    "est_rev_90d": "Change in analysts' consensus EPS estimate for this fiscal year over the "
+                   "last 90 days (Yahoo). The guide wants it raised ≥5%; cuts are a warning.",
     "earnings_in": "Calendar days until the next scheduled earnings report (yfinance). "
                    "Minervini: don't open a fresh position within ~2–3 weeks of a report — "
                    "with no profit cushion, an earnings gap can blow straight through the "
@@ -246,7 +274,8 @@ COL_HELP = {
 COL_GROUPS = [
     ("Identify", ["ticker", "price", "industry"]),
     ("Fuel — catalyst & strength", ["rs", "rs_nh", "rs_trend", "sma200_rising_m",
-                                    "fund_score", "rev_yoy", "eps_yoy", "op_margin"]),
+                                    "fund_score", "rev_yoy", "eps_yoy", "op_margin",
+                                    "code33", "earn_react", "est_rev_90d"]),
     ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
                               "depth_vs_spy"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
@@ -548,7 +577,7 @@ min_rs = st.sidebar.slider("Min RS rating", 0, 99, RS_FLOOR,
                                 f"The gate already requires {RS_FLOOR}, the book's eighth "
                                 "criterion; raise this to tighten further.")
 require_vcp = st.sidebar.checkbox("VCP only (hint filter)", value=False)
-min_fund = st.sidebar.slider("Min fundamental checks (0-4)", 0, 4, 0)
+min_fund = st.sidebar.slider("Min fundamental checks (0-8)", 0, 8, 0)
 
 # The scan runs in scan_worker's daemon thread. It starts when any cockpit page loads and
 # survives page switches: a switch cancels the script run, never the worker. The worker
@@ -1436,24 +1465,38 @@ with colSide:
                 st.markdown(f"**Earnings:** {ne}{when}{warn}")
             # From data_feed._edgar_backfill: yfinance lacks FY growth and 3-quarter
             # acceleration.
-            _fy, _acc, _sp = (f.get("eps_fy_yoy"), f.get("eps_accel_3q"),
-                              f.get("last_surprise_pct"))
+            _fy, _acc, _sp, _sd = (f.get("eps_fy_yoy"), f.get("eps_accel_3q"),
+                                   f.get("last_surprise_pct"), f.get("last_surprise_date"))
             _extra = []
             if _fy is not None:
                 _extra.append(f"**FY EPS:** {_fy:+.1f}%")
             if _acc is not None:
                 _extra.append("3q accel ✅" if _acc else "3q accel —")
-            if _sp is not None:
-                _extra.append(f"surprise {_sp:+.1f}%")
+            # An undated surprise comes from a cache that predates the age check and can
+            # be a year old, so it is not shown.
+            if _sp is not None and _sd:
+                _extra.append(f"surprise {_sp:+.1f}% ({_sd})")
             if _extra:
                 st.markdown(" · ".join(_extra))
+            for _line in step2_lines(f):
+                st.markdown(_line)
+            _rx = advisories.earnings_reaction_text(payload.get("reaction"),
+                                                    f.get("last_report"),
+                                                    f.get("last_report_time"))
+            if _rx:
+                st.markdown(_rx)
             checks = s2.get("checks", {})
             st.markdown(" ".join(
                 f"{'✅' if checks.get(k) else '—'} {lbl}"
                 for k, lbl in [("revenue_growth", "Rev ≥20%"), ("eps_growth", "EPS ≥20%"),
                                ("eps_accelerating", "EPS accel"),
-                               ("margin_expanding", "Margin ↑")]))
-            st.caption(f"Score {s2.get('score', 0)}/4")
+                               ("margin_expanding", "Margin ↑"), ("code33", "Code 33"),
+                               ("annual_eps_up", "Annual EPS ↑"),
+                               ("estimates_raised", "Estimates ↑"),
+                               ("report_held", "Report held")]
+                if k in checks))
+            # An older scan's summary holds four checks.
+            st.caption(f"Score {s2.get('score', 0)}/{len(checks) or 8}")
 
     # Step-3 controls; the chart renders in colChart.
     with st.container(border=True):

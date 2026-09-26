@@ -32,7 +32,9 @@ from src.stock_screener.cockpit.doctrine import (ADV_DAYS, MAX_ORDER_ADV_PCT,
                                                  EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
                                                  NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS,
                                                  VOL_CONFIRM_RATIO)
-from src.stock_screener.cockpit.advisories import stop_room, typical_day_range
+from src.stock_screener.cockpit.advisories import (earnings_reaction, stop_room,
+                                                   typical_day_range)
+from src.stock_screener.cockpit.scan import code33_parts, inventory_flag
 from src.stock_screener.cockpit.indicators import (dollar_adv, prior_volume_average,
                                                    volume_ratio)
 
@@ -150,6 +152,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         checks = s2.get("checks") or {}
         fu = p.get("fundamentals") or {}
         adv = dollar_adv(df, ADV_DAYS)
+        react = earnings_reaction(df, fu.get("last_report"), fu.get("last_report_time")) or {}
         rows.append({
             "rank": rank, "ticker": t, "wl": int(t in wl),
             "q": float(c["vcp_quality"]), "rs": int(c["rs"]),
@@ -157,6 +160,8 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "rs_trend": c.get("rs_trend"), "sma200_m": c.get("sma200_rising_m"),
             "depth_vs_spy": c.get("depth_vs_spy"), "industry": c.get("industry"),
             "fund": int(c["fund_score"]),
+            # F's scale: 8 checks, or 4 in a scan from before the eight
+            "f_max": len(checks) or 8,
             "close": round(float(close[-1]), 2), "pivot": round(piv, 2),
             "stop": round(float(lev["stop"]), 2),
             "vs_pivot_pct": round(vs_pivot, 2),
@@ -179,7 +184,14 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "f_eps": int(bool(checks.get("eps_growth"))),
             "f_accel": int(bool(checks.get("eps_accelerating"))),
             "f_margin": int(bool(checks.get("margin_expanding"))),
+            "f_code33": int(bool(checks.get("code33"))),
+            "f_fy": int(bool(checks.get("annual_eps_up"))),
+            "f_est": int(bool(checks.get("estimates_raised"))),
+            "f_react": int(bool(checks.get("report_held"))),
             "rev_yoy": fu.get("revenue_yoy"), "eps_yoy": fu.get("eps_yoy"),
+            "code33": code33_parts(fu), "inv_flag": inventory_flag(fu),
+            "earn_react": react.get("day_pct"), "earn_flag": react.get("flag"),
+            "est_rev_90d": fu.get("est_rev_90d"), "inst_count": fu.get("inst_count"),
         })
     return pd.DataFrame(rows)
 

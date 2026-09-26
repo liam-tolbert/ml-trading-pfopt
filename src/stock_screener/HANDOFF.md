@@ -146,7 +146,7 @@ live yfinance data (not CRSP). Reuses ONLY the pure rule functions from `minervi
 
 **Funnel:** universe (`full_us`, ~4,120 names — the ONLY universe since §6.32) → **Step 1** hard gate,
 full **8/8** trend template → RS rating (IBD-style weighted multi-horizon, §6.17) → **Step 2**
-fundamental highlight (rev/EPS YoY/QoQ + margins) → **Step 3** VCP tier (cockpit detector, §6.1) →
+fundamental highlight (F, eight checks, §6.89; Code 33, last-report reaction, estimates, funds) → **Step 3** VCP tier (cockpit detector, §6.1) →
 **Step 4** advisory levels (pivot / buy zone / stop / target) + sizing. A regime/breadth banner gates
 the discipline.
 
@@ -154,7 +154,7 @@ the discipline.
 
 | Module | Role |
 |---|---|
-| `data_feed.py` | yfinance layer: universe, price cache, incremental top-ups, EDGAR/fundamentals |
+| `data_feed.py` | yfinance layer: universe, price cache, incremental top-ups, fundamentals (yfinance quarters, estimates, holders; EDGAR facts and 8-K release dates) |
 | `scan.py` / `vcp.py` / `indicators.py` | the funnel, the VCP tier detector, RMV/BBWP/squeeze |
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
@@ -251,6 +251,10 @@ executor CLOSED.
 `fund_score` can flatter a loose base. Read raw rev/EPS YoY, not `fund_score` (it counts n/a as a
 fail). Never hard-gate on fundamentals: patchy yfinance data would drop *thin-data* names, not weak
 ones — the same never-miss failure the VCP gate had. Shrink the list with **Tier A + RS** instead.
+**F (`fund_score`) is 0–8** (§6.89): revenue ≥ 20%, EPS ≥ 20%, EPS accelerating, margin expanding,
+Code 33, annual EPS up, the current-year estimate raised ≥ 5% over 90 days, and the last report
+held (no ≥ 5% drop on ≥ 1.5× volume). A foreign filer can't pass Code 33, annual EPS or the
+reaction (no EDGAR data), so its F tops out near 5. The slider and `--min-fund` default to 0.
 
 **Live scorecard (10 closed, as of §6.53):** 1W/9L, expectancy −1.7%, −$10.4k ≈ −1.1% of equity over
 a window where SPY made +3.2%. Loss control WORKED (avg loss −2.3%, worst −6%, avg win +4.0%); what
@@ -434,6 +438,41 @@ entry · working → breakeven · well in profit (≥ `TRAIL_GAIN` 0.20) with a 
   every page reads cache-only. The first evening after deploy labels ~400 names; later
   evenings only new passers. A held name that was never a passer shows no industry.
 
+**Company numbers (`data_feed.get_fundamentals`, §6.85):**
+- yfinance gives ~5 quarters; EDGAR company facts back-fill the older YoY, annual EPS and the
+  3-quarter read. yfinance wins. A growth pair (latest YoY, the quarter before) MUST come from
+  one source (`_merge_edgar`): EDGAR's 10-Q lags the release, so its newest quarter can be one
+  behind yfinance's.
+- EDGAR tags: the tag whose newest period ends latest wins (companies switch tags and the old one
+  stays in the facts, frozen). A quarterly series older than 200 days, or annual older than 500,
+  is dropped. A fiscal Q4 exists only inside the 10-K's year, so it is derived as FY − (Q1+Q2+Q3)
+  when exactly three quarters sit inside that year; for EPS that is approximate (share counts
+  drift).
+- yfinance 0.2.65's `earnings_dates` stops at May 2025 for every name checked, so the surprise is
+  kept only when its report is ≤ 120 days old, which today means never. The next report date comes
+  from `Ticker.calendar`, which is current.
+- A cache is refetched after 7 days, or once its `next_earnings` date has passed if it was written
+  on or before that date.
+- Only 10-Q/10-K facts count: a proxy's pay-versus-performance table tags net income in millions.
+- Code 33 (`_code33`) uses three consecutive quarters ending at the newest EPS quarter: EPS and
+  sales YoY growth (a year-ago value ≤ 0 gives no growth figure, so a loss in the window makes
+  it unknown) and net margin (`NetIncomeLoss` ÷ revenue, same period end). Each must rise every
+  quarter. A seasonal business rarely passes the margin leg; that is the books' strictness,
+  not a bug.
+- The last release date (`_edgar_last_report`) is the newest 8-K with item 2.02, from the
+  submissions endpoint (~150 KB per name, on the backfill's 7-day cycle and after a report).
+  Its acceptance time in New York picks the reaction bar (`advisories.earnings_reaction`):
+  at or after 16:00 → the next session, otherwise the release day. A before-open release
+  whose 8-K is accepted after the close would be read a day late; none has been seen.
+  Foreign filers report on 6-K and read None.
+- Estimates (`_estimate_revisions`) come from `Ticker.eps_trend`, the "0y" row: the
+  consensus for the current fiscal year against 30 and 90 days ago. Around a fiscal year-end
+  the row changes year, so the 90-day figure can jump (MLAB +85% over 90, −14% over 30 on
+  2026-09-25); the panel shows both. Holders (`_institutional`) come from
+  `Ticker.major_holders`; `institutionsPercentHeld` can exceed 100% (13F double counting:
+  HALO 112%). The count is a snapshot; `inst_history` keeps its changes across refetches.
+  Both are two more Yahoo calls per weekly fundamentals refetch.
+
 **Alpaca facts (alpaca-py 0.43.4):**
 - Keys are per-account. Canonical names: `ALPACA_API_KEY_MINERVINI` /
   `ALPACA_API_KEY_SECRET_MINERVINI`, shared fallback `ALPACA_API_KEY_PAPER1` /
@@ -597,6 +636,11 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.82** **Breadth the books' way: new highs vs new lows, with history (SEPA audit, Step-1 item 8).** The banner read phase-2 share only; the books watch the count of names at a new 52-week high against new lows, and whether the spread widens. `scan.screen_universe` now counts both over every name it phases (before the gate), from the `week_52_high/low` `classify_phase` already computes (2-dp rounded, so a half-cent slack). The regime dict carries `session` (SPY's last bar date), `new_highs`, `new_lows`, `nh_nl_spread`, `nh_nl_pct` and `nh_nl_expanding`; candidate rows carry `new_high`. History is new: `breadth_store` keeps `data/cockpit/breadth.csv`, one row per settled session, written by `screen_job` after `store.put` and only there. `nh_nl_expanding` compares today's spread with the spread ten settled sessions back (None without them). The §12 breadth gap closes with it: `advisories.spy_confirm_streak(phase2_by_date=)` counts a session only when SPY is in Stage 1–2 **and** that day's phase-2 share was at least `doctrine.BREADTH_MIN_PHASE2 = 15.0` (the vendored `should_generate_signals` default, which it MUST equal); a session with no row counts on SPY alone and sets `partial`. The scan, the trade-panel caption and the evening plan's note say "(with breadth)" or "(SPY only)". History starts at deploy: the arrow appears after ten evenings, the breadth-aware lag after fifteen. The Pi's 2026-09-24 scan reads NH/NL 212/48 on 3,927 names.
 - **§6.83** **Depth against the market (SEPA audit, Step-1 item 6).** The detector caps a leg's depth absolutely (`vcp.MAX_DEPTH_PCT = 35`); the books judge it against the market's decline over the same stretch and avoid names that fell more than ~2.5–3× as far. `advisories.depth_vs_market(df, spy, contractions)` takes the window from the first selected contraction's peak to the last bar and compares the deepest fall from a running high in the stock and in SPY. It runs in `screen_universe` after `detect_vcp`, so tiers, pivots and the benchmark are untouched. Rows carry `depth_vs_spy` (the ratio) and `depth_flag` (at `DEPTH_VS_MARKET_MAX = 3.0`); the payload carries the whole read. It shows as the "Depth vs market (×)" column in the Base group, a Step-3 caption ("Base depth 23% while the market fell 10% (2.3×)", ⚠️ past 3×) and a hunt report column. Advisory only; nothing gates on it. None when SPY fell under 1% in the window.
 - **§6.84** **Industry groups (SEPA audit, Step-1 item 5).** The cockpit had no sector or industry data anywhere; the books spend a chapter on groups (most big winners move with their group; a leader's breakdown often precedes the group's). New `sectors.py` reads yfinance `Ticker.info` (user decision over SEC SIC codes and a screener CSV) and caches `{sector, industry, fetched}` per symbol in `data/cockpit/sectors.json` for 180 days; a failed or empty fetch is remembered for 7 so the nightly screen doesn't retry it. `screen_universe(get_sector=)` labels Step-1 passers only (`run_scan` injects `sectors.get_sector`); every other read is cache-only, including `fetch_positions`, so no page waits on Yahoo. Rows carry `industry`/`sector`. Four reads, all advisory: the scan's "Industry" column; a "Leading groups" line under the regime banner (`scan.leading_groups`: industries ranked by tier-A candidates, then new highs from §6.82, then candidates); a Positions warning when three holdings, or half of two or more, share an industry (`advisories.industry_concentration`, by name count); and a Positions row caption when one of the industry's top-3-RS scan names closed below its 50-day on ≥ 1.5× volume (`advisories.group_leader_break`, the books' "when the leader sneezes"). The hunt carries `industry` in its diagnostics, shows it in the full review and prints the PASS names' groups. First deploy evening labels ~400 names inside `cockpit-eod`'s 6,000 s budget; the log's duration is the thing to watch.
+- **§6.85** **The Step-2 numbers were partly stale (SEPA audit Step 2, found while planning it).** Checked live on 2026-09-25. **(a)** EDGAR took the first tag with any data. `Revenues` ends 2020-12-31 for HALO and GILD, while `RevenueFromContract…` runs to 2026, so their prior-quarter revenue YoY came from 2020. GILD's quarterly `EarningsPerShareDiluted` ends 2010-06-30. The freshest tag now wins, and a series older than 200 days (500 for annual) is dropped. **(b)** A yfinance YoY was paired with whatever EDGAR had for the quarter before, so "EPS accelerating" could compare quarters from different years. EDGAR's prior now joins only when both describe the same quarter. **(c)** EDGAR has no fiscal Q4 three-month figure (MLAB's March quarters are missing), so `eps_accel_3q` spanned a gap. Q4 is derived from the year, and the flag needs three consecutive quarters. **(d)** yfinance 0.2.65's `earnings_dates` stops at May 2025 (HALO, ANET, PUBM, GH, BIIB, ZBRA, GILD, MLAB), so the panel's "surprise" was ~16 months old (MLAB: −220%, 2025-05-28). It is now dated and dropped past 120 days, and the app hides an undated one from an older cache. **(e)** A report's new numbers could wait 7 days for the cache; a cache written on or before its `next_earnings` date is refetched once that date passes. Existing caches roll over on their own 7-day clock. After the fix, live: HALO revenue YoY +47.7% / prior +42.2% (both 2026-06-30), MLAB prior +2.6% (was +8.0%, from EDGAR's stale tag).
+- **§6.86** **Code 33, annual EPS and two warnings (SEPA audit Step-2 items 1–2).** EDGAR now also reads `NetIncomeLoss`, and `_edgar_backfill` adds `eps_g3`/`rev_g3`/`margin3`, `code33` (`{eps, sales, margin, all}`), `eps_decel_2q` (EPS growth lower two quarters running, the guide's "disqualify" sign), `eps_fy_up` and `eps_fy_up_3y` (consecutive fiscal years). The scan row carries `code33` (how many legs rose, 0–3; column "Code 33 (of 3)" in the Fuel group) and `inv_flag` (inventory QoQ at least `scan.INVENTORY_VS_SALES_PTS = 10` points above sales QoQ; the books give no number). `scan.step2_lines` renders the panel lines; the hunt carries both reads and the report's Step-2 table shows them. None of it counts toward F yet. **Found on the live probe:** ANET's derived fiscal Q4 net income was −$2.6B because a DEF 14A pay-versus-performance table tags net income in millions (3511) and, filed after the 10-K, won the latest-filed rule; only 10-Q/10-K facts count now. After the fix, live on 2026-09-25: ANET Code 33 2/3 (margin 38.4→37.8→40.0%), NVDA 1/3, HALO 2/3, GILD 0/3; MLAB unknown (its March quarters were losses, so growth has no base).
+- **§6.87** **How the stock took its last report (SEPA audit Step-2 item 3).** The books: great numbers followed by a hard drop on heavy volume mean big investors sold into the news. The cockpit knew only the *next* report date. Yahoo's past dates are frozen (§6.85), so the release comes from EDGAR: `_edgar_last_report` finds the newest 8-K with item 2.02 and keeps its acceptance time in New York. `advisories.earnings_reaction(df, date, time)` reads the reaction session (the next bar for a release at or after 16:00), its gap, close-to-close move, volume against the prior 50 days, and the move since. `flag` is `hard_drop` at −`doctrine.EARNINGS_REACTION_PCT` (5, user decision; the books give no number) on ≥ `VOL_CONFIRM_RATIO`, `strong` for the mirror image. None past `REPORT_MAX_AGE_DAYS = 100` from the last bar. The scan row carries `earn_react`/`earn_react_flag` and the payload `reaction`; the Step-2 panel adds a "Last report" line, the table a "Last report reaction (%)" column, the hunt `earn_react`/`earn_flag` and a report column. `get_fundamentals` now forces the EDGAR refetch when it refetches after a report, so the new release is seen that evening. Live on 2026-09-25: HALO +20.2% on 4.2× (strong, the 08-07 session after an after-close release), PUBM +31.9% on 5.9×, MLAB +9.5% on 2.1×, ANET +3.6%, GILD −2.6%. Not counted in F here.
+- **§6.88** **Estimate revisions and fund ownership (SEPA audit Step-2 item 4).** The audit filed both under "no free data"; yfinance 0.2.65 has both. `_fetch_fundamentals` adds `est_rev_30d`/`est_rev_90d` (`eps_trend`, current fiscal year) and `inst_pct`/`inst_count` (`major_holders`), each behind its own try so a failure costs only its keys. `get_fundamentals` carries `inst_history` (`[date, count]` on each change, last 8) from the cache it replaces, so the count's trend appears once a 13F cycle moves it. The Step-2 panel adds "Estimates" (✅ at ≥ `scan.ESTIMATE_RAISE_MIN_PCT = 5`, the guide's number; ⚠️ at −5 or worse) and "Funds" lines, the table an "EPS estimate 90d (%)" column, the hunt `est_rev_90d`/`inst_count` and report columns. Fund quality is still a look by hand. Live on 2026-09-25: MLAB +84.6%/90d (−14.4%/30d), 235 funds; HALO +5.1%, 906 funds; PUBM +83.6%, 219; KB +10.3%, 461.
+- **§6.89** **F counts eight checks (user decision).** `scan._step2_summary(f, reaction)` adds Code 33 (`code33["all"]`), annual EPS up (`eps_fy_up`), estimates raised (`est_rev_90d ≥ 5`) and the last report held (a reaction exists and isn't a hard drop) to the four it had. `screen_universe` computes the reaction before the summary so `min_fundamental_score` sees all eight; `filter_candidates` still mirrors it by comparing `fund_score`. The app slider runs 0–8, the Step-2 caption reads "Score x/{checks}" (so an older scan's summary says /4) and the check row lists only the checks the summary has. The hunt adds `f_code33`/`f_fy`/`f_est`/`f_react` and `f_max`; the report reads F out of `f_max` (4 for a diagnostics.csv written before, which also lacks the new columns and renders with them as 0). The surprise stays out of F while its source is frozen (§12). **Cache rollover:** a fundamentals cache written before §6.85 lacks the new keys and fails checks 5–8 until its 7-day refetch, so F reads low for up to a week after deploy. That is not a regression in the names.
 
 ## 12. Open items
 
@@ -650,6 +694,11 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **★ Deploy §6.79 soon.** Until the `release_file` fix is live, the Pi's app can hang again the
   first time two threads log (a page's price read plus the background scan). `docker compose
   restart app` clears it for a while.
+- **The earnings surprise has no working source (§6.85).** yfinance 0.2.65's `earnings_dates`
+  stops at May 2025. A newer yfinance may fix it, but the pin also governs every price download,
+  so an upgrade is its own change with its own test run on the Pi. Until then the surprise reads
+  n/a everywhere. Once it works, it is the natural ninth F check (the guide's "earnings
+  surprises are a green light").
 - **Leaked Yahoo connections.** After 20 days up, the app held ~15 CLOSE_WAIT sockets to
   `query1/2.finance.yahoo.com` (the server closed them; the process never did). It's harmless at that
   count and was not addressed in §6.71. If the app is ever up for months, count them
@@ -661,5 +710,5 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (14 suites, 207 tests) · `tests/test_hunt.py` (40 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` (14 suites, 222 tests) · `tests/test_hunt.py` (46 assertions) · `tests/test_backtest_daily.py` (12) · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
 - **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.

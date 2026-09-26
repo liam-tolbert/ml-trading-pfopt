@@ -87,9 +87,17 @@ moves. A beautiful chart with decelerating earnings is a trap.
 - **Acceleration is more important than the absolute number.** A stock going
   from 10% → 20% → 40% EPS growth QoQ is more compelling than flat 30% growth
 - Last 3 quarters should show no deceleration — any slowdown is a yellow flag
+- **"Code 33"** is Minervini's favourite pattern: for three quarters running, EPS growth,
+  sales growth **and** net profit margin all rise together. The cockpit reads it from SEC
+  filings and shows it in the Step-2 panel and the "Code 33" column (3 of 3 = Code 33)
 - Earnings surprises (beating estimates) are a green light
+- **How the stock took its last report** matters as much as the numbers. Great numbers
+  followed by a hard drop on heavy volume mean big investors sold the news: stay away. The
+  Step-2 panel shows the session after the last release (from its SEC 8-K) and warns at
+  −5% or worse on ≥ 1.5× volume
 - Upward analyst estimate revisions ≥ 5% over the past 3 months indicate
-  improving institutional expectations
+  improving institutional expectations (the Step-2 panel shows this year's EPS
+  estimate change over 90 and 30 days, from Yahoo)
 
 ### 2b. Revenue / Sales
 
@@ -116,11 +124,24 @@ moves. A beautiful chart with decelerating earnings is a trap.
   via data providers like Finviz, Simply Wall St, MarketSmith)
 - Rising number of funds holding the stock indicates accumulation
 - Watch for high-quality fund sponsors (top-tier growth funds), not just quantity
+- The Step-2 panel shows how many institutions hold the stock and what share they
+  hold (Yahoo), with the count's change once it has been seen to move. Which funds they
+  are still needs a look by hand
 
 ### What to disqualify immediately
 
 - EPS decelerating for 2+ consecutive quarters
 - Revenue growing but earnings shrinking (margin compression)
+- Inventory growing much faster than sales: goods are piling up unsold (the Step-2
+  panel warns at 10 points or more quarter on quarter)
+
+### How the cockpit scores it (F, 0–8)
+
+One point each for: revenue ≥ 20% YoY · EPS ≥ 20% YoY · EPS accelerating · margin
+expanding · Code 33 · annual EPS up · this year's estimate raised ≥ 5% over 90 days ·
+the last report held (no drop of 5% or more on heavy volume). Missing data scores zero,
+so a low F can mean thin data rather than a weak company: read the numbers. F ranks and
+highlights; it filters nothing unless you raise the "min fundamental checks" slider.
 - Negative surprises or downward estimate revisions
 - Declining fund ownership (distribution, not accumulation)
 
