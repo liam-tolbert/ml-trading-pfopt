@@ -527,7 +527,8 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
       (tz-aware timestamps are read in exchange time). ``pivot`` is the watchlist's frozen
       level; without it the pivot checks are skipped. A Day-0 close back below the pivot,
       a decisive close below it (> ``DECISIVE_BELOW_PIVOT_PCT`` or a 2nd in a row), or a
-      close below the breakout bar's low fails outright. A stalled clock warns at day
+      close below the breakout bar's low fails outright. With a pivot, a close below the
+      breakout bar's low that still holds the pivot only warns. A stalled clock warns at day
       ``P1_CUSHION_DAYS`` without a ``P1_CUSHION_PCT`` cushion and fails flat-to-red at
       day ``P1_STALL_DAYS``. Post-breakout violations
       (:func:`advisories.post_breakout_read`) warn. With ``doctrine.VIOLATIONS_CAN_FAIL``
@@ -588,7 +589,9 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                     bo = df[df.index <= e]
                     if len(bo):
                         bo_low = float(bo["Low"].iloc[-1])
-                        if last_close < bo_low:
+                        if last_close < bo_low and pivot and last_close >= pivot:
+                            warns.append("below the entry-day low, holding the pivot")
+                        elif last_close < bo_low:
                             fails.append("closed below the breakout bar's low — "
                                          "no grace day")
                 except Exception:

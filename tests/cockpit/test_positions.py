@@ -173,8 +173,9 @@ def test_position_advisories():
 def test_sell_pillars():
     """§6.52: the Step-E doctrine as per-position P1-P4 statuses (pure, pinned today).
     P1 fails on Day-0 close below pivot / decisive (>2%) close / 2nd consecutive close /
-    close below the breakout bar's low / flat-to-red at day 15+, warns on no-3%-cushion
-    at day 10+, degrades without an entry date or pivot. P2 is STRICT (user decision:
+    close below the breakout bar's low (only warns while the pivot holds, §6.95) /
+    flat-to-red at day 15+, warns on no-3%-cushion at day 10+, degrades without an
+    entry date or pivot. P2 is STRICT (user decision:
     7/8 fails) on the book's eight: the seven price criteria in ``template_criteria``
     plus the scan's RS rating >= 70 (§6.80). P3 reads the scan regime, falls back to the
     trigger report's SPY note.
@@ -222,11 +223,21 @@ def test_sell_pillars():
                        entry_date="2026-08-05", pivot=100.0, today=TODAY)
     assert two["P1"]["status"] == "fail" and "consecutive" in two["P1"]["detail"]
 
-    # P1 breakout-bar low: still above the pivot, but under the entry bar's low
+    # P1 breakout-bar low (§6.95): under the entry bar's low (99.0) but holding the
+    # pivot only warns; under both, on the first close below the pivot, fails.
     bo = sell_pillars(P(last_close=98.5, gain_pct=-0.015,
                         df=_trigger_frame(TODAY, [100.0] * 25 + [98.5] * 5)),
                       entry_date="2026-08-05", pivot=95.0, today=TODAY)
-    assert bo["P1"]["status"] == "fail" and "breakout bar" in bo["P1"]["detail"]
+    assert bo["P1"]["status"] == "warn" and "entry-day low" in bo["P1"]["detail"], bo
+    bof = sell_pillars(P(last_close=98.6, gain_pct=-0.014,
+                         df=_trigger_frame(TODAY, [100.0] * 29 + [98.6])),
+                       entry_date="2026-08-05", pivot=98.8, today=TODAY)
+    assert bof["P1"]["status"] == "fail" and "breakout bar" in bof["P1"]["detail"], bof
+    assert "decisive" not in bof["P1"]["detail"] and "consecutive" not in bof["P1"]["detail"]
+    nopiv_bo = sell_pillars(P(last_close=98.5, gain_pct=-0.015,
+                              df=_trigger_frame(TODAY, [100.0] * 25 + [98.5] * 5)),
+                            entry_date="2026-08-05", today=TODAY)
+    assert nopiv_bo["P1"]["status"] == "fail" and "breakout bar" in nopiv_bo["P1"]["detail"]
 
     # P1 laggard clock: day 12 with +1% -> warn; day 18 flat-to-red -> fail
     lag = sell_pillars(P(last_close=101.0, gain_pct=0.01), entry_date="2026-07-27",

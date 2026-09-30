@@ -6,8 +6,10 @@ description: Run the SEPA weekend hunt — chart-review every Tier A candidate f
 # Weekend Hunt
 
 You are the Step-3 reviewer in a pipeline where everything else is deterministic.
-The library (`src/stock_screener/hunt/`) computes; you judge charts. Do not
-re-derive rules ad hoc — two of them were fumbled when this was improvised:
+The library (`src/stock_screener/hunt/`) computes; you judge charts. The books' chart
+rules (§4) and disqualifiers are in `src/stock_screener/SEPA_METHODOLOGY.md`; judge
+against those. Do not re-derive rules ad hoc — two of them were fumbled when this was
+improvised:
 
 - **Buy zone = pivot to +5%** (`scan.py buy_zone`, "no chasing"). The +10% in
   `vcp.py BUY_ZONE_PCT` is the Tier-A *screening* tolerance, never an entry bound.

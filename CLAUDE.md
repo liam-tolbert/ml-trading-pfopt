@@ -3,6 +3,11 @@
 Project context, rules and history live in `src/stock_screener/HANDOFF.md`. Read §4
 (never do these) and §9 (conventions) before changing code.
 
+The trading method (Minervini's SEPA, from his two books) and where the cockpit follows or
+departs from it is in `src/stock_screener/SEPA_METHODOLOGY.md`. Read it before judging a
+chart, running the weekend hunt, answering a question about the method, or changing a
+trading rule. Its §0 says how a session uses it.
+
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as described in
 RFC 2119.
 
