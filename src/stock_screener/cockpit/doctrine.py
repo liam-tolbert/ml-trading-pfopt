@@ -86,6 +86,16 @@ BREADTH_MIN_PHASE2 = 15.0
 MARKET_TURN_CAN_TRADE = False
 MARKET_TURN_REDUCE_FRACTION = 0.5
 
+# Selling into strength. The books' climax signs are read only once a position is up
+# STRENGTH_MIN_GAIN: early in a run the same behaviour is healthy, and the cockpit doesn't
+# count bases. Off: the signs are notes. On: STRENGTH_SIGNS_TO_SELL signs on one close
+# plan a sale of STRENGTH_SELL_FRACTION, with the rest stopped at breakeven, once per
+# position. The switch SHOULD stay off until the signs have been read against live runs.
+STRENGTH_MIN_GAIN = 0.20
+STRENGTH_CAN_TRADE = False
+STRENGTH_SIGNS_TO_SELL = 3
+STRENGTH_SELL_FRACTION = 0.5
+
 # Breakout confirmation: volume >= 1.5x the average of the PRIOR VOL_AVG_DAYS bars. The
 # current bar MUST be excluded; it would dilute the spike being tested.
 VOL_CONFIRM_RATIO = 1.5

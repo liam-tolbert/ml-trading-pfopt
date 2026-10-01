@@ -255,7 +255,8 @@ def test_execute_entry_plan_matrix():
 
 def test_trade_panel_arm_and_disarm():
     """#24 arming UI: a LIMIT plan's Arm button writes tonight's entry plan from the
-    session-edited widgets (checked buys only, held rows excluded); the armed section
+    session-edited widgets (checked buys only, here via Select all; held rows excluded);
+    the armed section
     renders and its Disarm button rewrites the file (armed -> disarmed); a MARKET
     plan's Arm button is disabled (a market row would buy the open blind)."""
     try:
@@ -296,6 +297,10 @@ def test_trade_panel_arm_and_disarm():
             "build_ts": 1, "order_type": "limit"}
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
+        # Every buy starts unticked (2026-10-01), so Arm has nothing until Select all.
+        assert [b for b in at.button if b.key == "trade_arm"][0].disabled
+        [b for b in at.button if b.key == "trade_select_all"][0].click().run()
+        assert not at.exception, f"app raised on select all: {at.exception}"
         arm = [b for b in at.button if b.key == "trade_arm"]
         assert arm and not arm[0].disabled, "limit plan must offer Arm"
 

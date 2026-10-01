@@ -259,12 +259,21 @@ _rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
                                          current_stop=p.get("current_stop"),
                                          stop_pct=_derived_pct)
            for p in positions}
-# Stage and advisories again, now with R and the average win for the books' triggers.
+_strength = {}
+for p in positions:
+    try:
+        _strength[p["symbol"]] = advisories.strength_signs(
+            p.get("df"), (_open_by_sym.get(p["symbol"]) or {}).get("entry_date"),
+            avg_entry=p.get("avg_entry"))
+    except Exception:
+        _strength[p["symbol"]] = None
+# Stage and advisories again, now with R, the average win and the strength signs.
 for p in positions:
     _book = {"r_now": _rmults[p["symbol"]][0], "avg_win": _avg_win}
     p["stage"] = trade.position_stage(p["gain_pct"], avg_entry=p["avg_entry"],
                                       sma_50=p["sma_50"], **_book)
-    p["advisories"] = trade.position_advisories({**p, **_book})
+    p["advisories"] = trade.position_advisories(
+        {**p, **_book, "strength_signs": (_strength.get(p["symbol"]) or {}).get("signs")})
 
 
 def _r_cell(sym) -> str:
@@ -431,6 +440,10 @@ for p in positions:
     if _pb and _pb["follow_through"]:
         cA.caption(f"  ↳ ✅ follow-through (day {_pb['day_n']}): "
                    + " · ".join(_pb["follow_through"]))
+    _signs = (_strength.get(sym) or {}).get("signs")
+    if _signs:
+        cA.caption(f"  ↳ 📈 selling-into-strength signs ({len(_signs)}): "
+                   + " · ".join(_signs) + " — the books sell part into strength")
     if sym in _leader_breaks:
         cA.caption(f"  ↳ ⚠️ {_leader_breaks[sym]}")
     if _weak_tape and advisories.in_weak_take_profit_band(p.get("gain_pct")):

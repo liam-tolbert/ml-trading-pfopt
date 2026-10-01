@@ -47,7 +47,8 @@ ORDER_SKIPPED = "skipped"
 
 def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                     prior_plan: Optional[dict] = None, today=None,
-                    market: Optional[dict] = None) -> dict:
+                    market: Optional[dict] = None,
+                    strength: Optional[Dict[str, dict]] = None) -> dict:
     """Turn per-position pillar reads into the evening sell plan. Pure apart from the
     wall-clock ``generated_at``. Returns ``{date, generated_at, orders, snapshot, notes,
     executed_at}``, plus ``market`` when ``market`` is given.
@@ -67,8 +68,16 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
     first closes in Stage 4 (:func:`advisories.market_turn`), the note says to reduce.
     With ``doctrine.MARKET_TURN_CAN_TRADE`` on, the plan also sells
     ``MARKET_TURN_REDUCE_FRACTION`` of each position without a full exit. A single share
-    gets a note only. A plan MUST hold at most one order per symbol, and a full exit wins,
-    so a Veto still means "don't sell this name tomorrow"."""
+    gets a note only.
+
+    ``strength`` is ``{symbol: {signs, avg_entry, trimmed}}`` from
+    :func:`advisories.strength_signs`; ``trimmed`` means part of the position was already
+    sold. Every holding with signs gets a note. With ``doctrine.STRENGTH_CAN_TRADE`` on,
+    ``STRENGTH_SIGNS_TO_SELL`` signs plan a partial sale of ``STRENGTH_SELL_FRACTION`` with
+    ``remainder_stop`` at ``avg_entry``, unless the position was already trimmed.
+
+    A plan MUST hold at most one order per symbol, and a full exit wins, so a Veto still
+    means "don't sell this name tomorrow"."""
     from src.stock_screener.cockpit import advisories, doctrine
     prior_snap = (prior_plan or {}).get("snapshot", {})
     snapshot: Dict[str, dict] = {}
@@ -154,6 +163,35 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                          "add yet"
                          + (" (with breadth)" if stk.get("breadth") else " (SPY only)")
                          + ".")
+
+    for pos in positions:
+        sym, held = pos.get("symbol"), int(pos.get("qty") or 0)
+        rd = (strength or {}).get(sym) or {}
+        signs = rd.get("signs") or []
+        if not signs or held < 1:
+            continue
+        notes.append(f"{sym}: selling-into-strength signs ({len(signs)}): "
+                     + "; ".join(signs))
+        if (not doctrine.STRENGTH_CAN_TRADE
+                or len(signs) < doctrine.STRENGTH_SIGNS_TO_SELL
+                or sym in {o["symbol"] for o in orders}):
+            continue
+        # Once per position: a second strength sale every evening would empty it.
+        if rd.get("trimmed"):
+            notes.append(f"{sym}: already trimmed - no second strength sale")
+            continue
+        qty = int(held * doctrine.STRENGTH_SELL_FRACTION)
+        if qty < 1:
+            notes.append(f"{sym}: selling into strength - a single share, no partial "
+                         "sell (decide by hand)")
+            continue
+        order = {"symbol": sym, "qty": qty, "exit": "partial",
+                 "reasons": [f"selling into strength: {len(signs)} signs - sell "
+                             f"{qty}/{held}, rest stopped at breakeven"],
+                 "status": ORDER_PLANNED, "detail": ""}
+        if rd.get("avg_entry"):
+            order["remainder_stop"] = round(float(rd["avg_entry"]), 2)
+        orders.append(order)
 
     import pandas as pd
     plan = {"date": plan_store.today_iso(today),

@@ -216,6 +216,57 @@ def test_violations_switch_and_plan_notes():
     assert [o["symbol"] for o in plan["orders"]] == ["AAA"]
 
 
+def test_strength_signs():
+    """§6.98 (SEPA audit Step 4): the books' sell-into-strength signs, each on a frame
+    built to show it, read only from a +20% gain (early in a run the same behaviour is
+    healthy). A live read drops today's unsettled bar."""
+    from src.stock_screener.cockpit import advisories
+
+    def signs(df, e, **kw):
+        return advisories.strength_signs(df, e, avg_entry=100.0,
+                                         today=kw.pop("today", df.index[-1]), **kw)
+
+    # under +20%: no signs read, but the gain is reported
+    df, e = _breakout([101.0 + k for k in range(10)])
+    r = signs(df, e)
+    assert r["signs"] == [] and abs(r["gain"] - 0.10) < 1e-9 and r["day_n"] == 10, r
+
+    # a climb: +28% in 12 sessions, every one up, the last the smallest
+    post = [100.0 * 1.022 ** k for k in range(1, 12)]
+    df, e = _breakout(post + [post[-1] * 1.01])
+    assert signs(df, e)["signs"] == ["up 28% in 12 sessions",
+                                     "10 of the last 10 sessions up"], signs(df, e)
+
+    # the biggest up day of the run, gapping over the prior high
+    post = [100.0 * 1.02 ** k for k in range(1, 11)]
+    df, e = _breakout(post + [post[-1] * 1.06])
+    df.iloc[-1, df.columns.get_loc("Low")] = post[-1] * 1.02
+    s = signs(df, e)["signs"]
+    assert "biggest up day of the run (+6.0%)" in s, s
+    assert "gapped up late in the run (day 11)" in s, s
+    day = df.index[-1].strftime("%Y-%m-%d")
+    live = advisories.strength_signs(df, e, avg_entry=100.0, now=f"{day} 11:00")
+    assert live["provisional_dropped"] is True and live["day_n"] == 10, live
+    assert not any("gapped" in x or "biggest up" in x for x in live["signs"]), live
+
+    # heavy volume, no progress
+    post = [100.0 * 1.025 ** k for k in range(1, 11)]
+    df, e = _breakout(post + [post[-1] * 1.002], post_vol=[1e6] * 10 + [2e6])
+    assert "heavy volume (2.0×) with no progress" in signs(df, e)["signs"]
+
+    # the biggest down day since the entry
+    post = [100.0 * 1.03 ** k for k in range(1, 11)]
+    df, e = _breakout(post + [post[-1] * 0.96])
+    assert "biggest down day since the entry (-4.0%)" in signs(df, e)["signs"]
+
+    # no read without a frame, an entry, a cost or a bar on or after the entry
+    assert advisories.strength_signs(None, e, avg_entry=100.0) is None
+    assert advisories.strength_signs(df, None, avg_entry=100.0) is None
+    assert advisories.strength_signs(df, e, avg_entry=None) is None
+    assert advisories.strength_signs(df, "2030-01-02", avg_entry=100.0,
+                                     today=df.index[-1]) is None
+
+
 def test_regime_tier_prefix():
     """§6.78 (audit #8): tiers by label PREFIX. "TRANSITIONAL / Uncertain" contains "on",
     and the old substring test painted it green (risk-on); a Weak/Mixed risk-on is not a

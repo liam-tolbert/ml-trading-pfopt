@@ -173,6 +173,12 @@ def test_position_advisories():
     assert not any("Breakeven" in a for a in position_advisories(
         {**be, "gain_pct": 0.18, "sma_50": 104.0, "current_stop": 100.5}))
 
+    # §6.98: named strength signs replace the generic "consider selling part" line
+    assert any("selling part into strength" in a
+               for a in position_advisories({**be, "gain_pct": 0.25, "strength_signs": []}))
+    assert not any("selling part into strength" in a for a in position_advisories(
+        {**be, "gain_pct": 0.25, "strength_signs": ["7 of the last 10 sessions up"]}))
+
     clean = position_advisories({"has_stop": True, "gain_pct": 0.05, "below_sma50": False,
                                  "volume_ratio": 1.0, "avg_entry": 100.0, "current_stop": 96.0})
     assert clean == []
@@ -642,6 +648,45 @@ def test_positions_page_sell_pillars():
     assert "sell into strength" not in rendered, "no journal -> no laggard read"
 
 
+def test_positions_page_strength_signs():
+    """§6.98: a holding up 28% with every session since the entry up shows its named
+    selling-into-strength signs, and they replace the generic "consider selling part"
+    advisory. The frame ends on a past session, so the live read drops no bar."""
+    try:
+        from streamlit.testing.v1 import AppTest
+    except Exception as e:
+        print(f"  SKIP test_positions_page_strength_signs (AppTest unavailable: {e})")
+        return
+    import tempfile
+    from unittest.mock import patch
+    import pandas as pd
+    from src.stock_screener.cockpit import cache, trade
+
+    end = pd.Timestamp.now().normalize() - pd.offsets.BDay(1)
+    df = _trigger_frame(end, [100.0] * 40 + [100.0 * 1.022 ** k for k in range(1, 12)])
+    last = float(df["Close"].iloc[-1])
+    offline = _positions_offline(current_price=last, last_close=last, df=df,
+                                 gain_pct=last / 100.0 - 1.0, sma_50=104.0)
+    entry_iso = (df.index[39] + pd.Timedelta(hours=15)).tz_localize("UTC").isoformat()
+    fills = {"account": offline["account"],
+             "fills": [{"symbol": "AAA", "side": "buy", "qty": 10, "price": 100.0,
+                        "time": entry_iso, "order_id": "1",
+                        "client_order_id": "SEPAcockpit-AAA-1"}]}
+    page = str(ROOT / "src" / "stock_screener" / "cockpit" / "pages" / "2_Positions.py")
+    with tempfile.TemporaryDirectory() as _tmp, \
+            patch.object(trade, "fetch_positions", return_value=offline), \
+            patch.object(trade, "fetch_order_fills", return_value=fills), \
+            patch.object(cache, "WATCHLIST_JSON", Path(_tmp) / "watchlist.json"), \
+            patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
+        at = AppTest.from_file(page, default_timeout=60)
+        at.run()
+    assert not at.exception, f"positions page raised: {at.exception}"
+    rendered = _rendered_text(at)
+    assert "selling-into-strength signs (3): up 27% in 11 sessions" in rendered, \
+        rendered[-800:]
+    assert "consider selling part" not in rendered
+
+
 def test_build_sell_plan_matrix():
     """§6.55 auto-sell planner: name-specific hard fails (P1/P4) plan a FULL exit on
     the first failing settled close; P2 (strict template, known one-day SMA noise
@@ -888,6 +933,77 @@ def test_build_sell_plan_market_turn_orders_when_switched():
     assert by["BBB"]["exit"] == "partial" and by["BBB"]["qty"] == 3      # int(7 × 0.5)
     assert any(n.startswith("ONE: market turn") for n in plan["notes"])
     assert "(partial)" in sells.format_plan(plan)
+
+
+def test_build_sell_plan_strength():
+    """§6.98: selling-into-strength signs are plan notes. With STRENGTH_CAN_TRADE on (it
+    ships off), STRENGTH_SIGNS_TO_SELL signs plan ONE partial sale of half, the rest
+    stopped at breakeven — once per position (an already-trimmed one gets a note), never
+    beside a full exit or another order for the name, never for a single share."""
+    from unittest.mock import patch
+    from src.stock_screener.cockpit import doctrine, sells
+
+    poss = [{"symbol": s, "qty": q} for s, q in
+            (("AAA", 10), ("ONE", 1), ("FUL", 10), ("TRM", 10), ("TWO", 10), ("MKT", 10))]
+    ok = {k: {"status": "ok", "detail": ""} for k in ("P1", "P2", "P3", "P4")}
+    pillars = {p["symbol"]: dict(ok) for p in poss}
+    pillars["FUL"] = {**ok, "P1": {"status": "fail", "detail": "decisive break"}}
+    three = ["up 30% in 12 sessions", "8 of the last 10 sessions up",
+             "biggest up day of the run (+6.0%)"]
+    strength = {s: {"signs": three, "avg_entry": 100.0, "trimmed": False}
+                for s in ("AAA", "ONE", "FUL", "MKT")}
+    strength["TRM"] = {"signs": three, "avg_entry": 100.0, "trimmed": True}
+    strength["TWO"] = {"signs": three[:2], "avg_entry": 100.0, "trimmed": False}
+
+    assert doctrine.STRENGTH_CAN_TRADE is False, "ships off"
+    off = sells.build_sell_plan(poss, pillars, today="2026-10-01", strength=strength)
+    assert [o["symbol"] for o in off["orders"]] == ["FUL"], off["orders"]
+    assert any(n.startswith("AAA: selling-into-strength signs (3): up 30%")
+               for n in off["notes"]), off["notes"]
+
+    s4 = {"spy_note": {"phase": 4}, "streak": None}
+    with patch.object(doctrine, "STRENGTH_CAN_TRADE", True):
+        on = sells.build_sell_plan(poss, pillars, today="2026-10-01", strength=strength)
+        with patch.object(doctrine, "MARKET_TURN_CAN_TRADE", True):
+            both = sells.build_sell_plan([poss[-1]], {"MKT": ok}, today="2026-10-01",
+                                         prior_plan={"snapshot": {}, "market": {"spy_phase": 2}},
+                                         market=s4, strength=strength)
+    by = {o["symbol"]: o for o in on["orders"]}
+    assert set(by) == {"FUL", "AAA", "MKT"}, by
+    assert by["FUL"]["exit"] == "full"
+    assert (by["AAA"]["exit"], by["AAA"]["qty"], by["AAA"]["remainder_stop"]) == \
+        ("partial", 5, 100.0), by["AAA"]
+    assert "selling into strength: 3 signs - sell 5/10" in by["AAA"]["reasons"][0]
+    assert any(n.startswith("ONE: selling into strength - a single share") for n in on["notes"])
+    assert any(n.startswith("TRM: already trimmed") for n in on["notes"])
+    assert "TWO" not in by and any(n.startswith("TWO: selling-into-strength signs (2)")
+                                   for n in on["notes"])
+    assert [(o["symbol"], o["reasons"][0][:11]) for o in both["orders"]] == \
+        [("MKT", "market turn")], "one order per symbol: the market turn's partial stands"
+
+
+def test_sell_job_strength_reads():
+    """§6.98: the evening job's strength read per holding — signs from the journal's
+    entry date and cost, `trimmed` from realized P&L on the open episode; a holding with
+    no frame, no episode or no signs is left out."""
+    from src.stock_screener.cockpit import sell_job
+
+    closes = [100.0] * 40 + [100.0 * 1.022 ** k for k in range(1, 13)]
+    df = _trigger_frame("2026-09-30", closes)
+    entry = df.index[40]
+    poss = [{"symbol": "RUN", "avg_entry": 100.0, "df": df},
+            {"symbol": "CUT", "avg_entry": 100.0, "df": df},
+            {"symbol": "NOEP", "avg_entry": 100.0, "df": df},
+            {"symbol": "FLAT", "avg_entry": 130.0, "df": df},
+            {"symbol": "NODF", "avg_entry": 100.0}]
+    eps = {"RUN": {"entry_date": entry, "realized_pl": 0.0},
+           "CUT": {"entry_date": entry, "realized_pl": 412.5},
+           "FLAT": {"entry_date": entry}, "NODF": {"entry_date": entry}}
+    out = sell_job._strength(poss, eps, today="2026-09-30")
+    assert set(out) == {"RUN", "CUT"}, out
+    assert out["RUN"]["trimmed"] is False and out["CUT"]["trimmed"] is True
+    assert out["RUN"]["avg_entry"] == 100.0 and any("sessions up" in s
+                                                    for s in out["RUN"]["signs"])
 
 
 def test_execute_sell_plan_zero_qty_never_full_exit():

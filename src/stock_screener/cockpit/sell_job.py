@@ -44,7 +44,8 @@ def _rs_ratings() -> dict:
 
 def _positions_and_pillars(today=None):
     """The Positions page's pillar wiring, headless. Returns ``(data, positions, pillars,
-    spy_note)``; a failed positions read raises.
+    spy_note)``; ``data["open_by_sym"]`` holds the journal's open episodes. A failed
+    positions read raises.
 
     Every side input is best effort: a missing journal, watchlist or report degrades
     pillars to unknown, and unknown never trades. P2's RS rating comes from the persisted
@@ -67,12 +68,32 @@ def _positions_and_pillars(today=None):
         spy = (triggers.load_latest_trigger_report() or {}).get("spy")
     except Exception:
         spy = None
+    data["open_by_sym"] = open_by_sym
     pillars = {p["symbol"]: trade.sell_pillars(
                    p, entry_date=(open_by_sym.get(p["symbol"]) or {}).get("entry_date"),
                    pivot=wl_pivots.get(p["symbol"]), regime=None, spy_note=spy,
                    today=today, rs=rs_map.get(p["symbol"]))
                for p in positions}
     return data, positions, pillars, spy
+
+
+def _strength(positions, open_by_sym, today=None) -> dict:
+    """Selling-into-strength reads for the plan: ``{symbol: {signs, avg_entry, trimmed}}``
+    for each holding with signs. ``trimmed`` is a realized P&L on the open episode: part
+    of it was already sold. Best effort; a holding without a read is left out."""
+    from src.stock_screener.cockpit import advisories
+    out = {}
+    for p in positions:
+        ep = open_by_sym.get(p["symbol"]) or {}
+        try:
+            rd = advisories.strength_signs(p.get("df"), ep.get("entry_date"),
+                                           avg_entry=p.get("avg_entry"), today=today)
+        except Exception:
+            rd = None
+        if rd and rd["signs"]:
+            out[p["symbol"]] = {"signs": rd["signs"], "avg_entry": p.get("avg_entry"),
+                                "trimmed": abs(float(ep.get("realized_pl") or 0.0)) > 0.005}
+    return out
 
 
 def _market(spy_note) -> dict:
@@ -95,7 +116,9 @@ def cmd_plan(date: Optional[str], write: bool) -> int:
     data, positions, pillars, spy = _positions_and_pillars(today=date)
     prior = sells.load_latest_sell_plan(before=plan_store.today_iso(date))
     plan = sells.build_sell_plan(positions, pillars, prior_plan=prior, today=date,
-                                 market=_market(spy))
+                                 market=_market(spy),
+                                 strength=_strength(positions, data.get("open_by_sym") or {},
+                                                    today=date))
     acct = data["account"]
     print(f"account ...{str(acct.get('account_number'))[-4:]}  "
           f"equity ${acct.get('equity', 0):,.0f}  positions {len(positions)}")

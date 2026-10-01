@@ -184,6 +184,94 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
             "sma20": sma20_note, "provisional_dropped": dropped}
 
 
+STRENGTH_CLIMAX_PCT = 0.25  # a rise this steep ...
+STRENGTH_CLIMAX_BARS = 15   # ... within about three weeks is a climax run
+STRENGTH_UP_DAYS = 7        # up closes out of
+STRENGTH_UP_WINDOW = 10     # the last this many sessions
+STRENGTH_GAP_BARS = 3       # a gap up this recent is "late in the run"
+STRENGTH_STALL_PCT = 0.01   # a heavy day closing within this of the prior close stalled
+STRENGTH_MIN_DAYS = 5       # "biggest day of the run" needs a run to compare against
+
+
+def strength_signs(df, entry_date, *, avg_entry, today=None, now=None,
+                   min_gain=None) -> Optional[dict]:
+    """The books' sell-into-strength signs on the latest settled close since the entry:
+
+    * a ``STRENGTH_CLIMAX_PCT`` rise within ``STRENGTH_CLIMAX_BARS`` sessions;
+    * ``STRENGTH_UP_DAYS`` of the last ``STRENGTH_UP_WINDOW`` sessions up;
+    * the latest session is the biggest up day since the entry;
+    * a gap up in the last ``STRENGTH_GAP_BARS`` sessions;
+    * heavy volume (``VOL_CONFIRM_RATIO``) with the close within ``STRENGTH_STALL_PCT``
+      of the prior close;
+    * the latest session is the biggest down day since the entry.
+
+    The signs are read only at a gain of ``min_gain`` (default
+    ``doctrine.STRENGTH_MIN_GAIN``) or more from ``avg_entry``; below it ``signs`` is [].
+    A live read (``today`` None) drops today's bar while the session is open. Returns
+    ``{signs, gain, day_n, provisional_dropped}``, or None without a frame, an entry date,
+    ``avg_entry`` or a bar on or after the entry."""
+    if df is None or not len(df) or entry_date is None or not avg_entry:
+        return None
+    import numpy as np
+    import pandas as pd
+
+    from .indicators import prior_volume_average
+
+    try:
+        e = pd.Timestamp(entry_date)
+        if e.tzinfo is not None:
+            e = e.tz_convert("America/New_York").tz_localize(None)
+        e = e.normalize()
+    except Exception:
+        return None
+    dropped = False
+    if today is None:
+        from .triggers import bar_is_provisional
+        if bar_is_provisional(df.index[-1], now):
+            df, dropped = df.iloc[:-1], True
+    post_pos = np.flatnonzero(pd.DatetimeIndex(df.index).normalize() >= e)
+    if not len(post_pos):
+        return None
+    first = int(post_pos[0])
+    post = df.iloc[first:]
+    n = len(post) - 1
+    c = post["Close"].to_numpy(dtype=float)
+    gain = float(c[-1]) / float(avg_entry) - 1.0
+    out = {"signs": [], "gain": gain, "day_n": n, "provisional_dropped": dropped}
+    if gain < (doctrine.STRENGTH_MIN_GAIN if min_gain is None else min_gain):
+        return out
+
+    signs = []
+    w = c[max(0, len(c) - STRENGTH_CLIMAX_BARS - 1):]
+    climb = float(c[-1] / np.min(w) - 1.0)
+    if climb >= STRENGTH_CLIMAX_PCT:
+        signs.append(f"up {climb * 100:.0f}% in {len(w) - 1} sessions")
+    if n >= STRENGTH_UP_WINDOW:
+        ups = sum(1 for d in range(n - STRENGTH_UP_WINDOW + 1, n + 1) if c[d] > c[d - 1])
+        if ups >= STRENGTH_UP_DAYS:
+            signs.append(f"{ups} of the last {STRENGTH_UP_WINDOW} sessions up")
+    chg = c[1:] / c[:-1] - 1.0
+    if n >= STRENGTH_MIN_DAYS:
+        if chg[-1] > 0 and chg[-1] >= np.max(chg):
+            signs.append(f"biggest up day of the run (+{chg[-1] * 100:.1f}%)")
+        if chg[-1] < 0 and chg[-1] <= np.min(chg):
+            signs.append(f"biggest down day since the entry ({chg[-1] * 100:.1f}%)")
+    hi = post["High"].to_numpy(dtype=float)
+    lo = post["Low"].to_numpy(dtype=float)
+    gaps = [d for d in range(max(1, n - STRENGTH_GAP_BARS + 1), n + 1) if lo[d] > hi[d - 1]]
+    if gaps:
+        signs.append(f"gapped up late in the run (day {gaps[-1]})")
+    if n >= 1 and "Volume" in df.columns:
+        vol = df["Volume"].astype(float)
+        vavg = prior_volume_average(vol, doctrine.VOL_AVG_DAYS)
+        vr = float(vol.iloc[-1] / vavg.iloc[-1]) if vavg.iloc[-1] > 0 else float("nan")
+        if (np.isfinite(vr) and vr >= doctrine.VOL_CONFIRM_RATIO
+                and abs(chg[-1]) <= STRENGTH_STALL_PCT):
+            signs.append(f"heavy volume ({vr:.1f}×) with no progress")
+    out["signs"] = signs
+    return out
+
+
 def regime_tier(label) -> str:
     """The scan regime label's tier: ``strong``, ``weak``, ``off`` or ``unknown``.
     Matched by prefix. A substring test is wrong: "TRANSITIONAL" contains "on"."""

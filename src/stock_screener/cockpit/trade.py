@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .doctrine import (ADV_DAYS, BREAKEVEN_AVG_WIN_MULT, BREAKEVEN_R,
                        DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR, DERIVED_STOP_MIN_WINS, DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS,
                        MAX_LOSS_FROM_FILL, MAX_ORDER_ADV_PCT, NO_CHASE_PCT, RS_FLOOR,
-                       VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
+                       STRENGTH_MIN_GAIN, VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 
 MIN_TRADE_USD = 50.0        # MUST match alpaca_trader.MIN_TRADE_USD. Copied so the pure
                             # plan builder needn't import alpaca-py.
@@ -39,7 +39,7 @@ ALPACA_TIMEOUT_S = (5.0, 15.0)  # (connect, read) seconds on every Alpaca reques
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
-SELL_STRENGTH_GAIN = 0.20   # gain past which to consider selling part into strength
+SELL_STRENGTH_GAIN = STRENGTH_MIN_GAIN   # gain past which to consider selling part into strength
 HEAVY_VOL_RATIO = VOL_CONFIRM_RATIO   # a heavy-volume day IS the breakout-confirmation bar
 EARNINGS_CUSHION_MIN = 0.08  # min profit cushion to comfortably hold a position through a report
 POSITION_ADV_WARN_PCT = 0.05  # a position this big vs a day's $ volume takes days to exit
@@ -490,7 +490,8 @@ def position_advisories(pos: dict) -> List[str]:
 
     The breakeven nudge fires when a :func:`book_stop_level` trigger holds and the stop is
     under the cost. Optional ``r_now`` and ``avg_win`` keys feed the triggers; without
-    them only the 50-day one can fire. The earnings rules fire only for a known
+    them only the 50-day one can fire. A non-empty ``strength_signs`` key replaces the
+    generic "consider selling part" line. The earnings rules fire only for a known
     report within ``EARNINGS_SOON_DAYS`` (``earnings_in`` >= 0) and a known gain. The
     liquidity rule fires when ``market_value`` is at least ``POSITION_ADV_WARN_PCT`` of
     ``adv_usd``."""
@@ -522,7 +523,7 @@ def position_advisories(pos: dict) -> List[str]:
         out.append(f"Position ≈ {mv / adv * 100:.0f}% of a day's $ volume — an exit at "
                    f"{MAX_ORDER_ADV_PCT * 100:.0f}%/day takes ~"
                    f"{math.ceil(mv / adv / MAX_ORDER_ADV_PCT)} sessions.")
-    if gain is not None and gain >= SELL_STRENGTH_GAIN:
+    if gain is not None and gain >= SELL_STRENGTH_GAIN and not pos.get("strength_signs"):
         out.append(f"Up {gain * 100:.0f}% — consider selling part into strength.")
     if pos.get("below_sma50"):
         vr = pos.get("volume_ratio")

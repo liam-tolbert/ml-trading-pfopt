@@ -287,6 +287,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Violations after the buy | `advisories.post_breakout_read`; `VIOLATIONS_CAN_FAIL` (off), `VIOLATION_FAIL_COUNT` | Warnings only until switched on (§6.77) |
 | Weak-tape advice | `WEAK_TAPE_STOP_PCT`, `WEAK_TAPE_TARGET_PCT` | Advice, not applied (§6.78) |
 | Market turn | P3; `MARKET_TURN_CAN_TRADE` (off), `MARKET_TURN_REDUCE_FRACTION` | Notes only until switched on (§6.78) |
+| Selling into strength | `advisories.strength_signs` from `STRENGTH_MIN_GAIN` (+20%); `STRENGTH_CAN_TRADE` (off), `STRENGTH_SIGNS_TO_SELL`, `STRENGTH_SELL_FRACTION` | The P/E sign is not read. A gain stands in for the base count. Notes only until switched on; then half is sold, the rest stopped at breakeven (§6.98) |
 | Re-entry lag | `REGIME_CONFIRM_DAYS` (15) with `BREADTH_MIN_PHASE2` | From the backtest (§6.82) |
 | Keeping score | Journal page: `trade.build_trade_journal`, `journal_stats`, `loss_adjustment_sweep` | — |
 

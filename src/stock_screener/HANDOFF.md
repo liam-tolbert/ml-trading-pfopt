@@ -241,6 +241,9 @@ between checks, never the sell signal.** Decisions on settled closes only; execu
   (off) would also order half of each position sold. After a break, no new buys until SPY has
   been back in Stage 1–2 for 15 sessions. In a weak tape the book's 5–6% stops / 10–12%
   profits are shown beside the plan's, never applied.
+- **Selling into strength** (§6.98): from +20%, the books' climax signs show on the Positions page
+  and in the plan notes. `STRENGTH_CAN_TRADE` (off) would make 3 signs on one close a planned sale
+  of half, the rest stopped at breakeven, once per position.
 
 **Progressive exposure.** Gate is open when flat, or when every position in the newest-day cohort is
 at breakeven-or-better AND tagged net open P&L ≥ 0. Scope is cockpit-**tagged** positions only, so
@@ -408,8 +411,13 @@ positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negat
   came from the §6.73 pre-registered rule on ONE winner.
 - Post-breakout window: **20** sessions for the 20-day line; violation cluster for the switch = **3**.
 - Re-entry lag: **15** sessions of SPY in Stage 1–2 (the OOS-validated value; SPY-only, no breadth).
-- **Promotion switches, both OFF:** `VIOLATIONS_CAN_FAIL` and `MARKET_TURN_CAN_TRADE`. Read at call
-  time (`doctrine.X`), so tests patch the module attribute.
+- **Promotion switches, all OFF:** `VIOLATIONS_CAN_FAIL`, `MARKET_TURN_CAN_TRADE` and
+  `STRENGTH_CAN_TRADE`. Read at call time (`doctrine.X`), so tests patch the module attribute.
+- **Strength signs (`advisories.strength_signs`)**, read from `STRENGTH_MIN_GAIN` (+20%) on the latest
+  settled close since the entry: a 25% rise within 15 sessions; 7 of the last 10 sessions up; the
+  biggest up day since the entry; a gap up (low over the prior high) in the last 3 sessions; ≥ 1.5×
+  volume with the close within 1% of the prior; the biggest down day since the entry. The two
+  "biggest day" signs need 5 sessions since the entry.
 
 **`suggest_stop` bases (Positions page, auto mode):** `trade.book_stop_level`, the books' triggers
 (§6.96). With none, the initial stop (8% below entry, or the derived stop). Breakeven once the rising
@@ -672,6 +680,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.95** **P1's breakout-bar rule waits for the pivot (SEPA audit Step 4, user decision).** P1 failed any close below the entry bar's low, at any gain, even with the price still above the pivot. On 2026-09-29 that planned a full exit of HALO (close $111.56, entry-day low $112.18, pivot $111.15) on light volume. The books expect 40–50% of breakouts to dip back toward the pivot. HANDOFF §7 said "until cushioned", which the code never applied and which would not have changed HALO. Now, with a frozen pivot, a close below the entry bar's low that still holds the pivot warns ("below the entry-day low, holding the pivot"); below both, it fails as before. With no pivot the rule is unchanged. Rejected: measuring the first close above the pivot instead of the entry day, and keeping it strict.
 - **§6.96** **The books' stop triggers replace +16% / +20% (SEPA audit Step 4 items 1–3, user decision).** The auto stop went to breakeven at a fixed +16% gain and trailed the 50-day from +20%. The books move it to breakeven when the rising 50-day reaches the cost, at about 3R, or at twice the average win, and hold a back stop at the average win. New `trade.book_stop_level` applies those four; `suggest_stop` (auto), `position_stage` and the breakeven nudge in `position_advisories` all read it, and `BREAKEVEN_GAIN`/`TRAIL_GAIN` are gone. Constants `doctrine.BREAKEVEN_R = 3.0` and `BREAKEVEN_AVG_WIN_MULT = 2.0`. R is `r_multiple`'s, an estimate when the stop has moved. The Positions page passes R and the average win (only from `DERIVED_STOP_MIN_WINS` tagged wins, like the derived stop); `fetch_positions` has neither, so its stage and advisories see only the 50-day trigger and the page recomputes both. With today's record (+4% average win, under 5 wins) only the 50-day and 3R triggers can fire; once the average-win rules wake, breakeven comes near +8% with a back stop near +4%. Stops still move only by the Re-arm button. Rejected: keeping the fixed rules alongside, highest wins.
 - **§6.97** **Trade panel: every buy starts unchecked, with Select all / Deselect all (user request).** Clean names used to start ticked and earnings-flagged ones unticked. Now every buy row starts unticked, so nothing reaches Submit or Arm without a deliberate tick. Two buttons above the rows set every buy checkbox for the current Build; Select all ticks earnings-flagged rows too, and their ⚠︎ flag stays. Held rows still have no checkbox and always go for their stop re-arm.
+- **§6.98** **Selling into strength: the books' signs, and a switch that is off (SEPA audit Step 4 items 4 and 9, user decision).** The cockpit had one rule, "up 20%, consider selling part", and the automatic plan could only sell a whole position. `advisories.strength_signs` reads the books' six signs (definitions in §10) from `doctrine.STRENGTH_MIN_GAIN` = +20%. The books say the same behaviour is healthy early in a run; their cue is the base count, which isn't shipped, so the gain stands in. The Positions page shows them under each row ("📈 selling-into-strength signs"), and they replace the generic advisory. `sell_job._strength` reads them for the evening plan, which notes them. `STRENGTH_CAN_TRADE` (off) would turn `STRENGTH_SIGNS_TO_SELL` = 3 signs into one partial order for `STRENGTH_SELL_FRACTION` = half, with `remainder_stop` at the cost: the books' "keep part of a winner". It plans once per position: an open episode with realized P&L (a trim or a free-roll) gets a note instead, or the plan would halve the position every evening (cf. §6.78(c)). A full exit or another order for the name wins, and a single share gets a note. `trade.SELL_STRENGTH_GAIN` now reads `STRENGTH_MIN_GAIN`. Rejected: warnings only, with no switch.
 
 ## 12. Open items
 
@@ -708,7 +717,8 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **When to flip the two switches.** `VIOLATIONS_CAN_FAIL`: after a few weeks of watching the P1
   violation warnings on live positions. Would 3-at-once have exited earlier than the existing P1
   rules, and at a better price? `MARKET_TURN_CAN_TRADE`: only once a turn has been seen and
-  handled by hand at least once. Both are one-line changes in `doctrine.py`.
+  handled by hand at least once. `STRENGTH_CAN_TRADE`: after the signs have been read against a
+  few live runs to +20% and beyond. All are one-line changes in `doctrine.py`.
 - **Re-apply the §6.73 floor rule at the 5th win.** The derived stop turns on by itself at 5 cockpit
   wins, but its 4% floor rests on one. Re-run the sweep then (the Journal page shows it;
   `trade.stop_floor_from_sweep`) and update `DERIVED_STOP_FLOOR` only by the pre-registered rule.
