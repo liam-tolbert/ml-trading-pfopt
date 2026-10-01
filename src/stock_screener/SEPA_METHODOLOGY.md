@@ -272,7 +272,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Books' halving, base length | `advisories.book_tightening` | Numbers only; no verdict (§6.94, §6.100) |
 | Volume dry-up | `advisories.volume_dryup` | Numbers only: doesn't separate good from bad on the benchmark (§6.91, §6.100) |
 | Shakeouts, V recovery | — | Not built: removed after failing pre-registered checks (§6.92, §6.93, §6.100) |
-| Other setups | none | Backburner (§12) |
+| Other setups | none | Parked (`HANDOFF_HISTORY.md`, Ideas) |
 | Breakout volume | `VOL_CONFIRM_RATIO` (1.5×) over `VOL_AVG_DAYS` (50), today excluded; `indicators.volume_ratio` | One rule everywhere |
 | Buy zone | `NO_CHASE_PCT` (pivot to +5%) | `vcp.BUY_ZONE_PCT` (10%) is a tier tolerance, never an entry bound |
 | Earnings window | `EARNINGS_SOON_DAYS` (21) | The app warns; the hunt blocks |

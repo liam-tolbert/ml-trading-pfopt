@@ -1,8 +1,8 @@
 # HANDOFF — Stock-Screener (Minervini) venture
 
 **Scope:** the *classical* stock-screening track. Separate from `docs/HANDOFF.md` (the parked ML
-cross-sectional track). The momentum-*factor* experiment is closed; its essentials are folded
-into §5 and its standalone write-up was never committed.
+cross-sectional track). The momentum-*factor* experiment is closed; its essentials are in
+`HANDOFF_HISTORY.md` §5 and its standalone write-up was never committed.
 
 **Status (2026-10-01):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
 frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries, with sell

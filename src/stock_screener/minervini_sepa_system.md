@@ -176,7 +176,7 @@ Each contraction (C1, C2, C3...) must be:
 - Smaller than the previous one (if C1 is 18%, C2 must be less than 18%). The books'
   rule of thumb is about **half** each time (32% → 14% → 7% → 3%). The scan accepts
   gentler shrinking on purpose, so it never misses a real base; the Step-3 caption
-  shows each dip's ratio to the last and marks the books' halving ✅. It also shows the
+  shows each dip's ratio to the last beside the books' rule of about half. It also shows the
   base length against the books' 3-week minimum; the scan's own measure can read short,
   so check the length on the chart
 - Accompanied by declining volume on the down leg
