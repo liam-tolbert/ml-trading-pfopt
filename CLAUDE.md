@@ -16,7 +16,7 @@ RFC 2119.
 - Comments MUST appear only where the code needs clarification.
 - Comments MUST NOT narrate. They don't restate the code, walk through its steps, or
   tell its history: no bug, review, date or "previously". History goes in test
-  docstrings and the HANDOFF ledger (§11).
+  docstrings and the ledger in `src/stock_screener/HANDOFF_HISTORY.md` (§11).
 - Sentences SHOULD be short.
 - A comment that states an obligation MUST use an RFC 2119 keyword.
 - Docstrings follow the same rules. A docstring SHOULD state the contract: inputs,

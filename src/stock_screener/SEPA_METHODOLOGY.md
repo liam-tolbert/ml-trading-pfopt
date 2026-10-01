@@ -7,7 +7,7 @@ that explains why the cockpit departs from it.
 
 Companion files:
 - `src/stock_screener/HANDOFF.md`: project rules (§4), doctrine as traded (§7), conventions
-  (§9), the change ledger (§11) and open items (§12).
+  (§9) and open items (§12). The change ledger (§11) is in `HANDOFF_HISTORY.md`.
 - `src/stock_screener/minervini_sepa_system.md`: the user-facing guide, rendered live by the
   app's SEPA Guide page. Write for the user there; write for sessions here.
 - `src/stock_screener/cockpit/doctrine.py`: every number the cockpit trades on, defined once.
