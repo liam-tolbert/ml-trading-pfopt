@@ -559,15 +559,17 @@ def test_screen_job_appends_breadth():
 
 def test_screen_universe_rows_carry_step1_reads():
     """§6.80: the three Step-1 reads reach the candidate rows and payloads: the book's
-    count in ``criteria``, ``rs_trend``/``rs_slope_13w`` and ``sma200_rising_m``."""
+    count in ``criteria``, ``rs_trend`` and ``sma200_rising_m``. Unread row keys and the
+    removed Step-3 reads stay out (§6.100)."""
     prices, spy, _ = _synthetic_slice()
     res = screen_universe(list(prices), prices, spy, cfg=ScanConfig(min_rs=0.0))
-    for col in ("rs_trend", "rs_slope_13w", "sma200_rising_m", "criteria",
-                "depth_vs_spy", "depth_flag", "dryup_ratio", "dryup", "shakeout",
-                "undercut_broken", "v_speed", "book_tight"):
+    for col in ("rs_trend", "sma200_rising_m", "criteria", "depth_vs_spy", "dryup_ratio"):
         assert col in res.candidates.columns, col
-    assert all(k in p for p in res.payloads.values()
-               for k in ("dryup", "shakeouts", "v_recovery", "book_tightening"))
+    for col in ("rs_slope_13w", "depth_flag", "dryup", "shakeout", "undercut_broken",
+                "v_speed", "book_tight"):
+        assert col not in res.candidates.columns, col
+    assert all(k in p for p in res.payloads.values() for k in ("dryup", "book_tightening"))
+    assert not any(k in p for p in res.payloads.values() for k in ("shakeouts", "v_recovery"))
     for v in res.candidates["depth_vs_spy"].dropna():
         assert v > 0
     assert all("depth" in p for p in res.payloads.values())

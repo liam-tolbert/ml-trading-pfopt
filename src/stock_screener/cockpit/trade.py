@@ -1966,8 +1966,6 @@ def derived_stop_pct(closed: List[dict]) -> dict:
 # closed trades.
 # --------------------------------------------------------------------------- #
 LOSS_ADJUST_GRID = tuple(2.0 + 0.5 * i for i in range(17))    # stop X% below cost, 2..10
-LOSS_ADJUST_MIN_FLOOR = 3.0     # the engine's "too tight" minimum stop; the floor rule
-                                # MUST NOT go below it
 
 
 def _et_day(ts):
@@ -2068,21 +2066,6 @@ def loss_adjustment_sweep(closed: List[dict], xs: Sequence[float] = LOSS_ADJUST_
             "n_price_aware": sum(1 for p in paths if p is not None),
             "actual_total": _compound(actual), "actual_expectancy": _mean(actual),
             "rows": rows}
-
-
-def stop_floor_from_sweep(sweep: dict,
-                          min_x: float = LOSS_ADJUST_MIN_FLOOR) -> Optional[float]:
-    """The derived stop's floor, as a fraction, by the rule pre-registered in HANDOFF
-    §6.73: the smallest grid ``x >= min_x`` at which no closed winner becomes a loss.
-
-    None when no winner has price history. The floor MUST NOT be the return-maximising
-    ``x``: on a handful of trades that fits noise (HANDOFF §2)."""
-    if not sweep or not sweep.get("wins_price_aware"):
-        return None
-    for row in sorted(sweep.get("rows") or [], key=lambda r: r["x"]):
-        if row["x"] >= min_x - 1e-9 and row["winners_stopped"] == 0:
-            return row["x"] / 100.0
-    return None
 
 
 def fetch_order_fills() -> dict:

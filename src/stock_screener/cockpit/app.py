@@ -220,8 +220,7 @@ COL_HELP = {
                        "1 month is the gate; the books' best names show 4–5.",
     "fund_score": "Step-2 fundamental checks passed (0–8): revenue ≥20%, EPS ≥20%, EPS "
                   "accelerating, margins expanding, Code 33, annual EPS up, estimates "
-                  "raised ≥5% over 90 days, last report held. Missing data counts as a fail. "
-                  "A scan from before the eight counts four.",
+                  "raised ≥5% over 90 days, last report held. Missing data counts as a fail.",
     "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
                "(unknown, not zero).",
     "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",

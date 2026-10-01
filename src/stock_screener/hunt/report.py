@@ -64,10 +64,8 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
         for k in ("rs", "fund", "wl", "dist_days", "breakout_today",
                   "f_rev", "f_eps", "f_accel", "f_margin"):
             r[k] = int(float(r[k]))
-        # Absent from a diagnostics.csv written while F had four checks.
-        r["f_max"] = int(float(r.get("f_max") or 4))
-        for k in ("f_code33", "f_fy", "f_est", "f_react"):
-            r[k] = int(float(r.get(k) or 0))
+        for k in ("f_max", "f_code33", "f_fy", "f_est", "f_react"):
+            r[k] = int(float(r[k]))
 
     n = {"PASS": 0, "PASS-": 0, "FAIL": 0}
     for v in verdicts.values():
@@ -290,7 +288,7 @@ th.n {{ text-align:right; }}
   <p class="method">Verdicts are Step-3 chart judgments against the SEPA checklist. The mechanical rules applied
   below: buy zone = pivot to +{zone_max}% (no chasing); approaching = within {appr_min}% below pivot;
   volume confirmation = a close above the pivot on &ge;{vol_ratio}&times; average volume; entries are
-  barred with earnings inside {ern_days} days. Fundamentals (F, 0&ndash;4) are reported, with this run&rsquo;s
+  barred with earnings inside {ern_days} days. Fundamentals (F, 0&ndash;8) are reported, with this run&rsquo;s
   gate at F&nbsp;&ge;&nbsp;{min_fund}. Step-4 &mdash; entries, stops, sizing &mdash; stays with you.</p>
 
   <h2>Volume-confirmed breakouts <span class="cnt">&middot; the only &ldquo;buy now&rdquo; state ({n_conf})</span></h2>
@@ -346,11 +344,9 @@ th.n {{ text-align:right; }}
   </div>
 
   <p class="foot">Q = mechanical VCP quality &middot; RS = relative strength &middot; F = fundamental
-  checks 0&ndash;8 (0&ndash;4 on a scan from before the eight) &middot; vs piv = close relative to detected pivot &middot; ADV$M = 20-day average
+  checks 0&ndash;8 &middot; vs piv = close relative to detected pivot &middot; ADV$M = 20-day average
   dollar volume &middot; DD = distribution days, last 25 sessions &middot; Base reads: DU = the final
-  tight area's volume over its 50-day average / near-silent days, SO = shakeout, LL = an
-  undercut that stayed below, R = the right side's pace against the decline, H = each dip
-  at most ~half the one before &middot; Legs = detected contraction
+  tight area's volume over its 50-day average / near-silent days &middot; Legs = detected contraction
   sequence, oldest first &middot; &#9733; = watchlist name. Chart verdicts are review notes against the
   SEPA checklist, not trade instructions.</p>
 </div>

@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.stock_screener.cockpit.advisories import volume_dryup  # noqa: E402
 from src.stock_screener.hunt import pipeline as pl  # noqa: E402
 
 PASSED = 0
@@ -48,13 +49,14 @@ def _payload(pivot: float, close: float, *, last_vol_mult=0.8, breakout=False,
     vol[-1] = 1e6 * last_vol_mult
     df = pd.DataFrame({"Open": c * 0.999, "High": c * 1.01, "Low": c * 0.99,
                        "Close": c, "Volume": vol}, index=idx)
+    cons = [{"peak_date": idx[-40], "trough_date": idx[-35], "peak_price": close * 1.05,
+             "trough_price": close * 0.95, "drawdown_pct": 9.5, "volume_ratio": 0.8,
+             "duration_days": 5, "number": 1}]
     return {
         "df": df,
         "levels": {"pivot": pivot, "stop": pivot * 0.97, "breakout_today": breakout},
-        "vcp": {"contractions": [
-            {"peak_date": idx[-40], "trough_date": idx[-35], "peak_price": close * 1.05,
-             "trough_price": close * 0.95, "drawdown_pct": 9.5, "volume_ratio": 0.8,
-             "duration_days": 5, "number": 1}]},
+        "vcp": {"contractions": cons},
+        "dryup": volume_dryup(df, cons),
         "step2": {"score": 2, "available": True,
                   "checks": {"revenue_growth": True, "eps_growth": True,
                              "eps_accelerating": False, "margin_expanding": False}},
@@ -123,19 +125,18 @@ def test_diagnostics_and_gates():
        a["rs_trend"] is None and a["sma200_m"] is None and a["depth_vs_spy"] is None
        and a["industry"] is None)
     # §6.86: Code 33 and the inventory flag come from the payload's fundamentals
-    # §6.91: the dry-up read comes from the frame and the payload's contractions (the
-    # fixture's contraction peak is 40 bars back on a flat tape with a 0.8x last bar)
-    ok("dry-up computed for the review",
-       a["dryup"] in ("dry", "partial", "none") and a["step3"].startswith("DU "))
+    # §6.100: the dry-up read comes from the scan payload, as the scan stored it
+    ok("dry-up read from the payload",
+       a["dryup_ratio"] is not None and a["step3"].startswith("DU ")
+       and "dryup" not in diag.columns and "shakeout" not in diag.columns)
     ok("step3_summary empty without reads", pl.step3_summary(None) == "")
     ok("step-2 reads absent from older fundamentals read as None",
        a["code33"] is None and a["inv_flag"] is None and a["earn_react"] is None)
-    # §6.87: the reaction is computed from the frame and the fundamentals' release date
+    # §6.87/§6.100: the reaction is the one the scan stored in the payload
     b2 = _bundle()
-    rel = b2.result.payloads["AAA"]["df"].index[-5].strftime("%Y-%m-%d")
-    b2.result.payloads["AAA"]["fundamentals"].update(last_report=rel, last_report_time="07:00")
+    b2.result.payloads["AAA"]["reaction"] = {"day_pct": 1.8, "flag": None}
     a2 = pl.diagnostics(b2, pl.candidates(b2)).set_index("ticker").loc["AAA"]
-    ok("earnings reaction read from the release date", a2["earn_react"] is not None
+    ok("earnings reaction read from the payload", a2["earn_react"] == 1.8
        and a2["earn_flag"] is None)
     # §6.81: ADV through the shared helper, and the liquidity ceiling beside it
     _df = b.result.payloads["AAA"]["df"]
@@ -223,11 +224,6 @@ def test_report_builds():
         eight.to_csv(d / "diagnostics.csv", index=False)
         ok("F out of 8 on a scan with the eight checks",
            "</b>/8</td>" in build_report(d, min_fund=6).read_text(encoding="utf-8"))
-        # a diagnostics.csv from before the eight: no f_max, no new f_* columns
-        diag.drop(columns=["f_max", "f_code33", "f_fy", "f_est", "f_react"]).to_csv(
-            d / "diagnostics.csv", index=False)
-        ok("an older diagnostics.csv still renders",
-           "</b>/4</td>" in build_report(d).read_text(encoding="utf-8"))
         diag.to_csv(d / "diagnostics.csv", index=False)
         for frag in ("Weekend Hunt", "In the buy zone", "Approaching pivot",
                      "Volume-confirmed", "Step-2 fundamentals", "Code&nbsp;33", "Full review",

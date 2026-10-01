@@ -269,9 +269,9 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Step-2 score F (0–8) | `scan._step2_summary`: rev ≥ 20%, EPS ≥ 20%, EPS accel, margin ↑, Code 33, annual EPS ↑, estimates ↑ ≥ 5%, last report held | Never a default gate: thin free data would drop names for missing data (§7, §6.89) |
 | Earnings reaction | `advisories.earnings_reaction`, `EARNINGS_REACTION_PCT` (5%) | The books give no number (§6.87) |
 | VCP detection | `cockpit/vcp.py` `detect_vcp`, tiers A/B/C | Looser tightening and 2-week bases on purpose, so it never misses a real base; benchmark-calibrated (§10) |
-| Books' halving, base length | `advisories.book_tightening` | Shown, not judged (§6.94) |
-| Volume dry-up | `advisories.volume_dryup` | Doesn't separate good from bad on the benchmark (§6.91) |
-| Shakeouts, V recovery | `advisories.shakeouts`, `v_recovery` | Failed pre-registered checks; hunt only, not in the app (§6.92, §6.93) |
+| Books' halving, base length | `advisories.book_tightening` | Numbers only; no verdict (§6.94, §6.100) |
+| Volume dry-up | `advisories.volume_dryup` | Numbers only: doesn't separate good from bad on the benchmark (§6.91, §6.100) |
+| Shakeouts, V recovery | — | Not built: removed after failing pre-registered checks (§6.92, §6.93, §6.100) |
 | Other setups | none | Backburner (§12) |
 | Breakout volume | `VOL_CONFIRM_RATIO` (1.5×) over `VOL_AVG_DAYS` (50), today excluded; `indicators.volume_ratio` | One rule everywhere |
 | Buy zone | `NO_CHASE_PCT` (pivot to +5%) | `vcp.BUY_ZONE_PCT` (10%) is a tier tolerance, never an entry bound |

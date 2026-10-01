@@ -450,17 +450,11 @@ trailing 50-day.
 - **Dry-up.** Window = the final contraction's peak to the last bar, cut before the first close
   above that peak (a broken-out name is judged on its tight area). Baseline = the 50-bar
   average before the peak. `avg_ratio` = window mean ÷ baseline; `quiet_days` = bars at
-  ≤ `DRYUP_QUIET_RATIO = 0.5` of it. `"dry"` = ratio < 1 and a quiet day; `"partial"` =
-  one of the two. Zero-volume bars are gaps and are dropped.
-- **Shakeouts.** Reference lows = the selected contractions' troughs. An undercut = the first
-  bar after a trough whose Low is below it; a shakeout when a close is back above within
-  `SHAKEOUT_RECOVER_BARS = 3` bars (the undercut bar counts as 0), `broken` when not, `open`
-  when too recent. One bar under several lows counts once, against the highest. A dip that
-  *makes* a contraction's low (the detector's own trough) is not an undercut of anything.
-- **V recovery.** Left-side high = the first contraction's peak; decline = to the base's
-  lowest Low (`left_bars`); recovery = to the first close within 5% of that high
-  (`right_bars`); `speed` = left ÷ right. The flag (≥ 15% deep, speed ≥ 2) is computed but
-  not shown (§6.93); only the hunt carries the numbers.
+  ≤ `DRYUP_QUIET_RATIO = 0.5` of it. Numbers only, no verdict (§6.100). Zero-volume bars are
+  gaps and are dropped.
+- **Halving.** `book_tightening` gives each dip's depth over the one before and the base length,
+  numbers only (§6.100).
+- Shakeouts and V recovery were removed in §6.100 after failing their checks (§6.92, §6.93).
 
 **Sector labels (`sectors.py`):**
 - `Ticker.info["sector"]` is one of Yahoo's 11 sectors; `["industry"]` one of ~145 industries.
@@ -681,6 +675,7 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
 - **§6.96** **The books' stop triggers replace +16% / +20% (SEPA audit Step 4 items 1–3, user decision).** The auto stop went to breakeven at a fixed +16% gain and trailed the 50-day from +20%. The books move it to breakeven when the rising 50-day reaches the cost, at about 3R, or at twice the average win, and hold a back stop at the average win. New `trade.book_stop_level` applies those four; `suggest_stop` (auto), `position_stage` and the breakeven nudge in `position_advisories` all read it, and `BREAKEVEN_GAIN`/`TRAIL_GAIN` are gone. Constants `doctrine.BREAKEVEN_R = 3.0` and `BREAKEVEN_AVG_WIN_MULT = 2.0`. R is `r_multiple`'s, an estimate when the stop has moved. The Positions page passes R and the average win (only from `DERIVED_STOP_MIN_WINS` tagged wins, like the derived stop); `fetch_positions` has neither, so its stage and advisories see only the 50-day trigger and the page recomputes both. With today's record (+4% average win, under 5 wins) only the 50-day and 3R triggers can fire; once the average-win rules wake, breakeven comes near +8% with a back stop near +4%. Stops still move only by the Re-arm button. Rejected: keeping the fixed rules alongside, highest wins.
 - **§6.97** **Trade panel: every buy starts unchecked, with Select all / Deselect all (user request).** Clean names used to start ticked and earnings-flagged ones unticked. Now every buy row starts unticked, so nothing reaches Submit or Arm without a deliberate tick. Two buttons above the rows set every buy checkbox for the current Build; Select all ticks earnings-flagged rows too, and their ⚠︎ flag stays. Held rows still have no checkbox and always go for their stop re-arm.
 - **§6.98** **Selling into strength: the books' signs, and a switch that is off (SEPA audit Step 4 items 4 and 9, user decision).** The cockpit had one rule, "up 20%, consider selling part", and the automatic plan could only sell a whole position. `advisories.strength_signs` reads the books' six signs (definitions in §10) from `doctrine.STRENGTH_MIN_GAIN` = +20%. The books say the same behaviour is healthy early in a run; their cue is the base count, which isn't shipped, so the gain stands in. The Positions page shows them under each row ("📈 selling-into-strength signs"), and they replace the generic advisory. `sell_job._strength` reads them for the evening plan, which notes them. `STRENGTH_CAN_TRADE` (off) would turn `STRENGTH_SIGNS_TO_SELL` = 3 signs into one partial order for `STRENGTH_SELL_FRACTION` = half, with `remainder_stop` at the cost: the books' "keep part of a winner". It plans once per position: an open episode with realized P&L (a trim or a free-roll) gets a note instead, or the plan would halve the position every evening (cf. §6.78(c)). A full exit or another order for the name wins, and a single share gets a note. `trade.SELL_STRENGTH_GAIN` now reads `STRENGTH_MIN_GAIN`. Rejected: warnings only, with no switch.
+- **§6.100** **Trim what this stage doesn't use (user decision, 2026-10-01).** Three independent read-only reviews and the Pi's own records found the build out of proportion to the trading. 13 closed trades, 1 win; every exit a manual sale, none a stop-out; one trade since 2026-08-20, against 41 commits. 27 evening sell plans, none executed; one armed entry, disarmed. **Removed:** `advisories.shakeouts` and `v_recovery` (failed their pre-registered checks, §6.92, §6.93), with their scan row keys (`shakeout`, `undercut_broken`, `v_speed`), payload keys and the hunt's `SO`/`LL`/`R…x`. The dry-up verdict (`dry`/`partial`/`none`, the ✅/⚠️ caption, the row key `dryup`, the hunt's `dryup`) and the halving verdict (`book_tight`, ✅, the hunt's `H`), because neither separates good bases from bad on the benchmark (§6.91, §6.94); both now show numbers only. Unread row keys `rs_slope_13w` and `depth_flag`; `gross_margin` (fetched, never read); `trade.stop_floor_from_sweep` (no caller but its test; the §12 item now states the rule); the code and text for scans or diagnostics written while F had four checks. **Simplified:** the hunt reads the dry-up and earnings reaction from the scan payload instead of recomputing them; it refuses scans older than 3 days, so the payload is current. The benchmark line is unchanged. `test_step3_reads_on_benchmark` rebuilds the old dry-up verdict from the numbers to keep the pre-registered record; it reads the rounded ratio, so two NO charts move from partial to none against the §6.91 table. The pyramid add (§6.99) is parked on branch `park/pyramid-add`.
 
 ## 12. Open items
 
@@ -720,8 +715,9 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   handled by hand at least once. `STRENGTH_CAN_TRADE`: after the signs have been read against a
   few live runs to +20% and beyond. All are one-line changes in `doctrine.py`.
 - **Re-apply the §6.73 floor rule at the 5th win.** The derived stop turns on by itself at 5 cockpit
-  wins, but its 4% floor rests on one. Re-run the sweep then (the Journal page shows it;
-  `trade.stop_floor_from_sweep`) and update `DERIVED_STOP_FLOOR` only by the pre-registered rule.
+  wins, but its 4% floor rests on one. Re-run the sweep then (the Journal page shows it) and
+  update `DERIVED_STOP_FLOOR` only by the pre-registered rule: the smallest grid stop ≥ 3% at
+  which no closed winner becomes a loss.
 - **Base count (§6.76) needs a new, pre-registered design** before any code: the two failure
   mechanisms (single-threshold blindness, the transition base) are written up there. The demotion
   would have changed no benchmark tier, so recall is not what is at stake.
@@ -738,11 +734,10 @@ Anchors for the `§6.NN` references in test docstrings and source comments. Deta
   - **Cheat / low cheat:** a short tight pause in the middle / lower third of a cup's right
     side; a second, lower pivot to watch. The main pivot and orders would not change.
   - **Cup with handle** and **double bottom:** the O'Neil shapes; hardest to pin down, and
-    partly covered by the VCP detector and the shakeout read.
-- **Step-3 reads that failed their pre-registered checks (§6.92, §6.93).** Shakeouts and V
-  recovery are off the app and live in the hunt only; the dry-up verdict ships but does not separate the
-  labels (§6.91). A second attempt at any of them needs a new design and a new
-  pre-registration, not a threshold change.
+    partly covered by the VCP detector.
+- **Step-3 reads that failed or don't separate (§6.91–§6.94).** Shakeouts and V recovery were
+  removed; dry-up and halving show numbers only (§6.100). A second attempt at any of them needs
+  a new design and a new pre-registration, not a threshold change.
 - **P1's older checks still read today's provisional bar on live calls.** Day-0 below the pivot,
   the decisive close, the second close and the breakout-bar low use `last_close`. Only the §6.77
   reads drop an unsettled bar. The evening plan runs after the settle, so the automation is

@@ -496,8 +496,8 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     recorded in ``errors`` and never aborts the scan.
     """
     from . import breadth_store
-    from .advisories import (book_tightening, depth_vs_market, earnings_reaction, shakeouts,
-                             v_recovery, volume_dryup)
+    from .advisories import (book_tightening, depth_vs_market, earnings_reaction,
+                             volume_dryup)
     cfg = cfg or ScanConfig()
     errors: List[str] = []
     spy_cp = float(spy["Close"].iloc[-1])
@@ -540,8 +540,6 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 continue
             depth = depth_vs_market(df, spy, vcp.get("contractions") or [])
             dryup = volume_dryup(df, vcp.get("contractions") or [])
-            shake = shakeouts(df, vcp.get("contractions") or [])
-            vrec = v_recovery(df, vcp.get("contractions") or [])
             btight = book_tightening(vcp.get("contractions") or [],
                                      vcp.get("base_length_weeks"))
 
@@ -593,7 +591,6 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "rs_nh": rs_nh,
                 "new_high": new_high,
                 "rs_trend": (rs_trend or {}).get("label"),
-                "rs_slope_13w": (rs_trend or {}).get("slope_13w"),
                 "sma200_rising_m": sma200_m,
                 "criteria": book["criteria_passed"],
                 "fund_score": s2["score"],
@@ -611,13 +608,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "num_contractions": int(vcp.get("contraction_count", 0) or 0),
                 "vcp_quality": round(float(vcp.get("vcp_quality", 0) or 0), 0),
                 "depth_vs_spy": (depth or {}).get("ratio"),
-                "depth_flag": (depth or {}).get("flag"),
                 "dryup_ratio": (dryup or {}).get("avg_ratio"),
-                "dryup": (dryup or {}).get("verdict"),
-                "shakeout": bool(shake["shakeouts"]) if shake else None,
-                "undercut_broken": bool(shake["broken"]) if shake else None,
-                "v_speed": (vrec or {}).get("speed"),
-                "book_tight": (btight or {}).get("book_tight"),
                 "breakout_today": levels["breakout_today"],
                 "vol_confirmed": levels["volume_confirmed"],
                 "pct_to_pivot": _fmt(levels["pct_to_pivot"]),
@@ -634,7 +625,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "book_template": book, "rs_trend": rs_trend,
                 "sma200_rising_m": sma200_m, "adv_usd": adv_usd, "depth": depth,
                 "earnings_in": earnings_in, "reaction": reaction, "dryup": dryup,
-                "shakeouts": shake, "v_recovery": vrec, "book_tightening": btight,
+                "book_tightening": btight,
             }
         except Exception as e:                                  # never let one name kill the scan
             errors.append(f"{t}: {e}")

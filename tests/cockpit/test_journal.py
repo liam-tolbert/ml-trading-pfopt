@@ -180,10 +180,9 @@ def test_loss_adjustment_price_aware():
     """§6.73: the price-aware variant replays the stop on the trade's own bars. A winner
     that dipped X first becomes a −X loss (the cost the book variant hides); a gap below
     the stop fills at the open, worse than −X; the entry day's low is ignored (it may
-    predate the fill); a frame ending before the exit falls back to the book value; and
-    stop_floor_from_sweep picks the tightest grid stop (>= 3%) that keeps every winner."""
+    predate the fill); and a frame ending before the exit falls back to the book value."""
     import pandas as pd
-    from src.stock_screener.cockpit.trade import loss_adjustment_sweep, stop_floor_from_sweep
+    from src.stock_screener.cockpit.trade import loss_adjustment_sweep
 
     idx = pd.bdate_range("2026-06-01", "2026-06-12")
     # W: bought 100 on Jun 1 (entry-day low 90 must NOT count), dipped to 96 on Jun 3,
@@ -211,9 +210,6 @@ def test_loss_adjustment_price_aware():
     assert by[4.0]["winners_stopped"] == 1 and by[5.0]["winners_stopped"] == 0
     # 10%: nothing but the gap trade (-12% open) hits the stop
     assert abs(by[10.0]["aware_total"] - (1.20 * 0.88 * 0.91 - 1)) < 1e-12
-    assert stop_floor_from_sweep(sw) == 0.05
-    # no winner with bars to judge -> no floor (the caller keeps the default)
-    assert stop_floor_from_sweep(loss_adjustment_sweep(closed, xs=(3.0, 5.0))) is None
 
 
 def test_derived_stop_pct():

@@ -1183,7 +1183,6 @@ def _fetch_fundamentals(sym: str, today=None) -> Optional[dict]:
         return None
 
     rev = _row(fin, "Total Revenue", "TotalRevenue")
-    gp = _row(fin, "Gross Profit", "GrossProfit")
     oi = _row(fin, "Operating Income", "OperatingIncome", "EBIT")
     eps = _row(fin, "Diluted EPS", "Basic EPS", "DilutedEPS", "BasicEPS")
     inv = _row(bs, "Inventory")
@@ -1193,7 +1192,6 @@ def _fetch_fundamentals(sym: str, today=None) -> Optional[dict]:
         "revenue_yoy_prev": _yoy_prev(rev),
         "eps_yoy": _yoy(eps), "eps_qoq": _qoq(eps),
         "eps_yoy_prev": _yoy_prev(eps),
-        "gross_margin": _margin(gp, rev),
         "operating_margin": _margin(oi, rev),
         "margin_trend": _margin_trend(oi, rev),
         "inventory_qoq": _qoq(inv),

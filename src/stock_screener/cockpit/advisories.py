@@ -596,16 +596,16 @@ def _base_slice(df, start, end_price=None):
 
 
 def volume_dryup(df, contractions) -> Optional[dict]:
-    """Did volume dry up in the final tight area? ``{avg_ratio, quiet_days, window_bars,
-    quiet_dates, verdict}``; ``quiet_dates`` is ``[(Timestamp, ratio)]`` for the chart.
+    """Volume in the final tight area: ``{avg_ratio, quiet_days, window_bars,
+    quiet_dates}``; ``quiet_dates`` is ``[(Timestamp, ratio)]`` for the chart.
 
     The window runs from the final contraction's peak to the last bar, stopping before the
     first close above that peak, so a name that has broken out is judged on its tight area,
     not on the breakout. The baseline is the ``VOL_AVG_DAYS`` average before that peak.
-    ``quiet_days`` counts window bars at or under ``DRYUP_QUIET_RATIO`` of it. ``verdict``
-    is ``"dry"`` (below-average window and at least one quiet day), ``"partial"`` (one of
-    the two) or ``"none"``. Zero-volume bars are data gaps and are ignored. None without
-    contractions, a Volume column, a baseline, or 3 window bars."""
+    ``quiet_days`` counts window bars at or under ``DRYUP_QUIET_RATIO`` of it. No verdict:
+    on the benchmark the read doesn't separate good bases from bad (HANDOFF §6.91, §6.100).
+    Zero-volume bars are data gaps and are ignored. None without contractions, a Volume
+    column, a baseline, or 3 window bars."""
     if df is None or not contractions or "Volume" not in df:
         return None
     import numpy as np
@@ -622,12 +622,9 @@ def volume_dryup(df, contractions) -> Optional[dict]:
         return None
     ratio = float(win.mean() / base)
     quiet = win[win <= DRYUP_QUIET_RATIO * base]
-    below, has_quiet = ratio < 1.0, len(quiet) >= 1
-    verdict = "dry" if below and has_quiet else "partial" if below or has_quiet else "none"
     return {"avg_ratio": round(ratio, 2), "quiet_days": len(quiet), "window_bars": len(win),
             "quiet_dates": [(d, round(float(v / base), 2))
-                            for d, v in zip(_naive_index(quiet), quiet)],
-            "verdict": verdict}
+                            for d, v in zip(_naive_index(quiet), quiet)]}
 
 
 def volume_dryup_text(read: Optional[dict]) -> str:
@@ -636,11 +633,8 @@ def volume_dryup_text(read: Optional[dict]) -> str:
         return ""
     days = {0: "no near-silent day", 1: "1 near-silent day"}.get(
         read["quiet_days"], f"{read['quiet_days']} near-silent days")
-    body = (f"the final tight area traded at {read['avg_ratio']:.2f}× its 50-day average, "
+    return (f"Volume in the final tight area: {read['avg_ratio']:.2f}× its 50-day average, "
             f"with {days}")
-    head = {"dry": "Volume dry-up ✅", "partial": "Volume dry-up, partly",
-            "none": "⚠️ No volume dry-up"}[read["verdict"]]
-    return f"{head}: {body}"
 
 
 def step3_marks(payload: Optional[dict]) -> list:
@@ -653,111 +647,17 @@ def step3_marks(payload: Optional[dict]) -> list:
     return marks
 
 
-SHAKEOUT_RECOVER_BARS = 3   # a close back above the undercut low within this many bars
-
-
-def shakeouts(df, contractions) -> Optional[dict]:
-    """Undercuts of the base's earlier lows: ``{events, shakeouts, broken, latest}``.
-
-    Each selected contraction's trough is a reference low. An undercut is the first bar
-    after that trough whose Low falls below it. It is a ``"shakeout"`` (the books' stop-run
-    that reverses, a good sign) when a close gets back above the reference within
-    ``SHAKEOUT_RECOVER_BARS`` bars, counting the undercut bar as 0; ``"broken"`` (a lower
-    low) when it doesn't; ``"open"`` when too few bars have printed to tell. Each event is
-    ``{date, ref_date, ref_low, undercut_pct, recovered_in, status}``; one bar undercutting
-    several references counts once, against the highest. None without 2 contractions."""
-    if df is None or not contractions or len(contractions) < 2:
-        return None
-    import pandas as pd
-    idx = _naive_index(df)
-    low = df["Low"].to_numpy(dtype=float)
-    close = df["Close"].to_numpy(dtype=float)
-    found: dict = {}
-    for c in contractions:
-        ref = float(c["trough_price"])
-        start = pd.Timestamp(c["trough_date"])
-        pos = int(idx.searchsorted(start.tz_localize(None) if start.tzinfo else start,
-                                   side="right"))
-        hit = (low[pos:] < ref).nonzero()[0]
-        if not len(hit):
-            continue
-        k = pos + int(hit[0])
-        if k in found and found[k]["ref_low"] >= ref:
-            continue
-        back = (close[k:k + SHAKEOUT_RECOVER_BARS + 1] > ref).nonzero()[0]
-        if len(back):
-            status, rec = "shakeout", int(back[0])
-        elif k + SHAKEOUT_RECOVER_BARS < len(df):
-            status, rec = "broken", None
-        else:
-            status, rec = "open", None
-        found[k] = {"date": idx[k], "ref_date": start, "ref_low": round(ref, 2),
-                    "undercut_pct": round((1.0 - low[k] / ref) * 100.0, 1),
-                    "recovered_in": rec, "status": status}
-    events = [found[k] for k in sorted(found)]
-    return {"events": events,
-            "shakeouts": sum(e["status"] == "shakeout" for e in events),
-            "broken": sum(e["status"] == "broken" for e in events),
-            "latest": events[-1] if events else None}
-
-
-V_MIN_DEPTH_PCT = 15.0      # a base shallower than this has no V to speak of
-V_SPEED = 2.0               # recovering this many times faster than the decline is a V
-V_NEAR_HIGH = 0.05          # "recovered" = a close within this of the left-side high
-
-
-def v_recovery(df, contractions) -> Optional[dict]:
-    """How fast the base's right side came back: ``{depth_pct, left_bars, right_bars,
-    speed, v_flag}``.
-
-    The left-side high is the first contraction's peak. The decline runs from it to the
-    base's lowest Low (``left_bars``); the recovery from that low to the first close within
-    ``V_NEAR_HIGH`` of the left high (``right_bars``). ``speed`` = left ÷ right.
-    ``v_flag`` when the base is at least ``V_MIN_DEPTH_PCT`` deep and ``speed`` is at least
-    ``V_SPEED``: the books' V that gave the base no time to settle. The books give no
-    numbers; these are operating choices. None without contractions, or before the price
-    has recovered."""
-    if df is None or not contractions:
-        return None
-    first = contractions[0]
-    sl = _base_slice(df, first["peak_date"])
-    if sl is None:
-        return None
-    i0, i1 = sl
-    high = float(first["peak_price"])
-    low = df["Low"].to_numpy(dtype=float)
-    close = df["Close"].to_numpy(dtype=float)
-    if i1 - i0 < 3 or high <= 0:
-        return None
-    j = i0 + int(low[i0:i1].argmin())
-    back = (close[j:i1] >= high * (1.0 - V_NEAR_HIGH)).nonzero()[0]
-    if not len(back) or j == i0:
-        return None
-    left, right = j - i0, max(int(back[0]), 1)
-    depth = (1.0 - low[j] / high) * 100.0
-    speed = left / right
-    return {"depth_pct": round(depth, 1), "left_bars": left, "right_bars": right,
-            "speed": round(speed, 1),
-            "v_flag": bool(depth >= V_MIN_DEPTH_PCT and speed >= V_SPEED)}
-
-
-BOOK_TIGHT_RATIO = 0.6      # "each dip roughly half the one before", with a little room
-
-
 def book_tightening(contractions, base_weeks=None) -> Optional[dict]:
-    """The contractions against the books' rule of thumb, each dip about half the one
-    before: ``{depths, ratios, book_tight, base_weeks}``. ``ratios`` are each leg's depth
-    over the leg before it; ``book_tight`` when every ratio is at most
-    ``BOOK_TIGHT_RATIO``. The detector's own, looser rule is unchanged. None with fewer
-    than 2 contractions."""
+    """Each contraction's depth over the one before, for comparison with the books' rule
+    of thumb (each dip about half the last): ``{depths, ratios, base_weeks}``. No verdict:
+    on the benchmark it doesn't separate good bases from bad (HANDOFF §6.94, §6.100). None
+    with fewer than 2 contractions."""
     if not contractions or len(contractions) < 2:
         return None
     depths = [float(c["drawdown_pct"]) for c in contractions]
     ratios = [b / a if a > 0 else None for a, b in zip(depths, depths[1:])]
-    tight = all(r is not None and r <= BOOK_TIGHT_RATIO for r in ratios)
     return {"depths": [round(d, 1) for d in depths],
             "ratios": [None if r is None else round(r, 2) for r in ratios],
-            "book_tight": bool(tight),
             "base_weeks": None if base_weeks is None else round(float(base_weeks), 1)}
 
 
@@ -768,8 +668,6 @@ def book_tightening_text(read: Optional[dict]) -> str:
         return ""
     dips = " → ".join(f"{d:.0f}%" for d in read["depths"])
     each = ", ".join("n/a" if r is None else f"{r:.2f}×" for r in read["ratios"])
-    verdict = ("the books' halving ✅" if read["book_tight"]
-               else "looser than the books' halving")
     weeks = ("" if read["base_weeks"] is None
              else f" · base {read['base_weeks']:.1f} weeks (books: ≥ 3)")
-    return f"Dips {dips} (each {each} the last): {verdict}{weeks}"
+    return f"Dips {dips} (each {each} the last; the books look for about half){weeks}"

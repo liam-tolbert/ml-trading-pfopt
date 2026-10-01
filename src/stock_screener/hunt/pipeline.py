@@ -32,9 +32,7 @@ from src.stock_screener.cockpit.doctrine import (ADV_DAYS, MAX_ORDER_ADV_PCT,
                                                  EARNINGS_SOON_DAYS as EARNINGS_BLOCK_DAYS,
                                                  NO_CHASE_PCT, RS_FLOOR, VOL_AVG_DAYS,
                                                  VOL_CONFIRM_RATIO)
-from src.stock_screener.cockpit.advisories import (book_tightening, earnings_reaction,
-                                                   shakeouts, stop_room, typical_day_range,
-                                                   v_recovery, volume_dryup)
+from src.stock_screener.cockpit.advisories import stop_room, typical_day_range
 from src.stock_screener.cockpit.scan import code33_parts, inventory_flag
 from src.stock_screener.cockpit.indicators import (dollar_adv, prior_volume_average,
                                                    volume_ratio)
@@ -119,25 +117,12 @@ def _watchlist_tickers() -> List[str]:
         return []
 
 
-def step3_summary(dryup: Optional[dict], shake: Optional[dict] = None,
-                  vrec: Optional[dict] = None, tight: Optional[dict] = None) -> str:
-    """The review sheet's and report's short Step-3 read, e.g. ``'DU 0.62x/2 SO R0.7x H'``:
-    window volume over the 50-day average / near-silent days; ``SO`` a shakeout, ``LL`` an
-    undercut that stayed below (a lower low); ``R`` the right side's pace against the
-    decline; ``H`` each dip at most ~half the one before (the books' rule). Empty when
-    nothing is known."""
-    parts = []
-    if dryup:
-        parts.append(f"DU {dryup['avg_ratio']:.2f}x/{dryup['quiet_days']}")
-    if shake and shake["shakeouts"]:
-        parts.append("SO")
-    if shake and shake["broken"]:
-        parts.append("LL")
-    if vrec:
-        parts.append(f"R{vrec['speed']:.1f}x")
-    if tight and tight["book_tight"]:
-        parts.append("H")
-    return " ".join(parts)
+def step3_summary(dryup: Optional[dict]) -> str:
+    """The review sheet's and report's short Step-3 read, e.g. ``'DU 0.62x/2'``: the final
+    tight area's volume over its 50-day average / near-silent days. Empty when unknown."""
+    if not dryup:
+        return ""
+    return f"DU {dryup['avg_ratio']:.2f}x/{dryup['quiet_days']}"
 
 
 def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
@@ -174,12 +159,8 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
         checks = s2.get("checks") or {}
         fu = p.get("fundamentals") or {}
         adv = dollar_adv(df, ADV_DAYS)
-        react = earnings_reaction(df, fu.get("last_report"), fu.get("last_report_time")) or {}
-        # Step-3 reads from the frame and contractions, so an older pickle gets them too.
-        du = volume_dryup(df, v["contractions"]) or {}
-        so = shakeouts(df, v["contractions"])
-        vr_ = v_recovery(df, v["contractions"])
-        bt = book_tightening(v["contractions"], v.get("base_length_weeks"))
+        react = p.get("reaction") or {}
+        du = p.get("dryup") or {}
         rows.append({
             "rank": rank, "ticker": t, "wl": int(t in wl),
             "q": float(c["vcp_quality"]), "rs": int(c["rs"]),
@@ -187,7 +168,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "rs_trend": c.get("rs_trend"), "sma200_m": c.get("sma200_rising_m"),
             "depth_vs_spy": c.get("depth_vs_spy"), "industry": c.get("industry"),
             "fund": int(c["fund_score"]),
-            # F's scale: 8 checks, or 4 in a scan from before the eight
+            # F's scale: the payload's check count
             "f_max": len(checks) or 8,
             "close": round(float(close[-1]), 2), "pivot": round(piv, 2),
             "stop": round(float(lev["stop"]), 2),
@@ -220,11 +201,7 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "earn_react": react.get("day_pct"), "earn_flag": react.get("flag"),
             "est_rev_90d": fu.get("est_rev_90d"), "inst_count": fu.get("inst_count"),
             "dryup_ratio": du.get("avg_ratio"), "quiet_days": du.get("quiet_days"),
-            "dryup": du.get("verdict"),
-            "shakeout": int(bool(so and so["shakeouts"])),
-            "v_speed": (vr_ or {}).get("speed"),
-            "book_tight": None if bt is None else int(bt["book_tight"]),
-            "step3": step3_summary(du, so, vr_, bt),
+            "step3": step3_summary(du),
         })
     return pd.DataFrame(rows)
 

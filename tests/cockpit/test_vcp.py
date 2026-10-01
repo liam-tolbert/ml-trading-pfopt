@@ -319,61 +319,30 @@ def test_step3_reads_on_benchmark():
     plan before this ran and MUST NOT be tuned to it. The tables are printed for the ledger;
     only the pre-registered named charts are asserted: RLYB ("extreme vol dry-up") reads
     dry, JAKK ("drying volume") and BATRA ("quiet volume") read at least partial, and BEAM
-    ("no dry-up") does not read dry."""
+    ("no dry-up") does not read dry. The read lost its verdict in §6.100; ``kind`` rebuilds
+    the old one here so the pre-registered record stays checkable. The shakeout and
+    V-recovery reads, which failed their checks (§6.92, §6.93), were removed then."""
     from collections import Counter
     from vcp_labels import LABELS
     from src.stock_screener.cockpit import advisories
 
     bench = _bench_results()
-    dry = {t: advisories.volume_dryup(df, r["contractions"]) for t, (df, r) in bench.items()}
-    tab = Counter((LABELS[t]["label"], (d or {}).get("verdict", "n/a")) for t, d in dry.items())
+
+    def kind(d):
+        if d is None:
+            return "n/a"
+        below, quiet = d["avg_ratio"] < 1.0, d["quiet_days"] >= 1
+        return "dry" if below and quiet else "partial" if below or quiet else "none"
+
+    dry = {t: kind(advisories.volume_dryup(df, r["contractions"]))
+           for t, (df, r) in bench.items()}
+    tab = Counter((LABELS[t]["label"], d) for t, d in dry.items())
     print("    step3 dry-up: " + "  ".join(
         f"{lab} " + " ".join(f"{v}={tab[(lab, v)]}" for v in ("dry", "partial", "none", "n/a"))
         for lab in ("YES", "NO")))
-    assert dry["RLYB"]["verdict"] == "dry", dry["RLYB"]
-    assert dry["JAKK"]["verdict"] != "none" and dry["BATRA"]["verdict"] != "none"
-    assert (dry["BEAM"] or {}).get("verdict") != "dry", dry["BEAM"]
-
-    # Shakeouts. Pre-registered: BOH and PNTG show a shakeout, CLDX an undercut. It FAILED
-    # on BOH (§6.92): its labelled "Jun 1 one-day shakeout" is its first contraction's own
-    # low, not an undercut of an earlier one. So the app doesn't show it (hunt only); these
-    # asserts pin the outcome so a change to it is noticed.
-    so = {t: advisories.shakeouts(df, r["contractions"]) for t, (df, r) in bench.items()}
-
-    def kind(s):
-        return ("n/a" if s is None else "shakeout" if s["shakeouts"] else
-                "broken" if s["broken"] else "open" if s["events"] else "clean")
-    tab = Counter((LABELS[t]["label"], kind(s)) for t, s in so.items())
-    print("    step3 shakeout: " + "  ".join(
-        f"{lab} " + " ".join(f"{v}={tab[(lab, v)]}"
-                             for v in ("shakeout", "broken", "open", "clean", "n/a"))
-        for lab in ("YES", "NO")))
-    assert so["PNTG"]["shakeouts"] >= 1 and so["CLDX"]["events"]
-    assert so["BOH"]["events"] == []
-
-    # V recovery. Pre-registered: the flag ships only if it fires on >= 7 of the 13
-    # V-labelled NO charts and on <= 25% of the YES charts. It FAILED (§6.93): 0 of 13. The
-    # base it measures starts at the first selected contraction, on the right side of the
-    # V the labeller saw. So the app doesn't show it (hunt only); this pins the outcome.
-    v_named = ("UTI", "WLFC", "PRLD", "AGX", "CGEM", "DSGN", "EPC", "KB", "LINE", "MPC",
-               "RLAY", "SRRK", "VTRS")
-    vr = {t: advisories.v_recovery(df, r["contractions"]) for t, (df, r) in bench.items()}
-    flagged = {t for t, x in vr.items() if x and x["v_flag"]}
-    yes = [t for t in LABELS if LABELS[t]["label"] == "YES"]
-    print(f"    step3 v-recovery: V-labelled {len(flagged & set(v_named))}/{len(v_named)}  "
-          f"YES {len(flagged & set(yes))}/{len(yes)}  "
-          f"other NO {len(flagged - set(yes) - set(v_named))}/"
-          f"{len(LABELS) - len(yes) - len(v_named)}")
-    assert len(flagged & set(v_named)) < 7
-
-    # The books' halving (§6.94): shown, not judged, so printed only.
-    bt = Counter((LABELS[t]["label"],
-                  (lambda x: "n/a" if x is None else str(x["book_tight"]))(
-                      advisories.book_tightening(r["contractions"])))
-                 for t, (df, r) in bench.items())
-    print("    step3 halving: " + "  ".join(
-        f"{lab} " + " ".join(f"{v}={bt[(lab, v)]}" for v in ("True", "False", "n/a"))
-        for lab in ("YES", "NO")))
+    assert dry["RLYB"] == "dry", dry["RLYB"]
+    assert dry["JAKK"] != "none" and dry["BATRA"] != "none"
+    assert dry["BEAM"] != "dry", dry["BEAM"]
 
 
 def test_zigzag_fast_parity():
