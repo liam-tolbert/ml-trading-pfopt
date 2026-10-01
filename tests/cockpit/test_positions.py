@@ -84,39 +84,68 @@ def test_fetch_positions_offline():
     # Earnings enrichment + stage: BBB is a LOSER 10 days from its report -> cushion advisory;
     # AAA (+30%) is cushioned, so the same imminent report stays silent.
     assert by["AAA"]["next_earnings"] == future and by["AAA"]["earnings_in"] == 10
-    assert by["AAA"]["stage"] == "well in profit" and by["BBB"]["stage"] == "underwater"
+    # §6.96: AAA's 50-day (~117) is above its 100 cost, so the stage is the 50-day trail.
+    assert by["AAA"]["stage"] == "trailing 50-day" and by["BBB"]["stage"] == "underwater"
     assert any("Earnings in 10d with a loss" in a for a in by["BBB"]["advisories"])
     assert not any("Earnings" in a for a in by["AAA"]["advisories"])
 
 
 def test_suggest_stop():
-    """suggest_stop: each basis + auto selection by gain; floors at the in-force stop and (once
-    working) at breakeven; returns None when the result isn't below price (underwater)."""
-    from src.stock_screener.cockpit.trade import suggest_stop, INITIAL_STOP_PCT
+    """suggest_stop: each explicit basis; auto applies the books' triggers (§6.96) in place
+    of the old fixed +16%/+20% gains. Each trigger fires alone, the highest level wins, a
+    16% or 20% gain with no trigger stays at the initial stop, and nothing is ever
+    suggested below the stop in force. None when the result isn't below price."""
+    from src.stock_screener.cockpit.trade import (INITIAL_STOP_PCT, book_stop_level,
+                                                  suggest_stop)
 
     # explicit bases
     assert suggest_stop(avg_entry=100, current_price=130, sma_50=115, current_stop=None,
                         gain_pct=0.30, basis="initial")[0] == round(100 * (1 - INITIAL_STOP_PCT), 2)
     assert suggest_stop(avg_entry=100, current_price=130, sma_50=115, current_stop=None,
                         gain_pct=0.30, basis="sma50")[0] == round(115 * 0.99, 2)
-
-    # auto picks by stage: fresh -> initial, working -> breakeven, well-in-profit -> sma50
     assert suggest_stop(avg_entry=100, current_price=103, sma_50=98, current_stop=None,
-                        gain_pct=0.03, basis="auto")[1] == "initial"
-    assert suggest_stop(avg_entry=100, current_price=118, sma_50=110, current_stop=None,
-                        gain_pct=0.18, basis="auto")[1] == "breakeven"
-    assert suggest_stop(avg_entry=100, current_price=125, sma_50=115, current_stop=None,
-                        gain_pct=0.25, basis="auto")[1] == "sma50"
+                        gain_pct=0.03, basis="breakeven")[0] == 100.0
 
-    # never below the in-force stop
-    val, _ = suggest_stop(avg_entry=100, current_price=125, sma_50=90, current_stop=118,
-                          gain_pct=0.25, basis="sma50")
-    assert val == 118.0
+    def auto(**kw):
+        base = dict(avg_entry=100, current_price=120, sma_50=None, current_stop=None,
+                    gain_pct=0.20, basis="auto")
+        base.update(kw)
+        return suggest_stop(**base)
+
+    # no trigger: +16% and +20% gains alone no longer move the stop
+    for g in (0.03, 0.16, 0.20):
+        assert auto(gain_pct=g, current_price=100 * (1 + g), sma_50=95) == (92.0, "initial")
+
+    # each trigger alone
+    assert auto(sma_50=100.5) == (100.0, "breakeven (50-day caught up)")
+    assert auto(sma_50=110) == (108.9, "sma50")
+    assert auto(r_now=3.2) == (100.0, "breakeven (3R)")
+    assert auto(r_now=2.9)[1] == "initial"
+    # avg win 4%: 2x is +8%; the back stop sits at +4%
+    assert auto(gain_pct=0.09, current_price=109, avg_win=0.04) == (104.0,
+                                                                    "back stop (average win)")
+    assert auto(gain_pct=0.07, current_price=107, avg_win=0.04)[1] == "initial"
+    assert auto(gain_pct=0.09, current_price=109, avg_win=None)[1] == "initial"
+
+    # the highest level wins: the 50-day trail over the back stop, and the back stop over
+    # a 3R breakeven
+    assert auto(sma_50=110, r_now=4, avg_win=0.04, gain_pct=0.2) == (108.9, "sma50")
+    assert auto(sma_50=90, r_now=4, avg_win=0.04, gain_pct=0.2) == (104.0,
+                                                                   "back stop (average win)")
+    assert book_stop_level(avg_entry=None, sma_50=120, gain_pct=0.2, r_now=5) == (None,
+                                                                                   "initial")
+
+    # never below the in-force stop, with or without a trigger
+    assert suggest_stop(avg_entry=100, current_price=125, sma_50=90, current_stop=118,
+                        gain_pct=0.25, basis="sma50")[0] == 118.0
+    assert auto(sma_50=110, current_stop=112)[0] == 112.0
+    assert auto(current_stop=95)[0] == 95.0
 
     # underwater / result not below price -> None (manual row)
     val2, _ = suggest_stop(avg_entry=100, current_price=90, sma_50=None, current_stop=None,
                            gain_pct=-0.10, basis="initial")
     assert val2 is None
+    assert auto(sma_50=101, current_price=99.5, gain_pct=-0.005)[0] is None
 
 
 def test_position_advisories():
@@ -125,12 +154,24 @@ def test_position_advisories():
     from src.stock_screener.cockpit.trade import position_advisories
 
     flagged = position_advisories({"has_stop": False, "gain_pct": 0.22, "below_sma50": True,
-                                   "volume_ratio": 1.8, "avg_entry": 100.0, "current_stop": None})
+                                   "volume_ratio": 1.8, "avg_entry": 100.0, "current_stop": None,
+                                   "r_now": 3.5})
     joined = " | ".join(flagged)
     assert "No protective stop" in joined
     assert "selling part into strength" in joined
     assert "50-day SMA on heavy volume" in joined
-    assert "breakeven" in joined
+    assert "Breakeven trigger met (3R)" in joined
+
+    # §6.96: the nudge follows the books' triggers, not a +16% gain
+    be = {"has_stop": True, "below_sma50": False, "volume_ratio": 1.0, "avg_entry": 100.0,
+          "current_stop": 92.0}
+    assert not any("Breakeven" in a for a in position_advisories({**be, "gain_pct": 0.18}))
+    assert any("(50-day above your cost)" in a for a in position_advisories(
+        {**be, "gain_pct": 0.18, "sma_50": 104.0}))
+    assert any("(2× average win)" in a for a in position_advisories(
+        {**be, "gain_pct": 0.09, "avg_win": 0.04}))
+    assert not any("Breakeven" in a for a in position_advisories(
+        {**be, "gain_pct": 0.18, "sma_50": 104.0, "current_stop": 100.5}))
 
     clean = position_advisories({"has_stop": True, "gain_pct": 0.05, "below_sma50": False,
                                  "volume_ratio": 1.0, "avg_entry": 100.0, "current_stop": 96.0})
@@ -298,16 +339,17 @@ def test_sell_pillars():
 
 
 def test_position_stage():
-    """The stop-ladder stage label mirrors suggest_stop's auto thresholds exactly."""
+    """The stage label reads book_stop_level, so it agrees with the auto stop (§6.96)."""
     from src.stock_screener.cockpit.trade import position_stage
 
     assert position_stage(None) is None
-    assert position_stage(-0.02) == "underwater"
-    assert position_stage(0.0) == "fresh"
-    assert position_stage(0.15) == "fresh"
-    assert position_stage(0.16) == "working"
-    assert position_stage(0.19) == "working"
-    assert position_stage(0.20) == "well in profit"
+    assert position_stage(-0.02, avg_entry=100, sma_50=120) == "underwater"
+    assert position_stage(0.0) == "initial"
+    assert position_stage(0.20, avg_entry=100, sma_50=95) == "initial"
+    assert position_stage(0.05, avg_entry=100, sma_50=100.5) == "breakeven"
+    assert position_stage(0.05, avg_entry=100, r_now=3.0) == "breakeven"
+    assert position_stage(0.09, avg_entry=100, avg_win=0.04) == "back stop"
+    assert position_stage(0.20, avg_entry=100, sma_50=110) == "trailing 50-day"
 
 
 def test_submit_position_sell():
@@ -452,6 +494,11 @@ def test_positions_page_renders():
     # rendered end-to-end with the offline holding (and didn't st.stop() early).
     assert any("Re-arm" in str(getattr(b, "label", "")) for b in at.button), \
         "positions page did not render the re-arm control"
+    # §6.96: the 50-day (115) is above the 100 cost, so the page's stage and auto basis
+    # both read the 50-day trail.
+    assert list(at.dataframe[0].value["stage"]) == ["trailing 50-day"]
+    assert any("AAA" in str(c.value) and "trail 50-day sma" in str(c.value)
+               for c in at.caption), [c.value for c in at.caption]
 
 
 def test_positions_page_sell_flow():

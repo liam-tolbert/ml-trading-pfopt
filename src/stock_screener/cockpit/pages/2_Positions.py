@@ -46,7 +46,7 @@ st.markdown(
     unsafe_allow_html=True)
 
 _BASIS_LABELS = {
-    "auto": "Auto (by gain/stage)",
+    "auto": "Auto (the books' triggers)",
     "initial": "Initial (8% below entry)",
     "breakeven": "Breakeven (entry)",
     "sma50": "Trail 50-day SMA",
@@ -186,7 +186,7 @@ if _sp and _sp.get("symbol") not in {p["symbol"] for p in positions}:
 # --- Sell pillars (P1-P4) ------------------------------------------------------------------- #
 # Every input is best effort; a pillar with no data reads "—".
 _open_by_sym = {}
-_derived_pct = None
+_derived_pct = _avg_win = None
 try:
     # Journal entry dates for P1, from the shared fills cache under the Journal page's
     # jr_nonce. With Alpaca down the pillars degrade and the page still renders.
@@ -194,7 +194,10 @@ try:
     _journal = trade.build_trade_journal(_fills)
     _open_by_sym = {r["symbol"]: r for r in _journal["open"]}
     # The trade plan's stop rule, so the "initial" basis and R match what was ordered.
-    _derived_pct = trade.derived_stop_pct(_journal["closed"])["stop_pct"]
+    _derived = trade.derived_stop_pct(_journal["closed"])
+    _derived_pct = _derived["stop_pct"]
+    # The average-win triggers wait for the same win count as the derived stop.
+    _avg_win = _derived["avg_win_pct"] if _derived_pct is not None else None
 except Exception:
     _open_by_sym = {}
 try:
@@ -256,6 +259,12 @@ _rmults = {p["symbol"]: trade.r_multiple(p["avg_entry"], p["current_price"],
                                          current_stop=p.get("current_stop"),
                                          stop_pct=_derived_pct)
            for p in positions}
+# Stage and advisories again, now with R and the average win for the books' triggers.
+for p in positions:
+    _book = {"r_now": _rmults[p["symbol"]][0], "avg_win": _avg_win}
+    p["stage"] = trade.position_stage(p["gain_pct"], avg_entry=p["avg_entry"],
+                                      sma_50=p["sma_50"], **_book)
+    p["advisories"] = trade.position_advisories({**p, **_book})
 
 
 def _r_cell(sym) -> str:
@@ -295,11 +304,15 @@ col_config = {
                   "the free-roll applies: sell half, move the stop to breakeven, and the "
                   "rest rides risk-free."),
     "stage": st.column_config.Column(
-        "Stage", help="The stop ladder by gain: underwater · fresh (<16%) · working "
-                      "(16-20%, stop → breakeven) · well in profit (≥20%, trail 50-day)."),
+        "Stage", help="The stop ladder, by the books' triggers: underwater · initial "
+                      "(no trigger yet) · breakeven (the rising 50-day reached your cost, "
+                      "3R, or 2× your average win) · back stop (at your average win) · "
+                      "trailing 50-day (the 50-day is above your cost). The average-win "
+                      "triggers start at 5 wins."),
     "P1": st.column_config.Column(
         "P1", help="Breakout holding: Day-0 close below pivot, decisive close below "
-                   "pivot, close below the breakout bar's low, and the laggard clock "
+                   "pivot, close below the breakout bar's low once back under the pivot (above it, "
+                   "a warning), and the laggard clock "
                    "(no ~3% cushion by ~day 10; flat-to-red by day 15). ⚠ also lists "
                    "post-breakout violations: a close under the 20-day line in the first "
                    "month, a heavy down day after a light-volume breakout, lower lows, "
@@ -326,7 +339,8 @@ col_config = {
                    help="A fresh breakout should hold its 20-day line for the first ~month; "
                         "a close below it is a violation — a reason to doubt the breakout."),
     "sma_50": _num("50-day SMA", format="$%.2f",
-                   help="Minervini trails the 50-day once well in profit; a close below it on "
+                   help="Once the rising 50-day passes your cost, the stop trails just under "
+                        "it; a close below it on "
                         "heavy volume is an exit signal."),
     "earnings": st.column_config.Column(
         "Earnings", help="Next scheduled report. ⚠︎ inside ~21 days: a stop can't protect "
@@ -386,20 +400,22 @@ st.caption("The GTC ratchet only ever RAISES a stop — a suggestion below the s
            "remaining shares at the same level.")
 basis = st.radio("Stop basis", trade.STOP_BASES, horizontal=True, key="pos_basis",
                  format_func=lambda b: _BASIS_LABELS.get(b, b),
-                 help="How each row's suggested new stop is chosen. 'Auto' picks per position by "
-                      "its gain: fresh → initial 8% below entry, working → breakeven, well in "
-                      "profit → trail the 50-day SMA.")
+                 help="How each row's suggested new stop is chosen. 'Auto' uses the books' "
+                      "triggers: breakeven once the rising 50-day reaches your cost, at 3R, "
+                      "or at 2× your average win; a back stop at your average win; then a "
+                      "trail under the 50-day. With no trigger it stays at the initial stop.")
 _nonce = st.session_state.pos_nonce
 for p in positions:
     sym, price = p["symbol"], p["current_price"]
     suggested, eff = trade.suggest_stop(
         avg_entry=p["avg_entry"], current_price=price, sma_50=p["sma_50"],
         current_stop=p["current_stop"], gain_pct=p["gain_pct"], basis=basis,
-        initial_pct=_derived_pct)
+        initial_pct=_derived_pct, r_now=_rmults[sym][0], avg_win=_avg_win)
     seed = suggested if suggested is not None else (p["current_stop"] or 0.0)
     cA, cB = st.columns([3, 2])
     _g = f"{p['gain_pct'] * 100:+.1f}%" if p["gain_pct"] is not None else "n/a"
-    _eff = f" · {_BASIS_LABELS.get(eff, eff).split(' (')[0].lower()}" if basis == "auto" else ""
+    _eff = ((f" · {_BASIS_LABELS[eff].split(' (')[0].lower()}" if eff in _BASIS_LABELS
+             else f" · {eff}") if basis == "auto" else "")
     cA.caption(f"• **{sym}** {p['qty']} sh · {_g}{_eff}"
                + (f" · {' · '.join(p['advisories'])}" if p["advisories"] else ""))
     _flagged = [(k, v) for k, v in _pillars.get(sym, {}).items()

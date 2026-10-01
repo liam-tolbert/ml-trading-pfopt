@@ -49,6 +49,13 @@ DERIVED_STOP_MIN_WINS = 5
 DERIVED_STOP_WIN_FRACTION = 0.5
 DERIVED_STOP_FLOOR = 0.04
 
+# The books' triggers for raising the stop to breakeven, in place of fixed gains: the
+# rising 50-day reaching the cost, a gain of BREAKEVEN_R times the initial risk, or
+# BREAKEVEN_AVG_WIN_MULT times the average win. The last also sets the back stop at the
+# average win. The average-win rules wait for DERIVED_STOP_MIN_WINS wins.
+BREAKEVEN_R = 3.0
+BREAKEVEN_AVG_WIN_MULT = 2.0
+
 # A stop fewer than this many typical days (median daily true range) below the fill sits
 # inside ordinary noise: an ordinary day shakes the trade out. Advisory only.
 STOP_ROOM_MIN_DAYS = 2.0

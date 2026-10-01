@@ -282,7 +282,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Stop room (bucking bronco) | `advisories.stop_room`, `STOP_ROOM_MIN_DAYS` | Advisory (§6.75) |
 | Risk per trade | `trade.RISK_PCT_PILOT/BASE/STRONG` (0.5/1.0/1.25%) | Below the books' 1.25–2.5% while the record is weak (on purpose) |
 | Position cap | `trade.MAX_ORDER_PCT` (10% of equity) | Below the books' 20–25% on purpose |
-| Breakeven / trail | `trade.BREAKEVEN_GAIN` (16%), `TRAIL_GAIN` (20%, trail the 50-day), `FREE_ROLL_R` (2R) | Fixed percentages, not the books' 3R rule (audit item) |
+| Breakeven / trail / back stop | `trade.book_stop_level`: the 50-day reaching the cost, `doctrine.BREAKEVEN_R` (3R), `BREAKEVEN_AVG_WIN_MULT` (2× average win, back stop at the average win); `FREE_ROLL_R` (2R) | Follows the books (§6.96). The average-win rules wait for 5 tagged wins |
 | Sell pillars | `trade.sell_pillars` P1–P4; P1 uses `DECISIVE_BELOW_PIVOT_PCT`, `P1_CUSHION_*`, `P1_STALL_DAYS` | P1 sells a day-0 close back under the pivot, stricter than the books (§12). A close under the entry-day low only warns while the pivot holds (§6.95) |
 | Violations after the buy | `advisories.post_breakout_read`; `VIOLATIONS_CAN_FAIL` (off), `VIOLATION_FAIL_COUNT` | Warnings only until switched on (§6.77) |
 | Weak-tape advice | `WEAK_TAPE_STOP_PCT`, `WEAK_TAPE_TARGET_PCT` | Advice, not applied (§6.78) |

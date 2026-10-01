@@ -21,8 +21,8 @@ import time
 from typing import Dict, List, Optional, Sequence, Tuple
 
 # doctrine is constants-only and imports nothing, so this module stays import-light.
-from .doctrine import (ADV_DAYS, DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR,
-                       DERIVED_STOP_MIN_WINS, DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS,
+from .doctrine import (ADV_DAYS, BREAKEVEN_AVG_WIN_MULT, BREAKEVEN_R,
+                       DEFAULT_STOP_FROM_PIVOT, DERIVED_STOP_FLOOR, DERIVED_STOP_MIN_WINS, DERIVED_STOP_WIN_FRACTION, EARNINGS_SOON_DAYS,
                        MAX_LOSS_FROM_FILL, MAX_ORDER_ADV_PCT, NO_CHASE_PCT, RS_FLOOR,
                        VOL_AVG_DAYS, VOL_CONFIRM_RATIO)
 
@@ -39,13 +39,11 @@ ALPACA_TIMEOUT_S = (5.0, 15.0)  # (connect, read) seconds on every Alpaca reques
 
 # --- Positions-page stop management (Minervini exit rules) ---------------------------------- #
 INITIAL_STOP_PCT = 0.08     # ~8% initial stop below the entry (buy point)
-BREAKEVEN_GAIN = 0.16       # gain past which the auto stop is at least breakeven (~2x initial risk)
-TRAIL_GAIN = 0.20           # gain past which, "well in profit", trail the 50-day SMA
 SELL_STRENGTH_GAIN = 0.20   # gain past which to consider selling part into strength
 HEAVY_VOL_RATIO = VOL_CONFIRM_RATIO   # a heavy-volume day IS the breakout-confirmation bar
 EARNINGS_CUSHION_MIN = 0.08  # min profit cushion to comfortably hold a position through a report
 POSITION_ADV_WARN_PCT = 0.05  # a position this big vs a day's $ volume takes days to exit
-# Suggested-stop bases for the re-arm action; "auto" picks per position by its gain.
+# Suggested-stop bases for the re-arm action; "auto" applies the books' triggers.
 STOP_BASES = ("auto", "initial", "breakeven", "sma50")
 
 # --- Progressive exposure (risk-% guidance off recent closed trades) ------------------------ #
@@ -337,64 +335,102 @@ def stop_within_max_loss(stop, fill) -> bool:
     return s > 0 and f > 0 and s >= f * (1.0 - MAX_LOSS_FROM_FILL) - 1e-6
 
 
+def _book_stop_triggers(avg_entry, sma_50, gain_pct, r_now=None, avg_win=None
+                        ) -> List[Tuple[float, str]]:
+    """The books' stop triggers that hold now, as ``(level, effective_basis)`` in rule
+    order. Pure. [] when none holds or ``avg_entry`` is missing."""
+    try:
+        e = float(avg_entry)
+    except (TypeError, ValueError):
+        return []
+    if e <= 0:
+        return []
+    out: List[Tuple[float, str]] = []
+    if sma_50 and float(sma_50) >= e:
+        trail = float(sma_50) * 0.99
+        out.append((trail, "sma50") if trail > e else (e, "breakeven (50-day caught up)"))
+    if r_now is not None and r_now >= BREAKEVEN_R:
+        out.append((e, f"breakeven ({BREAKEVEN_R:g}R)"))
+    if avg_win and gain_pct is not None and gain_pct >= BREAKEVEN_AVG_WIN_MULT * avg_win:
+        out.append((e, f"breakeven ({BREAKEVEN_AVG_WIN_MULT:g}× average win)"))
+        out.append((e * (1.0 + avg_win), "back stop (average win)"))
+    return out
+
+
+def book_stop_level(*, avg_entry, sma_50, gain_pct, r_now=None, avg_win=None
+                    ) -> Tuple[Optional[float], str]:
+    """The highest stop the books' triggers allow now. Pure.
+
+    * The rising 50-day at or above ``avg_entry``: the higher of ``avg_entry`` and
+      ``sma_50 × 0.99`` (breakeven, then a trail under the 50-day).
+    * ``r_now >= BREAKEVEN_R``: breakeven.
+    * ``gain_pct >= BREAKEVEN_AVG_WIN_MULT × avg_win``: breakeven, and the back stop at
+      ``avg_entry × (1 + avg_win)``. Callers MUST pass ``avg_win`` None under
+      ``DERIVED_STOP_MIN_WINS`` wins.
+
+    Returns ``(level, effective_basis)`` for the highest level; ties go to the earlier
+    rule. ``(None, "initial")`` when no trigger holds."""
+    trig = _book_stop_triggers(avg_entry, sma_50, gain_pct, r_now, avg_win)
+    if not trig:
+        return None, "initial"
+    best = trig[0]
+    for t in trig[1:]:
+        if t[0] > best[0]:
+            best = t
+    return best
+
+
 def suggest_stop(*, avg_entry: Optional[float], current_price: Optional[float],
                  sma_50: Optional[float], current_stop: Optional[float],
                  gain_pct: Optional[float], basis: str = "auto",
-                 initial_pct: Optional[float] = None
+                 initial_pct: Optional[float] = None, r_now: Optional[float] = None,
+                 avg_win: Optional[float] = None
                  ) -> Tuple[Optional[float], str]:
     """Minervini stop suggestion for a held position under a chosen ``basis``.
 
     Basis levels: ``initial`` = ``avg_entry × (1 - INITIAL_STOP_PCT)`` (~8% below entry;
     ``initial_pct`` overrides the 8%, e.g. with :func:`derived_stop_pct`);
     ``breakeven`` = ``avg_entry``; ``sma50`` = ``sma_50 × 0.99``, just under the 50-day.
-    ``auto`` picks by gain: ``gain_pct >= TRAIL_GAIN`` with a 50-day trails the SMA;
-    ``gain_pct >= BREAKEVEN_GAIN`` is at least breakeven; else ``initial``.
+    ``auto`` is :func:`book_stop_level` (``r_now`` and ``avg_win`` feed its triggers),
+    else ``initial``; its effective basis names the rule that won.
 
     Returns ``(price_or_None, effective_basis)``. The price is floored at ``current_stop``,
-    so it never proposes a lower stop. ``auto`` also floors it at breakeven once
-    ``gain_pct >= BREAKEVEN_GAIN``; an explicit basis is honoured as chosen. The price is
-    None when there is neither a basis level nor a ``current_stop``, or when the result
-    isn't strictly below ``current_price``; that case is left for a manual edit."""
+    so it never proposes a lower stop. The price is None when there is neither a basis
+    level nor a ``current_stop``, or when the result isn't strictly below
+    ``current_price``; that case is left for a manual edit."""
     initial_val = (avg_entry * (1.0 - (INITIAL_STOP_PCT if initial_pct is None else initial_pct))
                    if avg_entry else None)
-    breakeven_val = float(avg_entry) if avg_entry else None
-    sma_val = sma_50 * 0.99 if sma_50 else None
-
     if basis == "auto":
-        if gain_pct is not None and gain_pct >= TRAIL_GAIN and sma_val is not None:
-            eff = "sma50"
-        elif gain_pct is not None and gain_pct >= BREAKEVEN_GAIN and breakeven_val is not None:
-            eff = "breakeven"
-        else:
-            eff = "initial"
+        base_val, eff = book_stop_level(avg_entry=avg_entry, sma_50=sma_50,
+                                        gain_pct=gain_pct, r_now=r_now, avg_win=avg_win)
+        if base_val is None:
+            base_val = initial_val
     else:
         eff = basis
-
-    base_val = {"initial": initial_val, "breakeven": breakeven_val, "sma50": sma_val}.get(eff)
-    # The breakeven floor stops an auto 50-day trail giving back a working trade.
+        base_val = {"initial": initial_val,
+                    "breakeven": float(avg_entry) if avg_entry else None,
+                    "sma50": sma_50 * 0.99 if sma_50 else None}.get(eff)
     floors = [v for v in (base_val, current_stop) if v is not None]
-    if (basis == "auto" and gain_pct is not None and gain_pct >= BREAKEVEN_GAIN
-            and breakeven_val is not None):
-        floors.append(breakeven_val)
     if not floors:
         return None, eff
     cand = round(max(floors), 2)
     return (cand, eff) if stop_is_valid(cand, current_price) else (None, eff)
 
 
-def position_stage(gain_pct: Optional[float]) -> Optional[str]:
-    """The position's stage on the stop ladder from its gain: ``underwater``, ``fresh``,
-    ``working`` or ``well in profit``; None without a gain. Pure. The thresholds MUST match
-    :func:`suggest_stop`'s auto basis so the label and the suggested stop agree."""
+def position_stage(gain_pct: Optional[float], *, avg_entry=None, sma_50=None,
+                   r_now=None, avg_win=None) -> Optional[str]:
+    """The position's stage on the stop ladder: ``underwater`` (a loss), ``initial`` (no
+    trigger yet), ``breakeven``, ``back stop`` or ``trailing 50-day``; None without a gain.
+    Pure. It reads :func:`book_stop_level`, so the label and the auto stop agree."""
     if gain_pct is None:
         return None
     if gain_pct < 0:
         return "underwater"
-    if gain_pct < BREAKEVEN_GAIN:
-        return "fresh"
-    if gain_pct < TRAIL_GAIN:
-        return "working"
-    return "well in profit"
+    _, eff = book_stop_level(avg_entry=avg_entry, sma_50=sma_50, gain_pct=gain_pct,
+                             r_now=r_now, avg_win=avg_win)
+    if eff == "sma50":
+        return "trailing 50-day"
+    return eff.split(" (")[0]
 
 
 def r_multiple(avg_entry, current_price, pivot=None, current_stop=None,
@@ -452,8 +488,9 @@ def position_advisories(pos: dict) -> List[str]:
     """Display-only Minervini exit advisories for a :func:`fetch_positions` dict, as a list
     of messages. Pure.
 
-    The "2× initial risk" rule assumes an ``INITIAL_STOP_PCT`` stop because the entry stop
-    isn't stored, so it is a nudge, not exact. The earnings rules fire only for a known
+    The breakeven nudge fires when a :func:`book_stop_level` trigger holds and the stop is
+    under the cost. Optional ``r_now`` and ``avg_win`` keys feed the triggers; without
+    them only the 50-day one can fire. The earnings rules fire only for a known
     report within ``EARNINGS_SOON_DAYS`` (``earnings_in`` >= 0) and a known gain. The
     liquidity rule fires when ``market_value`` is at least ``POSITION_ADV_WARN_PCT`` of
     ``adv_usd``."""
@@ -491,9 +528,11 @@ def position_advisories(pos: dict) -> List[str]:
         vr = pos.get("volume_ratio")
         heavy = " on heavy volume" if (vr is not None and vr >= HEAVY_VOL_RATIO) else ""
         out.append(f"Closed below the 50-day SMA{heavy} — exit signal.")
-    if (gain is not None and gain >= BREAKEVEN_GAIN and avg_entry
-            and (cur_stop is None or cur_stop < avg_entry)):
-        out.append("Up ≥ 2× initial risk — raise stop to at least breakeven.")
+    trig = _book_stop_triggers(avg_entry, pos.get("sma_50"), gain, pos.get("r_now"),
+                               pos.get("avg_win"))
+    if trig and (cur_stop is None or cur_stop < avg_entry):
+        why = trig[0][1].split(" (")[1].rstrip(")") if " (" in trig[0][1] else "50-day above your cost"
+        out.append(f"Breakeven trigger met ({why}) — raise stop to at least breakeven.")
     return out
 
 
@@ -1545,7 +1584,7 @@ def fetch_positions() -> dict:
             "gain_pct": gain_pct, "below_sma50": below_sma50,
             "next_earnings": next_earnings, "earnings_in": earnings_in,
             "industry": _sect.get("industry"), "sector": _sect.get("sector"),
-            "stage": position_stage(gain_pct),
+            "stage": position_stage(gain_pct, avg_entry=avg_entry, sma_50=sma_50),
             "template_criteria": template_criteria, "df": df,
         }
         pos["advisories"] = position_advisories(pos)

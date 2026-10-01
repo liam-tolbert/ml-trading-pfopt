@@ -403,6 +403,16 @@ def test_watchlist_add_button_and_download(monkeypatch=None):
             assert load_watchlist(cache.WATCHLIST_JSON) == wl, "add did not persist to disk"
 
 
+def _tick_buys(at):
+    """Tick every buy row of the trade plan seeded in ``at``'s session state, as Select
+    all does. Buys start unchecked (2026-10-01), and these tests read per-row output."""
+    tp = at.session_state["trade_plan"]
+    held = tp.get("held") or {}
+    for o in tp["plan"]:
+        if held.get(o["ticker"], 0) <= 0:
+            at.session_state[f"buy_{o['ticker']}_{tp['build_ts']}"] = True
+
+
 def test_trade_plan_preview_renders_stop_controls():
     """With a trade plan seeded in session_state, the paper-trade preview renders the new
     attach-stop toggle and a per-ticker editable stop number_input (keyed by the build nonce),
@@ -443,6 +453,7 @@ def test_trade_plan_preview_renders_stop_controls():
             "account": {"account_number": "PA000123", "equity": 100000.0,
                         "using_dedicated": True},
             "build_ts": 1}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
 
@@ -577,6 +588,7 @@ def test_trade_plan_preview_marks_held_names():
                         "using_dedicated": True},
             "held": {"HELDX": 20},                            # HELDX already held -> re-arm only
             "build_ts": 1}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
 
@@ -667,6 +679,7 @@ def test_trade_plan_invalidated_on_events():
             patch.object(cache, "TRIGGERS_DIR", Path(_tmp) / "triggers"):
         at = AppTest.from_file(app_path, default_timeout=60)
         _seed(at)
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         at.run()                                          # (a) plain rerun -> plan SURVIVES
@@ -693,9 +706,11 @@ def test_trade_plan_invalidated_on_events():
 
 
 def test_trade_plan_buy_checkboxes_filter_submit():
-    """Per-buy include/exclude checkboxes: an earnings-flagged buy starts UNCHECKED (the
-    ~21-day no-fly), a clean buy starts checked, the selected-count caption tracks the
-    boxes, and Submit sends ONLY the checked buys (held names always pass through)."""
+    """Per-buy include/exclude checkboxes: every buy starts UNCHECKED (user decision,
+    2026-10-01; before, only earnings-flagged names did). Select all ticks every buy row,
+    earnings-flagged ones included; Deselect all clears them; the selected-count caption
+    tracks the boxes; Submit sends ONLY the checked buys (held names always pass
+    through)."""
     try:
         from streamlit.testing.v1 import AppTest
     except Exception as e:
@@ -745,10 +760,22 @@ def test_trade_plan_buy_checkboxes_filter_submit():
         boxes = {c.key: c for c in at.checkbox if str(c.key or "").startswith("buy_")}
         assert set(boxes) == {"buy_CLEAN_1", "buy_ERNS_1"}, \
             f"one checkbox per BUY row (held has none), got {sorted(boxes)}"
-        assert boxes["buy_CLEAN_1"].value is True
-        assert boxes["buy_ERNS_1"].value is False, "earnings-soon buy must start unchecked"
-        rendered = _rendered_text(at)
-        assert "1/2 buy(s) selected" in rendered, rendered
+        assert boxes["buy_CLEAN_1"].value is False and boxes["buy_ERNS_1"].value is False, \
+            "every buy must start unchecked"
+        assert "0/2 buy(s) selected" in _rendered_text(at)
+
+        def _click(key):
+            [b for b in at.button if b.key == key][0].click().run()
+            assert not at.exception, f"app raised on {key}: {at.exception}"
+            return {c.key: c.value for c in at.checkbox if str(c.key or "").startswith("buy_")}
+
+        assert _click("trade_select_all") == {"buy_CLEAN_1": True, "buy_ERNS_1": True}
+        assert "2/2 buy(s) selected" in _rendered_text(at)
+        assert _click("trade_deselect_all") == {"buy_CLEAN_1": False, "buy_ERNS_1": False}
+        assert "0/2 buy(s) selected" in _rendered_text(at)
+
+        at.checkbox(key="buy_CLEAN_1").check().run()
+        assert "1/2 buy(s) selected" in _rendered_text(at)
 
         submit = [b for b in at.button if b.key == "trade_submit"]
         assert submit, "submit button not found"
@@ -1033,6 +1060,7 @@ def test_trade_panel_gate_blocks_buys():
             "account": {"account_number": "PA000123", "equity": 100000.0,
                         "using_dedicated": True},
             "held": {"HELDX": 20}, "build_ts": 1, "gate": _gate_closed}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         rendered = _rendered_text(at)
@@ -1055,6 +1083,7 @@ def test_trade_panel_gate_blocks_buys():
             "account": {"account_number": "PA000123", "equity": 100000.0,
                         "using_dedicated": True},
             "held": {}, "build_ts": 1, "gate": _gate_closed}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         submit = [b for b in at.button if b.key == "trade_submit"]
@@ -1145,6 +1174,7 @@ def test_trade_panel_stop_captions():
             "derived": {"stop_pct": None,
                         "reason": "default stop (7.5% below the pivot) — the derived "
                                   "stop (½ your average win) starts at 5 wins; you have 1"}}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         rendered = _rendered_text(at)
@@ -1161,6 +1191,7 @@ def test_trade_panel_stop_captions():
             "derived": {"stop_pct": 0.06,
                         "reason": "derived stop 6.0% below the fill — ½ × your 12.0% "
                                   "average win over 5 wins"}}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         rendered = _rendered_text(at)
@@ -1209,6 +1240,7 @@ def test_trade_panel_adv_caption():
             "plan": plan, "skipped": [], "account": dict(_acct), "held": {},
             "build_ts": 1, "order_type": "limit",
             "derived": {"stop_pct": None, "reason": "default stop"}}
+        _tick_buys(at)
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         rendered = _rendered_text(at)

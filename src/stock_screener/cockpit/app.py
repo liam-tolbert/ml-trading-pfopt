@@ -147,7 +147,8 @@ two axes flip from quiet to loud:
 - Set the **stop immediately** — 7–8% below the price you pay, **never more than 10%** —
   and never lower it. The loss is measured from your fill, not the pivot: buying higher in
   the zone means a tighter stop (the trade plan raises it for you).
-- First target **+25%** above the pivot; trail with the 50-day SMA once well in profit.
+- First target **+25%** above the pivot. Move the stop to breakeven once the rising 50-day
+  reaches your cost (or at 3R), then trail just under the 50-day.
 - **Size** so a stop-out costs ~1% of the account (set Account $ / Risk %).
 
 These levels are advisory — place the order in your broker.
@@ -953,23 +954,30 @@ with st.sidebar:
                 _held = _tp.get("held") or {}
                 _nonce = _tp.get("build_ts")
 
-                # A checkbox per buy row picks what submits. Earnings-flagged names start
-                # unchecked. Keys carry the build nonce, so a fresh Build re-seeds the
-                # defaults.
+                # A checkbox per buy row picks what submits. Every row starts unchecked.
+                # Keys carry the build nonce, so a fresh Build clears the ticks.
                 def _buy_key(t):
                     return f"buy_{t}_{_nonce}"
 
-                def _buy_default(o):
-                    return not _earnings_flag(o.get("earnings_in"))
-
                 _buyable = [o for o in _plan if _held.get(o["ticker"], 0) <= 0]
+
+                def _set_all_buys(on):
+                    for _b in _buyable:
+                        st.session_state[_buy_key(_b["ticker"])] = on
+
                 _buys = [o for o in _buyable
-                         if st.session_state.get(_buy_key(o["ticker"]), _buy_default(o))]
+                         if st.session_state.get(_buy_key(o["ticker"]), False)]
                 _tot = sum(o["est_value"] for o in _buys)
                 _cap = f"**{len(_buys)}/{len(_buyable)} buy(s) selected** · ~${_tot:,.0f} est."
                 if len(_buyable) != len(_plan):
                     _cap += f" · {len(_plan) - len(_buyable)} already held (no buy)"
                 st.caption(_cap)
+                if _buyable:
+                    _sa, _sd = st.columns(2)
+                    _sa.button("Select all", key="trade_select_all", width="stretch",
+                               on_click=_set_all_buys, args=(True,))
+                    _sd.button("Deselect all", key="trade_deselect_all", width="stretch",
+                               on_click=_set_all_buys, args=(False,))
                 # With the toggle off, buys go in with no stop and held names are skipped.
                 _attach = st.toggle(
                     "Attach protective stop (sell-all, GTC)", value=True,
@@ -1009,9 +1017,10 @@ with st.sidebar:
                         _on = _cA.checkbox(
                             f"**{_t}** {_o['shares']} sh @ ~${_o['price']:.2f} "
                             f"(~${_o['est_value']:,.0f}){_fl}" + (f" · {_ew}" if _ew else ""),
-                            value=_buy_default(_o), key=_buy_key(_t),
+                            value=False, key=_buy_key(_t),
                             help="Unchecked names are left out of the submit entirely. "
-                                 "Earnings-soon names start unchecked (no-fly window).")
+                                 "Every name starts unchecked; earnings-soon names are "
+                                 "flagged (no-fly window).")
                     # Limit plans only; a held row has no buy to limit.
                     _edlim = _o.get("limit_price")
                     if _cL is not None and _held_sh <= 0:
@@ -1103,8 +1112,8 @@ with st.sidebar:
                 if any(_earnings_flag(_o.get("earnings_in")) for _o in _buyable):
                     st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
                                f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "
-                               "cushion to absorb an earnings gap, so these start "
-                               "UNCHECKED — tick one to include it anyway.")
+                               "cushion to absorb an earnings gap. *Select all* ticks "
+                               "these too.")
                 # Name the account before submit: each paper account has its own keys. The
                 # error case renders above.
                 if not _account.get("error"):
@@ -1135,7 +1144,7 @@ with st.sidebar:
                                    if _is_lim and _held.get(_o["ticker"], 0) <= 0 else None)}
                               for _o in _plan
                               if _held.get(_o["ticker"], 0) > 0
-                              or st.session_state.get(_buy_key(_o["ticker"]), _buy_default(_o))]
+                              or st.session_state.get(_buy_key(_o["ticker"]), False)]
                     with st.spinner("Submitting to Alpaca paper…"):
                         try:
                             st.session_state["trade_result"] = submit_buy_plan(
@@ -1164,8 +1173,7 @@ with st.sidebar:
                                         _o.get("limit_price"))}
                                    for _o in _plan
                                    if _held.get(_o["ticker"], 0) <= 0
-                                   and st.session_state.get(_buy_key(_o["ticker"]),
-                                                            _buy_default(_o))]
+                                   and st.session_state.get(_buy_key(_o["ticker"]), False)]
                     entries.save_entry_plan(entries.build_entry_plan(_armed_rows))
                     st.rerun()
                 if _c3.button("Cancel", key="trade_cancel", width="stretch"):
