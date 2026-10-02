@@ -20,10 +20,11 @@ improvised:
   ≥1.5× the prior 50-day average volume, today's bar excluded (`gates` reports this;
   do not infer it from price alone).
 
-Every command runs from the repo root:
+Every command runs from the repo root, through the wrapper that puts the `ml-trading`
+env on PATH:
 
 ```
-mamba run -n ml-trading python -m src.stock_screener.hunt <cmd>
+bash scripts/hunt/hunt.sh <cmd>
 ```
 
 ## Procedure
@@ -46,9 +47,11 @@ mamba run -n ml-trading python -m src.stock_screener.hunt <cmd>
    named caveat), `FAIL` (price action contradicts the label). Notes are one
    dense line naming the reason, e.g. `"12-9-9-4 tightening, vol dry-up, -2% to pivot"`.
 5. **Record incrementally** (crash-safe): after each sheet batch (~16 tickers),
-   append rows `ticker,verdict,notes` to `data/cockpit/hunt/<date>/verdicts.csv`
-   (header on first write; `pipeline.append_verdicts` semantics — plain CSV append
-   from a heredoc is fine).
+   Write the batch to `data/cockpit/hunt/<date>/verdicts_batch_NN.csv` — header
+   `ticker,verdict,notes`, one row per ticker, notes quoted when they hold a comma —
+   then run **`append-verdicts --file <that path>`**. It refuses the whole batch if
+   a ticker is not a candidate, is repeated, or already has a verdict, and prints
+   how many candidates remain. Never edit `verdicts.csv` by hand.
 6. **`validate-verdicts`** — must report `ok: true` (every candidate exactly
    once). Fix any problems it lists before proceeding.
 7. **`gates --min-fund N`** — N is the user's choice (ask or default 0; report
@@ -56,11 +59,50 @@ mamba run -n ml-trading python -m src.stock_screener.hunt <cmd>
    missing figure fails its check, so a low F can mean thin data. Output has the buckets
    (buy_zone / approaching / below / past_entry), earnings-blocked names,
    volume-confirmed names, and the watchlist audit.
-8. **`report --min-fund N`** — writes `report.html` in the hunt dir. Publish it
-   as an artifact (keep the same artifact URL when re-running in one session)
-   and summarize in chat: verdict counts, buy-zone list, volume-confirmation
-   status (usually "none — waiting on Monday volume"), earnings blocks, and
-   watchlist audit including any pins that failed review.
+8. **Write the narrative** to `data/cockpit/hunt/<date>/narrative.md`. This is
+   your read of the week, in Markdown (headings, paragraphs, bullets, pipe
+   tables; nothing fancier renders), 300–700 words:
+   - the regime and what the breadth numbers mean for taking entries;
+   - what stands out in this scan — groups, themes, the quality of the bases;
+   - every buy-zone PASS name in one line each: the setup, the volume read,
+     the F score, what would confirm it;
+   - approaching names worth an alert, and earnings-blocked names to revisit;
+   - the watchlist audit in words: pins that failed or drifted, names to prune;
+   - caveats of the review (thin data, position-size assumptions, pivots you
+     doubt).
+   Verdicts and numbers come from steps 4–7; do not restate the tables.
+9. **`report --min-fund N`** — writes `report.html` in the hunt dir, with the
+   narrative under "Reviewer's read" and every chart sheet under its verdicts,
+   and mirrors it with its `charts/` to **`docs/hunt/<date>/`**, the deliverable.
+   Summarize in chat: verdict counts, buy-zone list, volume-confirmation status
+   (usually "none — waiting on Monday volume"), earnings blocks, and watchlist
+   audit including any pins that failed review.
+10. **Publish the artifact** (in a session, never unattended): the Artifact tool
+    with `file_path` = `docs/hunt/<date>/report.html`, `root` = that folder,
+    `files` = every `charts/sheet_NNN.png` mapped to itself, icon `chart`.
+    Re-publish to the same URL when re-running in one session. To publish a
+    past unattended run, the same call on that date's folder is all it takes.
+    Printing an artifact from the claude.ai viewer cuts it off; a browser's own
+    print of `report.html` does not, so never suggest the former.
+
+## Unattended run
+
+The Friday scheduled task (`scripts/hunt/weekend_hunt.ps1`) starts this skill with
+nobody at the keyboard. The task has already pulled the Pi's scan and checked it.
+When the prompt says the run is unattended:
+
+- Ask nothing. Use `--min-fund 0`.
+- Run steps 1–9 and skip step 10 (no Artifact tool here): the report in
+  `docs/hunt/<date>/` is the deliverable, and the narrative is where your
+  judgment goes — write it with care.
+- Only the hunt CLI, file reads, and writes inside `data/cockpit/hunt/` are
+  permitted. Do not try ssh, scp or any other command; a refusal is not a
+  reason to look for a workaround.
+- If `verdicts.csv` already has rows, an earlier attempt was cut short: resume
+  from the tickers `validate-verdicts` lists as missing.
+- Your final message is saved as `summary.md` in the hunt dir. Make it the chat
+  summary from step 9, in Markdown, and nothing else.
+- If a step fails, stop and make the final message the command and its error.
 
 ## Boundaries
 

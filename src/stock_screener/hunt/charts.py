@@ -5,11 +5,14 @@ Each panel: log-scale candles (~9 months), SMA 50/150/200, the detected pivot
 legs with depth labels, and a volume pane with its 50-day average. The title
 carries the numbers the reviewer needs (quality, RS, F, vs-pivot, ADV$, DD,
 days to earnings) so a verdict never requires a second lookup.
+
+``sheets.json`` beside the PNGs maps each sheet's file name to its tickers, in panel order.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -22,9 +25,9 @@ from matplotlib.ticker import NullFormatter, ScalarFormatter
 from src.stock_screener.cockpit.doctrine import VOL_AVG_DAYS
 from src.stock_screener.cockpit.indicators import prior_volume_average
 from .pipeline import BUY_ZONE_MAX_PCT, ScanBundle
+from .report import PER_FIG, SHEETS_JSON
 
 BARS = 185           # ~9 months of dailies: full base plus context
-PER_FIG = 4
 _UP, _DN = "#1a9850", "#d73027"
 
 
@@ -32,6 +35,7 @@ def render_sheets(bundle: ScanBundle, diag: pd.DataFrame, out_dir: Path,
                   per_fig: int = PER_FIG, bars: int = BARS) -> List[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: List[Path] = []
+    sheets: Dict[str, List[str]] = {}
     recs = list(diag.to_dict("records"))
     for gi in range(0, len(recs), per_fig):
         grp = recs[gi:gi + per_fig]
@@ -44,6 +48,8 @@ def render_sheets(bundle: ScanBundle, diag: pd.DataFrame, out_dir: Path,
         fig.savefig(p, bbox_inches="tight")
         plt.close(fig)
         paths.append(p)
+        sheets[p.name] = [r["ticker"] for r in grp]
+    (out_dir / SHEETS_JSON).write_text(json.dumps(sheets, indent=2), encoding="utf-8")
     return paths
 
 

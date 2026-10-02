@@ -24,3 +24,4 @@ src/data/
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+*.pdf

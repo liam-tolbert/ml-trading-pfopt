@@ -5,8 +5,8 @@ cross-sectional track). The momentum-*factor* experiment is closed; its essentia
 `HANDOFF_HISTORY.md` §5 and its standalone write-up was never committed.
 
 **Status (2026-10-01):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
-frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries, with sell
-automation and armed entries built but **disarmed** (`AUTOSELL`/`AUTOBUY` unset). A SEPA-fidelity
+frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries. Sell automation is **armed** on the
+Pi (`AUTOSELL=1` since 2026-10-02); armed entries are built but disarmed (`AUTOBUY` unset). A SEPA-fidelity
 audit (the local, gitignored `SEPA_AUDIT.md`) drove §6.72–§6.99. §6.100 trimmed what this stage
 doesn't use, and the audit is frozen until the journal has ~20 more trades (§12). The offline
 suites `tests/test_cockpit.py` and `tests/test_hunt.py` gate every deploy and print their own
@@ -262,6 +262,29 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 
 **Health check one-liner:** `journalctl -u 'cockpit-*' --since -7d | grep -c 'Failed with result'`
 
+**Friday hunt task — on the Windows box, never the Pi (§6.101).** The scheduled task "SEPA Weekend
+Hunt" (`scripts/hunt/register_task.ps1`; Fridays 18:00 local, wakes the PC from sleep) runs
+`scripts/hunt/weekend_hunt.ps1`. It copies the Pi's `last_scan.pkl` and `watchlist.json` down
+(read-only on the Pi), runs the `/weekend-hunt` skill headless (`claude -p`), and checks the result
+itself.
+
+- **Output:** `docs/hunt/<date>/report.html` with its `charts/`, the deliverable: the reviewer's
+  `narrative.md` under "Reviewer's read", the gated tables, every chart sheet under its verdicts.
+  Working state stays in `data/cockpit/hunt/<date>/` (`summary.md`, verdicts, `FAILED.txt`
+  naming the reason when a run did not finish). Log: `data/cockpit/hunt/logs/<date>.log`.
+- **The allowlist is the safety boundary** (`scripts/hunt/unattended_settings.json`): the hunt
+  CLI, file reads, and writes inside `data/cockpit/hunt/`. No ssh, no cockpit or trade code.
+- **Needs:** the standalone `claude` CLI on PATH and `CLAUDE_CODE_OAUTH_TOKEN` in the user's
+  environment (`claude setup-token`). The desktop app's login is not usable from a task.
+- **Wake:** from sleep or hibernate only, with the user logged in. After a shutdown or logout the
+  missed run starts at the next logon. The PC sleeps again only if the run woke it and nobody has
+  touched it since.
+- **By hand:** `scripts/hunt/weekend_hunt.ps1 -NoSleep`. `register_task.ps1 -WakeTestInMinutes 5`
+  proves the wake without spending a review; `-Unregister` removes the task.
+- **Artifact:** the task cannot publish one (no Artifact tool outside a session). Ask a session
+  to publish a run; the skill's step 10 has the call (`report.html` plus its sheets). Printing
+  an artifact from the claude.ai viewer cuts it off; print `report.html` from a browser instead.
+
 **App hung?** (a page spins forever and Refresh does nothing). Separate "the account is unreachable"
 from "the app process is wedged" by running the page's read in a **fresh** process inside the same
 container. `-i` is required or the heredoc never reaches Python and the call silently does nothing:
@@ -502,7 +525,8 @@ source comments live. A new entry goes there, numbered after the last one.
   rating and the regime banner. No orphan is older than 90 days, so a staleness rule catches nothing
   either. The interesting question is the opposite one: why `ACN`/`BRK-B` fall out of
   `_filter_us_symbols` at all.
-- **`AUTOBUY` / `AUTOSELL` unset** on both boxes — no automation is armed.
+- **`AUTOSELL=1` on the Pi since 2026-10-02**: the evening plan's full exits (hard P1/P2/P4
+  fails) submit at 09:25 unless vetoed on the Positions page. `AUTOBUY` is unset.
 - **P2's RS leg can flip daily.** The RS rating is a rank across the universe, so a holding near
   70 can fail P2 on one close and pass the next. The two-consecutive-closes rule is the only
   hysteresis. If RS-only P2 fails prove noisy on live positions, a band (fail under 65, warn
@@ -544,7 +568,7 @@ source comments live. A new entry goes there, numbered after the last one.
 - **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package: the live-only modules (`data/`, `notifications/`, `analysis/`, batch processors, `quant_engine.py`, `screener.py`) were deleted 2026-09-02.
 - **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
-- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts.
+- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts. `scripts/hunt/` (repo root) holds the env wrapper `hunt.sh` and the Friday task (§8).
 - **Method:** `SEPA_METHODOLOGY.md` — the books' rules for sessions, with a rule-to-code map (§9 of that file) and the deviations; `minervini_sepa_system.md` is the user-facing guide the app renders. A rule change updates both, plus the ledger in `HANDOFF_HISTORY.md`.
 - **History:** `HANDOFF_HISTORY.md` — the research record (§1, §3, §5), the change ledger (§11) and parked ideas.
 - **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_backtest_daily.py` · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.

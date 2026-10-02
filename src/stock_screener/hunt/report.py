@@ -1,20 +1,135 @@
 """Weekend-hunt HTML report, built from a hunt directory's persisted state
 (diagnostics.csv + verdicts.csv + meta.json). Self-contained single file:
 Google-Fonts faces with real fallbacks, light/dark via tokens, no JS deps.
+
+Two optional inputs extend it: ``narrative.md`` (the reviewer's written read, rendered
+under "Reviewer's read") and ``charts/`` (each review sheet appended under its verdicts).
+``mirror_report`` copies the finished page and its sheets to the deliverable folder,
+``docs/hunt/<date>/`` by default. The print stylesheet lays the page out for a browser's
+own print.
 """
 from __future__ import annotations
 
 import csv
 import html as _html
 import json
+import re
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from . import pipeline as pl
+
+DOCS_DIR = Path(__file__).resolve().parents[3] / "docs" / "hunt"
+NARRATIVE_MD = "narrative.md"
+SHEETS_JSON = "sheets.json"     # written by charts.render_sheets: sheet file -> tickers
+PER_FIG = 4                     # tickers per review sheet; charts.render_sheets reads it here
 
 
 def _esc(s) -> str:
     return _html.escape(str(s), quote=True)
+
+
+# ---- the reviewer's Markdown ---------------------------------------------- #
+_INLINE = ((re.compile(r"\*\*(.+?)\*\*"), r"<b>\1</b>"),
+           (re.compile(r"`([^`]+)`"), r"<code>\1</code>"),
+           (re.compile(r"(?<![\w*])\*([^*\n]+?)\*(?!\w)"), r"<i>\1</i>"))
+_TABLE_RULE = re.compile(r"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
+
+
+def _inline(s: str) -> str:
+    s = _esc(s)
+    for rx, rep in _INLINE:
+        s = rx.sub(rep, s)
+    return s
+
+
+def md_to_html(text: str) -> str:
+    """Render the Markdown subset the reviewer writes: ``#``/``##``/``###`` headings
+    (as h3/h4/h5), paragraphs, ``-``/``*`` bullets, ``1.`` lists, pipe tables, ``---``,
+    and inline ``**bold**``, ``*em*`` and ``code``. Text is escaped first, so the
+    narrative cannot carry markup of its own."""
+    out: List[str] = []
+    para: List[str] = []
+    table: List[str] = []
+    lst: Optional[str] = None
+
+    def flush_para():
+        if para:
+            out.append(f"<p>{' '.join(_inline(x) for x in para)}</p>")
+            para.clear()
+
+    def flush_list():
+        nonlocal lst
+        if lst:
+            out.append(f"</{lst}>")
+            lst = None
+
+    def flush_table():
+        if not table:
+            return
+        rows = [[c.strip() for c in r.strip().strip("|").split("|")]
+                for r in table if not _TABLE_RULE.match(r)]
+        head, body = rows[0], rows[1:]
+        cells = "".join(f"<th>{_inline(c)}</th>" for c in head)
+        trs = "".join("<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in r) + "</tr>"
+                      for r in body)
+        out.append(f'<div class="scroll"><table><tr>{cells}</tr>{trs}</table></div>')
+        table.clear()
+
+    for line in text.splitlines():
+        s = line.rstrip()
+        if not s.strip():
+            flush_para(); flush_list(); flush_table()
+            continue
+        m = re.match(r"^(#{1,3})\s+(.*)$", s)
+        if m:
+            flush_para(); flush_list(); flush_table()
+            level = len(m.group(1)) + 2
+            out.append(f"<h{level}>{_inline(m.group(2))}</h{level}>")
+            continue
+        if re.match(r"^-{3,}$", s.strip()):
+            flush_para(); flush_list(); flush_table()
+            out.append("<hr>")
+            continue
+        m = re.match(r"^\s*[-*]\s+(.*)$", s)
+        kind = "ul" if m else None
+        if not m:
+            m = re.match(r"^\s*\d+[.)]\s+(.*)$", s)
+            kind = "ol" if m else None
+        if m:
+            flush_para(); flush_table()
+            if lst != kind:
+                flush_list()
+                out.append(f"<{kind}>")
+                lst = kind
+            out.append(f"<li>{_inline(m.group(1))}</li>")
+            continue
+        if s.lstrip().startswith("|"):
+            flush_para(); flush_list()
+            table.append(s)
+            continue
+        flush_list(); flush_table()
+        para.append(s.strip())
+    flush_para(); flush_list(); flush_table()
+    return "".join(out)
+
+
+def review_sheets(hunt_path: Path, diag_rows: List[dict]) -> List[Tuple[Path, Optional[List[str]]]]:
+    """``(png, tickers)`` per review sheet in ``charts/``, in sheet order. ``tickers`` is
+    None when the sheet's contents cannot be established: no ``sheets.json`` and a sheet
+    count the default sheet size does not account for."""
+    charts = hunt_path / "charts"
+    index = charts / SHEETS_JSON
+    if index.exists():
+        named: Dict[str, List[str]] = json.loads(index.read_text(encoding="utf-8"))
+        return [(charts / name, tk) for name, tk in named.items() if (charts / name).exists()]
+    pngs = sorted(charts.glob("sheet_*.png"))
+    tickers = [r["ticker"] for r in diag_rows]
+    if len(pngs) != -(-len(tickers) // PER_FIG):
+        return [(p, None) for p in pngs]
+    return [(p, tickers[i * PER_FIG:(i + 1) * PER_FIG]) for i, p in enumerate(pngs)]
 
 
 def _vcls(v: str) -> str:
@@ -53,8 +168,27 @@ def _mini_table(rows: List[dict], verdicts: Dict[str, dict]) -> str:
     return f'<div class="scroll"><table>{head}{body}</table></div>'
 
 
-def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
-    diag_rows = list(csv.DictReader(open(hunt_path / "diagnostics.csv", encoding="utf-8")))
+@dataclass
+class HuntState:
+    diag_rows: List[dict]           # diagnostics.csv rows, numeric columns coerced
+    verdicts: Dict[str, dict]
+    meta: dict
+    n: Dict[str, int]               # verdict -> count
+    passing: List[dict]             # rows with verdict PASS
+    buckets: Dict[str, List[dict]]  # buy_zone / approaching / below / past_entry
+    blocked: List[dict]             # PASS, earnings inside the block window
+    confirmed: List[dict]           # PASS, volume-confirmed breakouts
+    audit: List[dict]               # pipeline.watchlist_audit cards
+    gated: List[str]                # buy-zone tickers clearing ``min_fund``
+
+
+def load_state(hunt_path: Path, min_fund: int = 0) -> HuntState:
+    """Read a hunt directory into the state every report format renders.
+
+    ``hunt_path`` MUST hold diagnostics.csv and meta.json; a missing verdicts.csv reads
+    as no verdicts. ``min_fund`` filters ``gated`` only."""
+    with open(hunt_path / "diagnostics.csv", encoding="utf-8") as f:
+        diag_rows = list(csv.DictReader(f))
     verdicts = pl.read_verdicts(hunt_path / "verdicts.csv")
     meta = json.loads((hunt_path / "meta.json").read_text(encoding="utf-8"))
 
@@ -75,18 +209,28 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
     import pandas as pd
     diag_df = pd.DataFrame(diag_rows)
 
-    # The buckets MUST come from pipeline.gates, so the HTML and the `gates` CLI agree.
-    # min_fund=0 because the report shows every PASS name; the fundamental gate applies
+    # The buckets MUST come from pipeline.gates, so every report and the `gates` CLI agree.
+    # min_fund=0 because a report shows every PASS name; the fundamental gate applies
     # only to the summary line.
     passing = [r for r in diag_rows if (verdicts.get(r["ticker"]) or {}).get("verdict") == "PASS"]
     g = pl.gates(diag_df, verdicts, min_fund=0)
     by_ticker = {r["ticker"]: r for r in diag_rows}
-    buckets = {k: [by_ticker[x["ticker"]] for x in g[k]]
-               for k in ("buy_zone", "approaching", "below", "past_entry")}
-    blocked = [by_ticker[x["ticker"]] for x in g["earnings_blocked"]]
-    confirmed = [by_ticker[x["ticker"]] for x in g["volume_confirmed"]]
+    return HuntState(
+        diag_rows=diag_rows, verdicts=verdicts, meta=meta, n=n, passing=passing,
+        buckets={k: [by_ticker[x["ticker"]] for x in g[k]]
+                 for k in ("buy_zone", "approaching", "below", "past_entry")},
+        blocked=[by_ticker[x["ticker"]] for x in g["earnings_blocked"]],
+        confirmed=[by_ticker[x["ticker"]] for x in g["volume_confirmed"]],
+        audit=pl.watchlist_audit(diag_df, verdicts),
+        gated=[x["ticker"] for x in pl.gates(diag_df, verdicts, min_fund=min_fund)["buy_zone"]],
+    )
 
-    audit = pl.watchlist_audit(diag_df, verdicts)
+
+def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
+    st = load_state(hunt_path, min_fund)
+    diag_rows, verdicts, meta, n = st.diag_rows, st.verdicts, st.meta, st.n
+    passing, buckets, blocked = st.passing, st.buckets, st.blocked
+    confirmed, audit, gated = st.confirmed, st.audit, st.gated
 
     # ---- fragments -------------------------------------------------------- #
     def chk(b): return ('<td class="n chk-y">&#10003;</td>' if b
@@ -147,9 +291,33 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
     groups_line = (" &middot; ".join(f"{_esc(k)} {v}" for k, v in _groups.most_common(6))
                    if _groups else "no industry labels in this scan")
 
+    narrative_path = hunt_path / NARRATIVE_MD
+    narrative = ""
+    if narrative_path.exists():
+        narrative = ('<h2>Reviewer&rsquo;s read</h2><div class="narr">'
+                     + md_to_html(narrative_path.read_text(encoding="utf-8")) + "</div>")
+
+    sheets = review_sheets(hunt_path, diag_rows)
+    sheet_blocks = []
+    for i, (png, tickers) in enumerate(sheets, start=1):
+        strip = "".join(
+            (lambda v:
+             f'<div class="sl"><span class="tk">{_esc(t)}</span>'
+             f'<span class="pill {_vcls(v)}">{_vlabel(v)}</span>'
+             f'<span class="wln">{_esc((verdicts.get(t) or {}).get("notes", ""))}</span></div>'
+             )((verdicts.get(t) or {}).get("verdict", "unreviewed"))
+            for t in (tickers or []))
+        sheet_blocks.append(
+            f'<div class="sheet"><div class="eyebrow">Sheet {i} of {len(sheets)}</div>'
+            f'<div class="strip">{strip}</div>'
+            f'<img src="charts/{_esc(png.name)}" alt="{_esc(png.stem)}" loading="lazy"></div>')
+    sheets_html = ""
+    if sheet_blocks:
+        sheets_html = (f'<h2 class="sheets-h">Review sheets <span class="cnt">&middot; '
+                       f'{len(sheets)}, scan order</span></h2>' + "".join(sheet_blocks))
+
     regime = meta.get("regime") or {}
     date_label = meta.get("scan_time", "")[:10]
-    gated = [x["ticker"] for x in pl.gates(diag_df, verdicts, min_fund=min_fund)["buy_zone"]]
 
     page = _TEMPLATE.format(
         date=_esc(date_label),
@@ -176,10 +344,31 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
         past_tbl=_mini_table(buckets["past_entry"], verdicts),
         ern_tr=ern_tr or '<tr><td colspan="3" class="dim">none inside the window</td></tr>',
         fund_tr=fund_tr, wl_cards=wl_cards, full_tr=full_tr, n_all=len(diag_rows),
+        narrative=narrative, sheets=sheets_html,
     )
     out = hunt_path / "report.html"
     out.write_text(page, encoding="utf-8")
     return out
+
+
+def mirror_report(hunt_path: Path, dest: Path) -> Path:
+    """Copy ``report.html`` and the sheets it shows from ``hunt_path`` into ``dest``.
+
+    ``dest/charts`` is replaced, so a sheet the report no longer shows does not linger.
+    Returns the copied page's path. Raises FileNotFoundError when the report is not built."""
+    page = hunt_path / "report.html"
+    if not page.exists():
+        raise FileNotFoundError(f"{page} not found — run `report` first.")
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(page, dest / "report.html")
+    charts = dest / "charts"
+    shutil.rmtree(charts, ignore_errors=True)
+    sheets = review_sheets(hunt_path, [])
+    if sheets:
+        charts.mkdir()
+        for png, _ in sheets:
+            shutil.copy2(png, charts / png.name)
+    return dest / "report.html"
 
 
 _TEMPLATE = """<title>Weekend Hunt &middot; {date}</title>
@@ -267,6 +456,44 @@ th.n {{ text-align:right; }}
 #q {{ font:inherit; font-size:.85rem; background:var(--panel); color:var(--ink);
   border:1px solid var(--line); border-radius:5px; padding:6px 10px; width:200px; }}
 .foot {{ margin-top:48px; font-size:.78rem; color:var(--mut); max-width:75ch; }}
+.narr {{ max-width:80ch; }}
+.narr h3 {{ font-family:"Archivo Narrow", "Arial Narrow", sans-serif; font-size:1.15rem; margin:22px 0 6px; }}
+.narr h4, .narr h5 {{ font-size:1rem; margin:18px 0 4px; }}
+.narr p, .narr li {{ margin:6px 0; }}
+.narr ul, .narr ol {{ padding-left:1.4em; }}
+.narr code {{ font-family:"IBM Plex Mono",monospace; font-size:.85em; }}
+.narr .scroll {{ margin:10px 0; }}
+.narr hr {{ border:0; border-top:1px solid var(--line); margin:18px 0; }}
+.sheet {{ margin-top:28px; }}
+.sheet .strip {{ margin:6px 0 10px; display:grid; gap:4px; }}
+.sheet .sl {{ display:flex; gap:10px; align-items:baseline; font-size:.86rem; }}
+.sheet .sl .wln {{ color:var(--mut); }}
+.sheet img {{ width:100%; height:auto; border:1px solid var(--line); border-radius:6px; background:#fff; }}
+@page {{ size:letter landscape; margin:.45in; }}
+@page sheet {{ size:letter portrait; }}
+@media print {{
+  /* Paper is light whatever the OS theme: the selectors MUST outrank the dark-mode ones. */
+  :root, :root:not([data-theme="light"]), :root[data-theme="dark"] {{
+    --bg:#FFFFFF; --panel:#FFFFFF; --ink:#182119; --mut:#5D6B61; --line:#D9DFD9;
+    --acc:#2E6E4E; --acc-ink:#FFFFFF;
+    --pass:#2E6E4E; --pass-bg:#E2EFE6; --cav:#A87A1C; --cav-bg:#F5ECD7;
+    --fail:#A63A30; --fail-bg:#F6E2DF; --oth:#5D6B61; --oth-bg:#E7EAE6;
+    --pos:#2E6E4E; --neg:#A63A30; --hover:#FFFFFF;
+  }}
+  body {{ font-size:12px; }}
+  .wrap {{ max-width:none; padding:0; }}
+  .scroll {{ overflow:visible; border:none; }}
+  .scroll[style] {{ max-height:none !important; overflow:visible !important; }}
+  table {{ font-size:.72rem; }}
+  th {{ position:static; }}
+  td, th {{ padding:4px 6px; }}
+  .controls {{ display:none; }}
+  h2 {{ break-after:avoid; margin-top:26px; }}
+  tr, .wlc, .sl {{ break-inside:avoid; }}
+  .sheets-h {{ break-before:page; }}
+  .sheet {{ page:sheet; break-before:page; margin-top:0; }}
+  .sheet img {{ border:none; }}
+}}
 </style>
 <div class="wrap">
   <div class="eyebrow">SEPA Cockpit &middot; Weekend Hunt</div>
@@ -283,6 +510,8 @@ th.n {{ text-align:right; }}
   </div>
   <div class="funnel">{n_scanned} scanned &rarr; {n_tmpl} passed 8/8 template &rarr; {n_tier_a} Tier&nbsp;A
   &rarr; <b>{n_elig} with RS&nbsp;&ge;&nbsp;{min_rs}</b> &rarr; <b>{n_pass} clean</b> after chart review</div>
+
+  {narrative}
 
   <h2>How to read this</h2>
   <p class="method">Verdicts are Step-3 chart judgments against the SEPA checklist. The mechanical rules applied
@@ -342,6 +571,8 @@ th.n {{ text-align:right; }}
     <th class="n">Depth&times;mkt</th><th>Base reads</th><th>Chart notes</th></tr>
   </thead><tbody>{full_tr}</tbody></table>
   </div>
+
+  {sheets}
 
   <p class="foot">Q = mechanical VCP quality &middot; RS = relative strength &middot; F = fundamental
   checks 0&ndash;8 &middot; vs piv = close relative to detected pivot &middot; ADV$M = 20-day average

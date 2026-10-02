@@ -198,6 +198,52 @@ def test_verdict_bookkeeping():
             ok("bad verdict rejected", True)
 
 
+def test_append_batch():
+    """`append-verdicts --file` is how an unattended review records a batch: its tool
+    allowlist cannot cover a free-form shell append. A rejected batch writes nothing, so
+    re-running one after a crash cannot double-count a ticker."""
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    with tempfile.TemporaryDirectory() as td:
+        p, batch = Path(td) / "verdicts.csv", Path(td) / "verdicts_batch_01.csv"
+
+        def rejected(text: str) -> bool:
+            batch.write_text(text, encoding="utf-8")
+            before = p.read_text(encoding="utf-8") if p.exists() else None
+            try:
+                pl.append_batch(p, batch, diag)
+                return False
+            except pl.HuntError:
+                return before == (p.read_text(encoding="utf-8") if p.exists() else None)
+
+        batch.write_text('ticker,verdict,notes\nAAA,PASS,"tight, quiet"\nBBB,PASS-,y\n',
+                         encoding="utf-8")
+        ok("batch appended", pl.append_batch(p, batch, diag) == 2)
+        ok("a quoted comma survives the round trip",
+           pl.read_verdicts(p)["AAA"]["notes"] == "tight, quiet")
+        ok("re-running a batch is rejected, nothing written",
+           rejected("ticker,verdict,notes\nAAA,PASS,again\nDDD,FAIL,z\n"))
+        ok("a non-candidate is rejected", rejected("ticker,verdict,notes\nCCC,PASS,x\n"))
+        ok("a ticker repeated in the batch is rejected",
+           rejected("ticker,verdict,notes\nDDD,PASS,x\nDDD,FAIL,y\n"))
+        ok("a bad verdict is rejected", rejected("ticker,verdict,notes\nDDD,BUY,x\n"))
+        ok("a batch without the header is rejected", rejected("DDD,PASS,x\n"))
+        ok("an empty batch is rejected", rejected(""))
+        ok("a missing batch file is rejected",
+           _raises(lambda: pl.append_batch(p, Path(td) / "absent.csv", diag)))
+        batch.write_text("ticker,verdict,notes\nDDD,FAIL,z\nEEE,FAIL,w\n", encoding="utf-8")
+        pl.append_batch(p, batch, diag)
+        ok("batches add up to a clean validation", pl.validate_verdicts(p, diag) == [])
+
+
+def _raises(fn) -> bool:
+    try:
+        fn()
+        return False
+    except pl.HuntError:
+        return True
+
+
 def test_report_builds():
     import json
     from src.stock_screener.hunt.report import build_report
@@ -231,10 +277,102 @@ def test_report_builds():
             ok(f"report contains {frag!r}", frag in html)
 
 
+def test_narrative_markdown():
+    """The reviewer's narrative.md is rendered by the report's own small Markdown
+    renderer: no dependency the Pi image lacks, and the text is escaped first, so a
+    verdict note cannot inject markup."""
+    from src.stock_screener.hunt.report import md_to_html
+    html = md_to_html("# Regime\n\nA **weak** *risk-on* tape with `MU` leading.\n\n"
+                      "- first\n- second\n\n1. one\n2) two\n\n"
+                      "| Ticker | F |\n|---|---|\n| MU | 6 |\n\n---\n\n"
+                      "<script>x</script> & done")
+    for frag in ("<h3>Regime</h3>", "<b>weak</b>", "<i>risk-on</i>", "<code>MU</code>",
+                 "<ul><li>first</li><li>second</li></ul>", "<ol><li>one</li><li>two</li></ol>",
+                 "<th>Ticker</th>", "<td>MU</td><td>6</td>", "<hr>",
+                 "&lt;script&gt;x&lt;/script&gt; &amp; done"):
+        ok(f"markdown renders {frag!r}", frag in html)
+    ok("a lone asterisk is not emphasis", "<i>" not in md_to_html("5 * 3 = 15"))
+    ok("empty narrative renders nothing", md_to_html("\n\n") == "")
+
+
+def test_report_mirror():
+    """report.html is the Friday run's deliverable: the narrative under "Reviewer's read",
+    the sheets under their verdicts, and a copy of the page with its sheets in the docs
+    folder. None of it needs matplotlib, so this runs on the deploy gate too."""
+    import json
+    from src.stock_screener.hunt import report as rp
+    b = _bundle()
+    # The report's watchlist audit MUST NOT depend on the watchlist on this machine's disk.
+    real_watchlist = pl._watchlist_tickers
+    pl._watchlist_tickers = lambda: ["AAA", "QQQ"]
+    try:
+        diag = pl.diagnostics(b, pl.candidates(b))
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "hunt"
+            d.mkdir()
+            diag.to_csv(d / "diagnostics.csv", index=False)
+            pl.append_verdicts(d / "verdicts.csv",
+                               [{"ticker": "AAA", "verdict": "PASS", "notes": "$2M ADV caps at $40k"},
+                                {"ticker": "BBB", "verdict": "PASS", "notes": "n"},
+                                {"ticker": "DDD", "verdict": "PASS-", "notes": "n"}])
+            (d / "meta.json").write_text(json.dumps(
+                {"scan_time": "2026-08-23 15:50", "regime": {"regime": "RISK-ON"},
+                 "n_scanned": 6, "n_passed_template": 6, "n_tier_a": 5, "n_eligible": 4,
+                 "min_rs": 70}))
+            st = rp.load_state(d, 0)
+            ok("the state's buckets come from pipeline.gates",
+               [r["ticker"] for r in st.buckets["buy_zone"]] == ["AAA"]
+               and [r["ticker"] for r in st.buckets["approaching"]] == ["BBB"])
+            html = rp.build_report(d).read_text(encoding="utf-8")
+            ok("no narrative, no sheets: neither section is rendered",
+               "Reviewer&rsquo;s read" not in html and 'class="sheet"' not in html)
+
+            charts = d / "charts"
+            charts.mkdir()
+            for name in ("sheet_001.png", "sheet_002.png"):
+                (charts / name).write_bytes(b"not a real PNG; only its name matters")
+            ok("no index, sheet count off the default size: sheets kept, tickers unknown",
+               [tk for _, tk in rp.review_sheets(d, st.diag_rows)] == [None, None])
+            (charts / "sheets.json").write_text(json.dumps(
+                {"sheet_001.png": ["AAA", "BBB", "DDD"], "sheet_002.png": ["EEE"],
+                 "sheet_003.png": ["GONE"]}))
+            ok("the index names each sheet's tickers; a sheet missing on disk is dropped",
+               [(p.name, tk) for p, tk in rp.review_sheets(d, st.diag_rows)]
+               == [("sheet_001.png", ["AAA", "BBB", "DDD"]), ("sheet_002.png", ["EEE"])])
+            (d / "narrative.md").write_text("# Read\n\nTwo **names** stand out.\n",
+                                            encoding="utf-8")
+            html = rp.build_report(d).read_text(encoding="utf-8")
+            ok("report embeds the narrative and the sheets",
+               "Reviewer&rsquo;s read" in html and "<b>names</b>" in html
+               and 'src="charts/sheet_001.png"' in html and "Sheet 2 of 2" in html
+               and html.count('class="sheet"') == 2)
+            ok("an unreviewed name on a sheet reads UNREVIEWED",
+               "UNREVIEWED" in html and "KeyError" not in html)
+
+            docs = Path(td) / "docs" / "2026-08-23"
+            (docs / "charts").mkdir(parents=True)
+            (docs / "charts" / "sheet_009.png").write_bytes(b"old")
+            page = rp.mirror_report(d, docs)
+            ok("the docs copy is the page plus the sheets it shows, and nothing stale",
+               page.read_text(encoding="utf-8") == html
+               and sorted(p.name for p in (docs / "charts").iterdir())
+               == ["sheet_001.png", "sheet_002.png"])
+            try:
+                rp.mirror_report(Path(td) / "nowhere", docs)
+                ok("mirroring an unbuilt report raises", False)
+            except FileNotFoundError:
+                ok("mirroring an unbuilt report raises", True)
+    finally:
+        pl._watchlist_tickers = real_watchlist
+
+
 if __name__ == "__main__":
     test_rs_floor_and_tier()
     test_bucket_boundaries()
     test_diagnostics_and_gates()
     test_verdict_bookkeeping()
+    test_append_batch()
     test_report_builds()
+    test_narrative_markdown()
+    test_report_mirror()
     print(f"\n{PASSED} hunt assertions passed.")

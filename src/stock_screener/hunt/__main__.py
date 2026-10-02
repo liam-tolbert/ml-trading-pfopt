@@ -3,13 +3,16 @@
     python -m src.stock_screener.hunt status
     python -m src.stock_screener.hunt candidates [--min-rs 70] [--date YYYY-MM-DD]
     python -m src.stock_screener.hunt charts [--limit N] [--per-fig 4] [--date ...]
+    python -m src.stock_screener.hunt append-verdicts --file BATCH.csv [--date ...]
     python -m src.stock_screener.hunt validate-verdicts [--date ...]
     python -m src.stock_screener.hunt gates [--min-fund 0] [--date ...]
     python -m src.stock_screener.hunt report [--min-fund 0] [--date ...]
 
-Run from the repo root inside the ml-trading env (mamba run -n ml-trading ...).
+Run from the repo root inside the ml-trading env; scripts/hunt/hunt.sh does both.
 State lands in data/cockpit/hunt/<date>/ — diagnostics.csv, meta.json,
-charts/sheet_NNN.png, verdicts.csv (written by the reviewer), report.html.
+charts/sheet_NNN.png, verdicts.csv and narrative.md (written by the reviewer),
+report.html. `report` also mirrors report.html and the sheets to docs/hunt/<date>/,
+the deliverable.
 """
 from __future__ import annotations
 
@@ -68,6 +71,15 @@ def cmd_charts(args) -> int:
     return 0
 
 
+def cmd_append(args) -> int:
+    d, diag = _load_state(args)
+    n = pl.append_batch(d / "verdicts.csv", Path(args.file), diag)
+    have = pl.read_verdicts(d / "verdicts.csv")
+    print(json.dumps({"appended": n, "verdicts": len(have),
+                      "remaining": len(set(diag["ticker"]) - set(have))}, indent=2))
+    return 0
+
+
 def cmd_validate(args) -> int:
     d, diag = _load_state(args)
     problems = pl.validate_verdicts(d / "verdicts.csv", diag)
@@ -88,10 +100,11 @@ def cmd_gates(args) -> int:
 
 
 def cmd_report(args) -> int:
-    from src.stock_screener.hunt.report import build_report
+    from src.stock_screener.hunt.report import DOCS_DIR, build_report, mirror_report
     d, _ = _load_state(args)
     out = build_report(d, min_fund=args.min_fund)
-    print(json.dumps({"report": str(out)}, indent=2))
+    docs = mirror_report(d, DOCS_DIR / d.name)
+    print(json.dumps({"report": str(out), "docs": str(docs)}, indent=2))
     return 0
 
 
@@ -109,6 +122,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("charts"); common(p)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--per-fig", type=int, default=4)
+    p = sub.add_parser("append-verdicts"); common(p)
+    p.add_argument("--file", required=True, help="CSV with the header ticker,verdict,notes")
     p = sub.add_parser("validate-verdicts"); common(p)
     p = sub.add_parser("gates"); common(p)
     p.add_argument("--min-fund", type=int, default=0)
@@ -118,8 +133,8 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         return {"status": cmd_status, "candidates": cmd_candidates, "charts": cmd_charts,
-                "validate-verdicts": cmd_validate, "gates": cmd_gates,
-                "report": cmd_report}[args.cmd](args)
+                "append-verdicts": cmd_append, "validate-verdicts": cmd_validate,
+                "gates": cmd_gates, "report": cmd_report}[args.cmd](args)
     except pl.HuntError as e:
         print(f"hunt: {e}", file=sys.stderr)
         return 2

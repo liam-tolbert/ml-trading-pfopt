@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(weekend-hunt)",
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(bash scripts/hunt/hunt.sh:*)",
+      "Edit(data/cockpit/hunt/**)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(**/.env)",
+      "Read(~/.ssh/**)",
+      "Edit(data/cockpit/hunt/logs/**)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}

@@ -304,6 +304,30 @@ def append_verdicts(path: Path, rows: List[dict]) -> int:
     return len(rows)
 
 
+def append_batch(path: Path, batch: Path, diag: pd.DataFrame) -> int:
+    """Append the ``ticker,verdict,notes`` CSV at ``batch`` to the verdict CSV at ``path``.
+
+    Raises HuntError, before writing anything, when the batch is missing or lacks that
+    header, repeats a ticker, names a non-candidate, names a ticker ``path`` already
+    holds, or carries a bad verdict. Returns the number of rows appended."""
+    if not batch.exists():
+        raise HuntError(f"{batch} not found.")
+    with open(batch, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames != ["ticker", "verdict", "notes"]:
+            raise HuntError(f"{batch} must start with the header `ticker,verdict,notes`.")
+        rows = list(reader)
+    tickers = [r["ticker"] for r in rows]
+    have, expected = set(read_verdicts(path)), set(diag["ticker"])
+    problems = ([f"{t}: repeated in the batch" for t in sorted({t for t in tickers
+                                                                if tickers.count(t) > 1})]
+                + [f"{t}: not a candidate" for t in sorted(set(tickers) - expected)]
+                + [f"{t}: already has a verdict" for t in sorted(set(tickers) & have)])
+    if problems:
+        raise HuntError(f"{batch} rejected, nothing written — " + "; ".join(problems))
+    return append_verdicts(path, rows)
+
+
 def read_verdicts(path: Path) -> Dict[str, dict]:
     if not path.exists():
         return {}
