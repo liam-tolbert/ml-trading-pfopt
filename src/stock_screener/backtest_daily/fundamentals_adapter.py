@@ -19,8 +19,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-# Columns expected on the per-name quarterly frame (Compustat fundq names kept
-# generic so the WRDS adapter and the synthetic provider share this code).
+# Columns expected on the per-name quarterly frame (Compustat fundq names).
 REQUIRED_COLS = ("datadate", "rdq", "revtq", "eps", "invtq")
 
 

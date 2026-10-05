@@ -26,11 +26,9 @@
 
 # --- test-gate closure: the cockpit suites build their offline price fixture from
 #     backtest_daily.synthetic_provider. Its FULL closure is these four files
-#     (synthetic_provider -> providers -> fundamentals_adapter; numpy/pandas only).
-#     Listed one by one, NOT as a glob: the package __init__ re-exports nothing so
-#     this import cannot reach engine -> metrics -> momentum_lib +
-#     ml_stock_prediction.backtest_lib, and a glob would silently re-admit two parked
-#     research tracks to the runtime image the moment that changed. ---
+#     (synthetic_provider -> providers -> fundamentals_adapter; numpy/pandas only),
+#     which are all that is left of the package. Listed one by one, NOT as a glob: a
+#     module added there later MUST NOT reach the runtime image by default. ---
 !src/stock_screener/backtest_daily/__init__.py
 !src/stock_screener/backtest_daily/providers.py
 !src/stock_screener/backtest_daily/fundamentals_adapter.py

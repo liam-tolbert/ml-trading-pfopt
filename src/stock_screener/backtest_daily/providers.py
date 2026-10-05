@@ -1,12 +1,10 @@
 """Data-provider contracts + simple in-memory implementations.
 
-The engine talks ONLY to these interfaces, so it never imports WRDS. Everything is
-keyed on a stable integer id (``permno``), never a ticker — tickers change and get
-recycled, which is exactly the survivorship trap we are trying to avoid.
+Everything is keyed on a stable integer id (``permno``), never a ticker — tickers
+change and get recycled, which is exactly the survivorship trap to avoid.
 
-Concrete in-memory implementations (``InMemoryPriceProvider`` etc.) are used by the
-synthetic provider and by tests; the live ``WrdsProvider`` (stub) lives in
-``wrds_provider.py``.
+The in-memory implementations (``InMemoryPriceProvider`` etc.) back the synthetic
+provider, which is the only consumer.
 """
 from __future__ import annotations
 

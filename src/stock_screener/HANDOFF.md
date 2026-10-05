@@ -21,8 +21,10 @@ deliberately for **execution practice**, judged on execution, not P&L.
 hands. So the tool does the mechanical filtering and hands the user charts to judge. **The user is
 the judge.**
 
-Two halves under `src/stock_screener/`: `minervini_screener/` (vendored third-party *rules*),
-`backtest_daily/` (event-driven daily *simulator*). The cockpit (`cockpit/`) is a third, live track.
+Under `src/stock_screener/`: `minervini_screener/` (vendored third-party *rules*) and the live
+track, `cockpit/`. The daily backtest simulator was removed on 2026-10-05 (§6.102, user decision);
+`backtest_daily/` now holds only the synthetic data the cockpit tests use. The research record
+stands in `HANDOFF_HISTORY.md` §1, and the simulator is parked on branch `park/backtest-daily`.
 
 ---
 
@@ -52,20 +54,21 @@ predicts which names delist.
 
 ## 4. Rules — never do these
 
-**Research:**
+**Research** (the backtest simulator is gone, §6.102; these bind any future test of the method):
 - Don't conflate the momentum Phase-0 STOP with the real screener.
 - Don't backtest it as market-neutral L/S or a periodic top-N rebalance — it's long-only,
   position-based, with stops and a cash state.
 - Don't run it on top-250 large-caps. Minervini lives in small/mid-cap growth.
 - Don't trust long-only breakout numbers on survivorship-biased data — buying breakouts to new highs
   is the *most* survivorship-sensitive signal there is.
-- Don't let the vendored package pull the live layer into the harness path.
 - Don't edit vendored business logic; keep `LICENSE`/`PROVENANCE.md` accurate.
-- Don't break the leak contract — every rule call through `cache.ohlcv_upto(t)`, fundamentals lagged
-  to `rdq`, delisting realized only on its date. `test_engine_decisions_leak_free` is the guard.
-- Don't re-tune `confirm_days` (or any risk knob) chasing alpha — the binding constraint is the
-  signal, and the train optimum is unstable (15 on 2003–13 vs 25 full-history).
-- Don't cite the in-sample 11.1% / t=2.49. The validated number is 7.95% / t=0.47.
+- Don't test with a leak — every rule call sees only data up to the decision date, fundamentals
+  lagged to `rdq`, a delisting realized only on its date.
+- Don't tune a risk knob chasing alpha — the binding constraint is the signal, and the train
+  optimum was unstable (15 on 2003–13 vs 25 full-history).
+- Don't cite the in-sample 11.1% / t=2.49. The validated number is 7.95% / t=0.47, and it is a
+  verdict on the vendored mechanical scorer (Trend Template as the hard gate; VCP and
+  fundamentals only as score inputs), not on the cockpit's current rules or on chart judgment.
 
 **Live trading — each learned at real P&L:**
 - **Don't batch-enter.** Six positions in four minutes (2026-07-27) = one bet on that day's tape.
@@ -566,10 +569,9 @@ source comments live. A new entry goes there, numbered after the last one.
 ## Files (this venture)
 
 - **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package: the live-only modules (`data/`, `notifications/`, `analysis/`, batch processors, `quant_engine.py`, `screener.py`) were deleted 2026-09-02.
-- **Harness:** `backtest_daily/` — config, providers (synthetic + WRDS), cache_io, indicators_cache, signals, regime, sizing, portfolio, metrics, engine, `run_backtest.py --wrds`.
+- **Test fixture:** `backtest_daily/` — `providers.py`, `fundamentals_adapter.py`, `synthetic_provider.py`: the seeded synthetic market `tests/cockpit/_common.py` builds its prices from. The backtest simulator that lived here was removed (§6.102).
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
 - **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts. `scripts/hunt/` (repo root) holds the env wrapper `hunt.sh` and the Friday task (§8).
 - **Method:** `SEPA_METHODOLOGY.md` — the books' rules for sessions, with a rule-to-code map (§9 of that file) and the deviations; `minervini_sepa_system.md` is the user-facing guide the app renders. A rule change updates both, plus the ledger in `HANDOFF_HISTORY.md`.
 - **History:** `HANDOFF_HISTORY.md` — the research record (§1, §3, §5), the change ledger (§11) and parked ideas.
-- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_backtest_daily.py` · `tests/test_wrds_provider.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suites run in neither CI nor `deploy.sh`.
-- **WRDS pull:** `ingest_wrds.py` → `data/wrds/*.parquet` (gitignored). Backtest outputs saved as `data/wrds/_bt_*.csv` — start the delisting work from these.
+- **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suite runs in neither CI nor `deploy.sh`.

@@ -1,4 +1,4 @@
-"""Deterministic synthetic data so the harness RUNS and is testable today.
+"""Deterministic synthetic data: the cockpit suites' offline price fixture.
 
 Generates a market (SPY with bull then bear blocks) and a cast of PERMNO-keyed
 names with scripted life-cycles — "winners" (base -> Stage-2 uptrend that passes the

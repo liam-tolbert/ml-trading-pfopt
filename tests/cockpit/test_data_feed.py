@@ -36,16 +36,15 @@ def test_data_feed_isolated_from_vendored_data_layer():
 def test_synthetic_fixture_isolated_from_engine_chain():
     """A fresh interpreter importing backtest_daily.synthetic_provider — the cockpit
     suites' offline price fixture, and therefore part of the runtime image — must NOT
-    pull the backtest engine. ``metrics.py`` imports ``momentum_lib`` and
-    ``ml_stock_prediction.backtest_lib``, two parked research tracks; while the package
-    __init__ re-exported the engine, importing the fixture dragged both into the Pi's
-    image to satisfy one test helper. This subprocess keeps the whitelist honest."""
+    pull a parked research track. While the package __init__ re-exported the backtest
+    engine, importing the fixture dragged ``momentum_lib`` and
+    ``ml_stock_prediction.backtest_lib`` into the Pi's image to satisfy one test helper.
+    The engine itself was removed in §6.102; this subprocess keeps the whitelist honest
+    for whatever the fixture imports next."""
     code = (
         "import sys\n"
         "import src.stock_screener.backtest_daily.synthetic_provider\n"
-        "bad = [m for m in ('src.stock_screener.backtest_daily.engine',\n"
-        "                   'src.stock_screener.backtest_daily.metrics',\n"
-        "                   'src.stock_screener.momentum_lib',\n"
+        "bad = [m for m in ('src.stock_screener.momentum_lib',\n"
         "                   'src.ml_stock_prediction.backtest_lib')\n"
         "       if m in sys.modules]\n"
         "assert not bad, bad\n"
