@@ -147,6 +147,29 @@ highlights; it filters nothing unless you raise the "min fundamental checks" sli
 
 ---
 
+## The Catalyst — know why before you buy
+
+The books count the catalyst as its own element of SEPA, between the fundamentals and the
+entry. Nearly every big winner had a reason institutions wanted it:
+
+- a new product or service that is selling
+- an approval, a contract or a new market
+- new management, or a change in the industry that favours the company
+- sometimes only an earnings report that changes what the market expects
+
+**The cockpit does not read this.** The F score catches a catalyst's traces in the numbers
+(acceleration, raised estimates, a report the stock held), not the reason behind them. So
+this step is yours: before an entry, write one sentence in the journal note answering
+*why would institutions want this stock now?*
+
+- "I don't know" is an allowed answer. Write it down; it is information.
+- A catalyst is a label, not a gate. It never rescues a chart that failed Step 3 or a
+  stock that failed a Step-2 check.
+- Every losing stock has a story too. Name a dated source for yours (a report, a filing,
+  an announcement), so it can be checked later against how the trade went.
+
+---
+
 ## Step 3 — Chart Review: VCP Quality
 
 The VCP (Volatility Contraction Pattern) is Minervini's primary entry setup.
@@ -342,6 +365,9 @@ experience.
 - [ ] Upward estimate revisions
 - [ ] Annual EPS up year-over-year
 - [ ] Institutional ownership growing
+
+### The catalyst (by hand)
+- [ ] One sentence on why institutions want it now, with a dated source — or "I don't know"
 
 ### Step 3 — VCP Chart Quality
 - [ ] 2–6 contractions, each tighter

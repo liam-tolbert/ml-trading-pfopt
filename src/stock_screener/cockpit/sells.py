@@ -132,10 +132,9 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                       "streak": stk.get("streak")}
         frac = doctrine.MARKET_TURN_REDUCE_FRACTION
         if turn["turn"]:
-            notes.append(f"MARKET: SPY closed in Stage 4 today — the backtest's one validated "
-                         f"exit. Reduce exposure (sell {frac:.0%} of each position; the "
-                         "backtest exited fully) and add nothing until SPY recovers for "
-                         f"{doctrine.REGIME_CONFIRM_DAYS} sessions.")
+            notes.append(f"MARKET: SPY closed in Stage 4 today. Reduce exposure (sell "
+                         f"{frac:.0%} of each position) and add nothing until SPY recovers "
+                         f"for {doctrine.REGIME_CONFIRM_DAYS} sessions.")
             if doctrine.MARKET_TURN_CAN_TRADE:
                 full = {o["symbol"] for o in orders}
                 for pos in positions:

@@ -799,9 +799,9 @@ with st.sidebar:
         if _stk is not None and not res.regime.get("spy_ok_satisfied"):
             _how = ("with breadth" if res.regime.get("spy_ok_breadth") else "SPY only")
             st.caption(f":orange[SPY has been in Stage 1–2 for only **{_stk}/"
-                       f"{REGIME_CONFIRM_DAYS}** sessions ({_how}) — the backtest waited "
-                       f"{REGIME_CONFIRM_DAYS} before adding again after a break (the one "
-                       "market-timing rule that held out of sample). Don't add yet.]")
+                       f"{REGIME_CONFIRM_DAYS}** sessions ({_how}) — the rule is to wait "
+                       f"{REGIME_CONFIRM_DAYS} before adding again after a break. "
+                       "Don't add yet.]")
         _mode_label = st.selectbox(
             "Size each buy by", ["% of portfolio", "$ per name", "# shares", "Risk % to stop"],
             key="trade_mode", on_change=_invalidate_trade_plan,

@@ -521,6 +521,12 @@ source comments live. A new entry goes there, numbered after the last one.
 - **The SEPA audit is frozen (§6.100).** No new feature is built from `SEPA_AUDIT.md` until the
   journal has about 20 more closed trades; then re-read it against the record. A change MUST
   come from a real trade that would have gone differently, or from a gap the journal shows.
+- **The catalyst is not built (§6.103).** It is the books' third element and the one the cockpit
+  has no read for. Planned by the user (2026-10-05): a news sentiment read on each PASS name from
+  the weekend hunt. Two things to settle before building. A sentiment score says how the news
+  reads, not why institutions want the stock, so decide which is being recorded. And the
+  unattended run has no web access by design (§8), so the read needs a source and a place to run.
+  It is a label with a dated source, never a gate (`SEPA_METHODOLOGY.md` §3).
 - **The pyramid add is parked** on branch `park/pyramid-add` (§6.99 lives there). Merge it when a
   real winner sits in a new buy zone; its ledger entry goes into `HANDOFF_HISTORY.md`.
 - **~95 orphan parquets** (~2.2 MB) for names that left the universe. **Do not prune by universe

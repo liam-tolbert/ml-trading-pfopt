@@ -231,9 +231,8 @@ try:
 except Exception:
     _mk = {}
 if _mk.get("turn"):
-    st.error("**Market turn:** SPY closed in Stage 4 on the last evening plan — the "
-             "backtest's one validated exit. Reduce exposure and add nothing until SPY "
-             "recovers (see the plan notes below).")
+    st.error("**Market turn:** SPY closed in Stage 4 on the last evening plan. Reduce "
+             "exposure and add nothing until SPY recovers (see the plan notes below).")
 elif _mk.get("spy_phase") == 4:
     st.warning("**SPY is in Stage 4** — stay defensive; no new buys.")
 _weak_tape = advisories.weak_market_advice(_regime, _spy, target_pct=0.25)

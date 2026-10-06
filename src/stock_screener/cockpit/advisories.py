@@ -325,9 +325,9 @@ def spy_confirm_streak(spy_df, max_days: Optional[int] = None,
                        phase2_by_date: Optional[dict] = None) -> Optional[dict]:
     """Consecutive settled sessions, newest first, with SPY in Stage 1 or 2.
 
-    This is the backtest's re-entry lag. With ``phase2_by_date`` (``{'YYYY-MM-DD':
-    phase2_pct}``) a session also needs breadth of at least ``BREADTH_MIN_PHASE2``, as the
-    backtest required; a session missing from the map counts on SPY alone and sets
+    This is the re-entry lag after a market break. With ``phase2_by_date``
+    (``{'YYYY-MM-DD': phase2_pct}``) a session also needs breadth of at least
+    ``BREADTH_MIN_PHASE2``; a session missing from the map counts on SPY alone and sets
     ``partial``. Without the map the count is SPY only. Counting stops at ``max_days``
     (default ``REGIME_CONFIRM_DAYS``): older bars can't change the answer. Returns
     ``{streak, satisfied, phase_now, breadth, partial}``; None under 200 bars."""

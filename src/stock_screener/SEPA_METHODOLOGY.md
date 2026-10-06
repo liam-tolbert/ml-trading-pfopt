@@ -51,6 +51,11 @@ SEPA (Specific Entry Point Analysis) is a funnel. Each step removes most of what
 4. **Entry and exit:** buy the pivot breakout on volume, cap the loss with a stop set
    before the trade, and sell by rules, into strength or on weakness.
 
+**The books count five elements, not four:** trend, fundamentals, **catalyst**, entry points
+and exit points. The four steps above are the cockpit's funnel, and its step numbers are used
+throughout the code and the hunt, so they stay. The catalyst has no step of its own here and
+no code (§3 "The catalyst", §9).
+
 Around the four steps sit two more disciplines: **the market** (trade with the general tape,
 never against it) and **keeping score** (let your own numbers set your stops and size).
 
@@ -91,8 +96,6 @@ declining. The books buy only in Stage 2.
 - **Depth against the market:** a base's decline is judged against the index's over the same
   weeks. Avoid names that fell more than about 2.5–3× as much as the market.
 - **Market breadth:** watch new 52-week highs against new lows, and whether the gap widens.
-- **Catalyst:** big winners usually have a reason institutions want them (a product, a
-  contract, a shift in the industry). Know what it is.
 
 ---
 
@@ -122,6 +125,23 @@ Red flags:
 
 The exception: the **power play** (§4) is the one setup the books buy without strong
 earnings.
+
+### The catalyst (the books' third element)
+
+The books hold that nearly every big winner has a reason institutions want it, and that the
+trader should know the reason before buying:
+- a new product or service that is selling;
+- an approval, a contract or a new market;
+- new management, or a change in the industry that favours the company;
+- sometimes only an earnings report that changes what the market expects.
+
+The numbers above are where a catalyst shows up after the fact (acceleration, raised
+estimates, a report the stock holds). The catalyst is the cause; the cockpit reads only
+those traces (§9).
+
+It is a story, and every losing stock has one too. A session asked for a stock's catalyst
+MUST cite a dated source for it and MAY answer "none found". A catalyst is a label on a
+candidate; it MUST NOT change a chart verdict or stand in for a failed check.
 
 ---
 
@@ -268,6 +288,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | NH/NL breadth | `breadth_store`, regime keys `new_highs`/`new_lows` | Advisory (§6.82) |
 | Step-2 score F (0–8) | `scan._step2_summary`: rev ≥ 20%, EPS ≥ 20%, EPS accel, margin ↑, Code 33, annual EPS ↑, estimates ↑ ≥ 5%, last report held | Never a default gate: thin free data would drop names for missing data (§7, §6.89) |
 | Earnings reaction | `advisories.earnings_reaction`, `EARNINGS_REACTION_PCT` (5%) | The books give no number (§6.87) |
+| Catalyst | none | Not built. F reads its traces in the numbers; the reason behind them is not read. A news read on the hunt's PASS names is planned (§6.103, §12) |
 | VCP detection | `cockpit/vcp.py` `detect_vcp`, tiers A/B/C | Looser tightening and 2-week bases on purpose, so it never misses a real base; benchmark-calibrated (§10) |
 | Books' halving, base length | `advisories.book_tightening` | Numbers only; no verdict (§6.94, §6.100) |
 | Volume dry-up | `advisories.volume_dryup` | Numbers only: doesn't separate good from bad on the benchmark (§6.91, §6.100) |

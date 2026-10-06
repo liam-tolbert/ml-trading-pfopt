@@ -2004,7 +2004,7 @@ def _stopped_return(r: float, path, x: float, avg_entry: float) -> float:
     """A closed trade's return with a stop ``x`` (fraction) below its average cost.
 
     The first bar whose low reaches the stop exits at ``min(open, stop)``: a gap fills at
-    the open, as in the backtest. The exit day counts only when the real exit went through
+    the open. The exit day counts only when the real exit went through
     the stop (``r < -x``). With no hit, the actual return, floored at ``-x``."""
     stop_r = -x
     last = len(path) - 1

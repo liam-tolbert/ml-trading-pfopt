@@ -317,8 +317,7 @@ def detect_breakout_prior_high(df: pd.DataFrame, cp: float, phase_info: Dict,
     the breakout_level: a real base pivot for ``_entry_levels`` instead of its
     52-week-high fallback. Precedence mirrors the vendored order (VCP > Base > Pivot >
     50-SMA/none) and the phase-1/2 gate is respected. Volume fields ride through from the
-    vendored result. The vendored file MUST stay untouched (PROVENANCE); the backtest's
-    signal_engine path deliberately keeps the vendored behavior."""
+    vendored result. The vendored file MUST stay untouched (PROVENANCE)."""
     res = detect_breakout(df, cp, phase_info, vcp)
     if res.get("is_breakout") and str(res.get("breakout_type") or "").startswith("VCP"):
         return res                                       # top precedence, unchanged
@@ -635,7 +634,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     sig = should_generate_signals(spy_analysis, breadth)
     p2_pct = float(breadth.get("phase_2_pct", 0.0) or 0.0)
     hist = breadth_history or []
-    # The backtest's re-entry lag. Today's breadth isn't in the history yet, so it is
+    # The re-entry lag. Today's breadth isn't in the history yet, so it is
     # added for the current session; with no history at all the count is SPY only.
     from .advisories import spy_confirm_streak
     try:
