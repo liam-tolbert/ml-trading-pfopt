@@ -119,7 +119,9 @@ the discipline.
 | `sells.py` / `entries.py` | P1–P4 sell planner; armed-entry plans |
 | `refresh_job.py` / `sell_job.py` / `entry_job.py` | the three headless CLIs the timers invoke |
 | `runlog.py` | dated run logs, 14-day retention |
-| `app.py` + `pages/` | Streamlit surfaces (scan, SEPA Guide, Positions, Journal) |
+| `app.py` + `pages/` | Streamlit surfaces (scan, SEPA Guide, Positions, Journal, Weekend Hunt) |
+| `panels.py` | the Step-2 panel and its helpers, shared by `app.py` and the pages (pages MUST NOT import `app.py`) |
+| `hunt_view.py` | the Weekend Hunt page's reads without Streamlit: hunt folders under `data/cockpit/hunt/`, the PASS click-through order, the catalyst reads, the hunt PC's API client, add-to-watchlist |
 
 **Key data semantics:**
 - **Frozen pivots.** Watchlist entries carry `judged_pivot` — the detected pivot drifts every scan, so
@@ -284,8 +286,19 @@ itself.
   touched it since.
 - **By hand:** `scripts/hunt/weekend_hunt.ps1 -NoSleep`. `register_task.ps1 -WakeTestInMinutes 5`
   proves the wake without spending a review; `-Unregister` removes the task.
+- **The push (§6.104):** a finished run copies its hunt folder to the Pi's
+  `data/cockpit/hunt/<date>/` (`push_result.sh`; folder renamed into place, so the app never
+  reads a half copy). The cockpit's **Weekend Hunt** page reads those folders: every PASS name
+  one at a time with the chart (latest scan, or the hunt's sheet), verdict, Step-2 panel, entry
+  numbers, the catalyst read, and Add to watchlist. A failed push is a failed run.
+- **The hunt API (§6.104):** `scripts/hunt/hunt_api.py`, run at logon by the task "SEPA Hunt
+  API" (`register_task.ps1 -Api`), lets the page's Start button launch `weekend_hunt.ps1
+  -NoSleep` and poll `/hunt/status`. Token in `HUNT_API_TOKEN` on both machines; the Pi's `.env`
+  also holds `HUNT_API_URL` (the PC's LAN address, port 8765; give the PC a DHCP reservation).
+  The Windows firewall rule MUST limit the port to the LAN. A PC that is asleep reads as
+  "unreachable" on the page; the Friday task does not need the API.
 - **Artifact:** the task cannot publish one (no Artifact tool outside a session). Ask a session
-  to publish a run; the skill's step 10 has the call (`report.html` plus its sheets). Printing
+  to publish a run; the skill's step 12 has the call (`report.html` plus its sheets). Printing
   an artifact from the claude.ai viewer cuts it off; print `report.html` from a browser instead.
 
 **App hung?** (a page spins forever and Refresh does nothing). Separate "the account is unreachable"
@@ -521,12 +534,9 @@ source comments live. A new entry goes there, numbered after the last one.
 - **The SEPA audit is frozen (§6.100).** No new feature is built from `SEPA_AUDIT.md` until the
   journal has about 20 more closed trades; then re-read it against the record. A change MUST
   come from a real trade that would have gone differently, or from a gap the journal shows.
-- **The catalyst is not built (§6.103).** It is the books' third element and the one the cockpit
-  has no read for. Planned by the user (2026-10-05): a news sentiment read on each PASS name from
-  the weekend hunt. Two things to settle before building. A sentiment score says how the news
-  reads, not why institutions want the stock, so decide which is being recorded. And the
-  unattended run has no web access by design (§8), so the read needs a source and a place to run.
-  It is a label with a dated source, never a gate (`SEPA_METHODOLOGY.md` §3).
+- **The catalyst read is unscored (§6.104).** Every PASS name now carries a category, a
+  sentiment and a summary from its headlines. Nothing yet says whether a named catalyst
+  predicts anything; like the verdicts, it is a frozen weekly label waiting for a scorecard.
 - **The pyramid add is parked** on branch `park/pyramid-add` (§6.99 lives there). Merge it when a
   real winner sits in a new buy zone; its ledger entry goes into `HANDOFF_HISTORY.md`.
 - **~95 orphan parquets** (~2.2 MB) for names that left the universe. **Do not prune by universe
@@ -577,7 +587,7 @@ source comments live. A new entry goes there, numbered after the last one.
 - **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package: the live-only modules (`data/`, `notifications/`, `analysis/`, batch processors, `quant_engine.py`, `screener.py`) were deleted 2026-09-02.
 - **Test fixture:** `backtest_daily/` — `providers.py`, `fundamentals_adapter.py`, `synthetic_provider.py`: the seeded synthetic market `tests/cockpit/_common.py` builds its prices from. The backtest simulator that lived here was removed (§6.102).
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
-- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline; the `/weekend-hunt` skill judges the charts. `scripts/hunt/` (repo root) holds the env wrapper `hunt.sh` and the Friday task (§8).
+- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`; `charts` and the CLI stay off the Pi); the `/weekend-hunt` skill judges the charts and the catalysts. `scripts/hunt/` (repo root) holds the env wrapper `hunt.sh`, the Friday task, the push and the hunt API (§8). The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
 - **Method:** `SEPA_METHODOLOGY.md` — the books' rules for sessions, with a rule-to-code map (§9 of that file) and the deviations; `minervini_sepa_system.md` is the user-facing guide the app renders. A rule change updates both, plus the ledger in `HANDOFF_HISTORY.md`.
 - **History:** `HANDOFF_HISTORY.md` — the research record (§1, §3, §5), the change ledger (§11) and parked ideas.
 - **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suite runs in neither CI nor `deploy.sh`.

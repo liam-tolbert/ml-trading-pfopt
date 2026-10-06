@@ -6,13 +6,14 @@
     python -m src.stock_screener.hunt append-verdicts --file BATCH.csv [--date ...]
     python -m src.stock_screener.hunt validate-verdicts [--date ...]
     python -m src.stock_screener.hunt gates [--min-fund 0] [--date ...]
+    python -m src.stock_screener.hunt news [--limit 12] [--date ...]
     python -m src.stock_screener.hunt report [--min-fund 0] [--date ...]
 
 Run from the repo root inside the ml-trading env; scripts/hunt/hunt.sh does both.
 State lands in data/cockpit/hunt/<date>/ — diagnostics.csv, meta.json,
-charts/sheet_NNN.png, verdicts.csv and narrative.md (written by the reviewer),
-report.html. `report` also mirrors report.html and the sheets to docs/hunt/<date>/,
-the deliverable.
+charts/sheet_NNN.png, news/<ticker>.json, verdicts.csv, narrative.md and
+catalyst.json (the last two written by the reviewer), report.html. `report` also
+mirrors report.html and the sheets to docs/hunt/<date>/, the deliverable.
 """
 from __future__ import annotations
 
@@ -99,6 +100,22 @@ def cmd_gates(args) -> int:
     return 0
 
 
+def cmd_news(args) -> int:
+    from src.stock_screener.hunt.news import fetch_news, write_news
+    d, diag = _load_state(args)
+    verdicts = pl.read_verdicts(d / "verdicts.csv")
+    tickers = [t for t in diag["ticker"] if (verdicts.get(t) or {}).get("verdict") == "PASS"]
+    if not tickers:
+        raise pl.HuntError("no PASS verdicts yet — review the sheets first.")
+    news = fetch_news(tickers, limit=args.limit)
+    paths = write_news(d, news)
+    print(json.dumps({"tickers": len(paths), "dir": str(d / "news"),
+                      "headlines": sum(len(n["headlines"]) for n in news.values()),
+                      "without_headlines": [t for t, n in news.items() if not n["headlines"]],
+                      "feed_errors": sum(len(n["errors"]) for n in news.values())}, indent=2))
+    return 0
+
+
 def cmd_report(args) -> int:
     from src.stock_screener.hunt.report import DOCS_DIR, build_report, mirror_report
     d, _ = _load_state(args)
@@ -127,6 +144,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("validate-verdicts"); common(p)
     p = sub.add_parser("gates"); common(p)
     p.add_argument("--min-fund", type=int, default=0)
+    p = sub.add_parser("news"); common(p)
+    p.add_argument("--limit", type=int, default=12, help="headlines kept per ticker")
     p = sub.add_parser("report"); common(p)
     p.add_argument("--min-fund", type=int, default=0)
 
@@ -134,7 +153,7 @@ def main(argv=None) -> int:
     try:
         return {"status": cmd_status, "candidates": cmd_candidates, "charts": cmd_charts,
                 "append-verdicts": cmd_append, "validate-verdicts": cmd_validate,
-                "gates": cmd_gates, "report": cmd_report}[args.cmd](args)
+                "gates": cmd_gates, "news": cmd_news, "report": cmd_report}[args.cmd](args)
     except pl.HuntError as e:
         print(f"hunt: {e}", file=sys.stderr)
         return 2

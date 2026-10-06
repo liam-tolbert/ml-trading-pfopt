@@ -19,30 +19,59 @@ Local time, HH:mm. Default 18:00: the Pi's EOD screen starts 16:20 ET and may ta
 Instead of the weekly task, register a one-off "SEPA Weekend Hunt (wake test)" that runs
 weekend_hunt.ps1 -WakeTest that many minutes from now. Put the PC to sleep and watch it wake.
 
+.PARAMETER Api
+Instead of the weekly task, register and start "SEPA Hunt API": at logon, runs
+scripts\hunt\hunt_api.ps1, which the Pi's cockpit calls to start a hunt. Needs the user
+environment variable HUNT_API_TOKEN and a firewall rule allowing TCP 8765 from the LAN.
+
 .PARAMETER Unregister
-Remove both tasks.
+Remove all three tasks.
 #>
 [CmdletBinding()]
 param(
     [System.DayOfWeek]$Day = 'Friday',
     [string]$At = '18:00',
     [int]$WakeTestInMinutes = 0,
+    [switch]$Api,
     [switch]$Unregister
 )
 
 $ErrorActionPreference = 'Stop'
 $TaskName     = 'SEPA Weekend Hunt'
 $WakeTestName = "$TaskName (wake test)"
+$ApiName      = 'SEPA Hunt API'
 $Repo         = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Script       = Join-Path $PSScriptRoot 'weekend_hunt.ps1'
+$ApiScript    = Join-Path $PSScriptRoot 'hunt_api.ps1'
 
 if ($Unregister) {
-    foreach ($name in $TaskName, $WakeTestName) {
+    foreach ($name in $TaskName, $WakeTestName, $ApiName) {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
             Write-Host "removed '$name'"
         }
     }
+    return
+}
+
+if ($Api) {
+    if (-not [Environment]::GetEnvironmentVariable('HUNT_API_TOKEN', 'User')) {
+        Write-Warning 'HUNT_API_TOKEN is not set as a user environment variable; the API will refuse to start until it is.'
+    }
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -WorkingDirectory $Repo `
+        -Argument "-NoProfile -WindowStyle Hidden -File `"$ApiScript`""
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+    $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+    # No time limit: it listens until logoff. Restarted if it dies; one instance only.
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $ApiName -Action $action -Trigger $trigger -Principal $principal `
+        -Settings $settings -Force `
+        -Description 'Hunt API: lets the Pi cockpit start a weekend hunt on this PC (scripts\hunt\hunt_api.py).' |
+        Out-Null
+    Start-ScheduledTask -TaskName $ApiName
+    Write-Host "registered and started '$ApiName' (at logon). Allow inbound TCP 8765 from the LAN in Windows Firewall."
     return
 }
 

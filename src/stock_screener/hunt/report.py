@@ -23,6 +23,7 @@ from . import pipeline as pl
 
 DOCS_DIR = Path(__file__).resolve().parents[3] / "docs" / "hunt"
 NARRATIVE_MD = "narrative.md"
+CATALYST_JSON = "catalyst.json"  # written by the reviewer from the hunt's news/ files
 SHEETS_JSON = "sheets.json"     # written by charts.render_sheets: sheet file -> tickers
 PER_FIG = 4                     # tickers per review sheet; charts.render_sheets reads it here
 
@@ -147,12 +148,44 @@ def _f(x, fmt="{:.2f}", dash="-"):
         return dash
 
 
-def _mini_table(rows: List[dict], verdicts: Dict[str, dict]) -> str:
+def _opt_float(v) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_catalysts(hunt_path: Path) -> Dict[str, dict]:
+    """The reviewer's catalyst reads from ``catalyst.json``: ``{ticker: {category,
+    sentiment, summary, sources, read_at}}``. A missing, unreadable or malformed file
+    reads as ``{}``; an entry that is not a dict is dropped. Never raises."""
+    try:
+        data = json.loads((hunt_path / CATALYST_JSON).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(t).upper(): v for t, v in data.items() if isinstance(v, dict)}
+
+
+def _catalyst_html(c: Optional[dict]) -> str:
+    """One line under a row's notes: category, sentiment and the summary."""
+    if not c:
+        return ""
+    head = " &middot; ".join(_esc(x) for x in (c.get("category"), c.get("sentiment")) if x)
+    body = _esc(c.get("summary") or "")
+    sep = " &mdash; " if head and body else ""
+    return f'<div class="cat"><b>{head}</b>{sep}{body}</div>' if head or body else ""
+
+
+def _mini_table(rows: List[dict], verdicts: Dict[str, dict],
+                catalysts: Optional[Dict[str, dict]] = None) -> str:
     tr = []
     for r in rows:
         star = ' <span class="wl" title="on watchlist">&#9733;</span>' if int(r.get("wl") or 0) else ""
         note = (verdicts.get(r["ticker"]) or {}).get("notes", "")
         vs = float(r["vs_pivot_pct"])
+        cat = _catalyst_html((catalysts or {}).get(r["ticker"]))
         tr.append(
             f'<tr><td class="tk">{_esc(r["ticker"])}{star}</td>'
             f'<td class="n">{_f(r["q"], "{:.0f}")}</td><td class="n">{r["rs"]}</td>'
@@ -160,7 +193,7 @@ def _mini_table(rows: List[dict], verdicts: Dict[str, dict]) -> str:
             f'<td class="n {"pos" if vs >= 0 else "neg"}">{vs:+.1f}%</td>'
             f'<td class="n">{_f(r["adv_musd"], "{:.1f}")}</td>'
             f'<td class="n">{_f(r["volume_ratio"], "{:.2f}")}&times;</td>'
-            f'<td class="note">{_esc(note)}</td></tr>')
+            f'<td class="note">{_esc(note)}{cat}</td></tr>')
     head = ('<tr><th>Ticker</th><th class="n">Q</th><th class="n">RS</th><th class="n">Close</th>'
             '<th class="n">Pivot</th><th class="n">vs piv</th><th class="n">ADV$M</th>'
             '<th class="n">Fri vol</th><th>Chart notes</th></tr>')
@@ -192,14 +225,20 @@ def load_state(hunt_path: Path, min_fund: int = 0) -> HuntState:
     verdicts = pl.read_verdicts(hunt_path / "verdicts.csv")
     meta = json.loads((hunt_path / "meta.json").read_text(encoding="utf-8"))
 
-    for r in diag_rows:                         # numeric round-trip from CSV
-        for k in ("q", "close", "pivot", "vs_pivot_pct", "adv_musd", "volume_ratio"):
+    # Numeric round-trip from CSV. An empty cell is a None the pipeline wrote (no ADV on a
+    # dead tape) and MUST read back as None. A hunt dir from before the eight-check columns
+    # existed MUST still load: the missing checks read as not passed.
+    for r in diag_rows:
+        for k in ("q", "close", "pivot", "vs_pivot_pct", "volume_ratio"):
             r[k] = float(r[k])
+        for k in ("adv_musd", "stop", "max_order_usd"):
+            r[k] = _opt_float(r.get(k))
         for k in ("rs", "fund", "wl", "dist_days", "breakout_today",
                   "f_rev", "f_eps", "f_accel", "f_margin"):
             r[k] = int(float(r[k]))
-        for k in ("f_max", "f_code33", "f_fy", "f_est", "f_react"):
-            r[k] = int(float(r[k]))
+        for k, default in (("f_max", 8), ("f_code33", 0), ("f_fy", 0), ("f_est", 0),
+                           ("f_react", 0)):
+            r[k] = int(float(r.get(k) or default))
 
     n = {"PASS": 0, "PASS-": 0, "FAIL": 0}
     for v in verdicts.values():
@@ -291,6 +330,7 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
     groups_line = (" &middot; ".join(f"{_esc(k)} {v}" for k, v in _groups.most_common(6))
                    if _groups else "no industry labels in this scan")
 
+    catalysts = load_catalysts(hunt_path)
     narrative_path = hunt_path / NARRATIVE_MD
     narrative = ""
     if narrative_path.exists():
@@ -338,10 +378,10 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
                    else "none &mdash; every cross so far is on below-average volume; "
                         "the intraday trigger job is the confirmation watch"),
         min_fund=min_fund, gated=", ".join(gated) or "none", groups_line=groups_line,
-        zone_tbl=_mini_table(buckets["buy_zone"], verdicts),
-        appr_tbl=_mini_table(buckets["approaching"], verdicts),
-        below_tbl=_mini_table(buckets["below"], verdicts),
-        past_tbl=_mini_table(buckets["past_entry"], verdicts),
+        zone_tbl=_mini_table(buckets["buy_zone"], verdicts, catalysts),
+        appr_tbl=_mini_table(buckets["approaching"], verdicts, catalysts),
+        below_tbl=_mini_table(buckets["below"], verdicts, catalysts),
+        past_tbl=_mini_table(buckets["past_entry"], verdicts, catalysts),
         ern_tr=ern_tr or '<tr><td colspan="3" class="dim">none inside the window</td></tr>',
         fund_tr=fund_tr, wl_cards=wl_cards, full_tr=full_tr, n_all=len(diag_rows),
         narrative=narrative, sheets=sheets_html,
@@ -435,6 +475,8 @@ th.n {{ text-align:right; }}
 .dim {{ color:var(--mut); }}
 .pos {{ color:var(--pos); }} .neg {{ color:var(--neg); }}
 .note {{ min-width:290px; }}
+.cat {{ color:var(--mut); font-size:.8rem; margin-top:4px; }}
+.cat b {{ color:var(--acc); font-weight:600; }}
 .pill {{ font-family:"IBM Plex Mono",monospace; font-size:.68rem; font-weight:600;
   border-radius:4px; padding:2px 7px; white-space:nowrap; }}
 .pill.p {{ color:var(--pass); background:var(--pass-bg); }}

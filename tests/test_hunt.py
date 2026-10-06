@@ -366,6 +366,137 @@ def test_report_mirror():
         pl._watchlist_tickers = real_watchlist
 
 
+def test_load_state_tolerates_gaps():
+    """A hunt dir is read on the Pi by the Weekend Hunt page, so the loader MUST accept
+    what earlier hunts wrote: an empty ``adv_musd`` cell (the pipeline's None for a dead
+    tape) and a diagnostics file from before the eight-check columns existed."""
+    import json
+    from src.stock_screener.hunt import report as rp
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    real_watchlist = pl._watchlist_tickers
+    pl._watchlist_tickers = lambda: []
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "meta.json").write_text(json.dumps({"scan_time": "2026-08-23 15:50",
+                                                     "regime": {}, "min_rs": 70}))
+            gappy = diag.copy()
+            gappy.loc[gappy.ticker == "AAA", "adv_musd"] = None
+            gappy.loc[gappy.ticker == "AAA", "max_order_usd"] = None
+            gappy.to_csv(d / "diagnostics.csv", index=False)
+            st = rp.load_state(d)
+            row = next(r for r in st.diag_rows if r["ticker"] == "AAA")
+            ok("an empty ADV cell reads as None", row["adv_musd"] is None
+               and row["max_order_usd"] is None)
+            old = diag.drop(columns=["f_max", "f_code33", "f_fy", "f_est", "f_react",
+                                     "stop", "max_order_usd"])
+            old.to_csv(d / "diagnostics.csv", index=False)
+            st = rp.load_state(d)
+            row = st.diag_rows[0]
+            ok("a pre-eight-check hunt loads with defaults",
+               row["f_max"] == 8 and row["f_code33"] == 0 and row["stop"] is None)
+            html = rp.build_report(d).read_text(encoding="utf-8")
+            ok("and still renders a report", "Weekend Hunt" in html)
+    finally:
+        pl._watchlist_tickers = real_watchlist
+
+
+_RSS_YAHOO = b"""<?xml version="1.0"?><rss version="2.0"><channel><title>Yahoo</title>
+<item><title>Acme wins a $2B contract</title><link>https://finance.yahoo.com/a1</link>
+<pubDate>Tue, 06 Oct 2026 12:30:04 +0000</pubDate>
+<description>&lt;p&gt;Acme &amp;amp; Co signed&lt;/p&gt; a multi-year deal.</description></item>
+<item><title>Acme (ACME) moves higher</title><link>https://finance.yahoo.com/a2</link>
+<pubDate>Mon, 05 Oct 2026 09:00:00 +0000</pubDate></item>
+</channel></rss>"""
+_RSS_GOOGLE = b"""<?xml version="1.0"?><rss version="2.0"><channel>
+<item><title>Acme wins a $2B contract - Reuters</title><link>https://news.google.com/g1</link>
+<pubDate>Tue, 06 Oct 2026 13:00:00 GMT</pubDate><source url="https://reuters.com">Reuters</source>
+<description>&lt;a href="x"&gt;Acme wins&lt;/a&gt;</description></item>
+<item><title>Why Acme could double - Motley Fool</title><link>https://news.google.com/g2</link>
+<pubDate>not a date</pubDate><source url="https://fool.com">Motley Fool</source></item>
+</channel></rss>"""
+
+
+def test_news_feeds():
+    """The catalyst read judges from ``news/<ticker>.json`` alone, so the fetcher MUST
+    yield a file per ticker whatever the feeds do: a failing feed is an error line, a
+    ticker with nothing stays an empty list, and duplicate titles across feeds collapse."""
+    import json
+    from src.stock_screener.hunt import news as nw
+    y = nw.parse_feed(_RSS_YAHOO, "Yahoo Finance")
+    ok("yahoo items parse with dates, links and clean summaries",
+       [h["title"] for h in y] == ["Acme wins a $2B contract", "Acme (ACME) moves higher"]
+       and y[0]["date"] == "2026-10-06" and y[0]["url"] == "https://finance.yahoo.com/a1"
+       and y[0]["summary"] == "Acme & Co signed a multi-year deal."
+       and y[0]["publisher"] == "Yahoo Finance")
+    g = nw.parse_feed(_RSS_GOOGLE, "Google News")
+    ok("google items take the publisher from <source> and drop the title suffix",
+       g[0]["title"] == "Acme wins a $2B contract" and g[0]["publisher"] == "Reuters"
+       and g[1]["date"] == "" and g[1]["publisher"] == "Motley Fool")
+    ok("a non-RSS document parses to nothing", nw.parse_feed(b"<html>no</html>", "x") == []
+       and nw.parse_feed(b"\x00garbage", "x") == [])
+
+    def fake_fetch(url):
+        if "ZZZ" in url:
+            raise RuntimeError("feed down")
+        return _RSS_GOOGLE if "google" in url else _RSS_YAHOO
+
+    news = nw.fetch_news(["ACME", "ZZZ"], limit=2, fetch=fake_fetch)
+    acme = news["ACME"]
+    ok("two feeds merge newest first, de-duplicated by title, capped at the limit",
+       [h["title"] for h in acme["headlines"]] == ["Acme wins a $2B contract",
+                                                   "Acme (ACME) moves higher"]
+       and acme["errors"] == [])
+    ok("a ticker whose feeds fail keeps an empty list and the errors, no exception",
+       news["ZZZ"]["headlines"] == [] and len(news["ZZZ"]["errors"]) == 2)
+    with tempfile.TemporaryDirectory() as td:
+        paths = nw.write_news(Path(td), news)
+        ok("one json per ticker under news/",
+           sorted(p.name for p in paths) == ["ACME.json", "ZZZ.json"]
+           and json.loads((Path(td) / "news" / "ACME.json").read_text(encoding="utf-8"))
+           ["headlines"][0]["title"] == "Acme wins a $2B contract")
+
+
+def test_report_catalyst_line():
+    """The catalyst read is a label beside a PASS name, never a gate: the report shows it
+    under the row's notes when ``catalyst.json`` has it and ignores a malformed file."""
+    import json
+    from src.stock_screener.hunt import report as rp
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    real_watchlist = pl._watchlist_tickers
+    pl._watchlist_tickers = lambda: []
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            diag.to_csv(d / "diagnostics.csv", index=False)
+            pl.append_verdicts(d / "verdicts.csv",
+                               [{"ticker": "AAA", "verdict": "PASS", "notes": "tight"}])
+            (d / "meta.json").write_text(json.dumps({"scan_time": "2026-08-23 15:50",
+                                                     "regime": {}, "min_rs": 70}))
+            (d / "catalyst.json").write_text(json.dumps({
+                "aaa": {"category": "contract", "sentiment": "positive",
+                        "summary": "A $2B award <reported> Monday.",
+                        "sources": [{"title": "t", "publisher": "Reuters",
+                                     "date": "2026-10-06", "url": "https://r/1"}]},
+                "BBB": "not a dict"}), encoding="utf-8")
+            cats = rp.load_catalysts(d)
+            ok("catalysts load keyed by upper-case ticker, non-dict entries dropped",
+               list(cats) == ["AAA"] and cats["AAA"]["category"] == "contract")
+            html = rp.build_report(d).read_text(encoding="utf-8")
+            ok("the buy-zone row carries the catalyst line, escaped",
+               "contract &middot; positive" in html and "&lt;reported&gt;" in html)
+            (d / "catalyst.json").write_text("{not json", encoding="utf-8")
+            ok("a malformed file reads as no catalysts and the report still builds",
+               rp.load_catalysts(d) == {}
+               and "contract &middot;" not in rp.build_report(d).read_text(encoding="utf-8"))
+            ok("a missing file reads as no catalysts",
+               rp.load_catalysts(Path(td) / "nowhere") == {})
+    finally:
+        pl._watchlist_tickers = real_watchlist
+
+
 if __name__ == "__main__":
     test_rs_floor_and_tier()
     test_bucket_boundaries()
@@ -375,4 +506,7 @@ if __name__ == "__main__":
     test_report_builds()
     test_narrative_markdown()
     test_report_mirror()
+    test_load_state_tolerates_gaps()
+    test_news_feeds()
+    test_report_catalyst_line()
     print(f"\n{PASSED} hunt assertions passed.")

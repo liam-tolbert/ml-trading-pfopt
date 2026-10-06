@@ -25,6 +25,7 @@ from tests.cockpit import (  # noqa: E402
     test_app,
     test_data_feed,
     test_entries,
+    test_hunt_page,
     test_journal,
     test_positions,
     test_runlog,
@@ -51,7 +52,8 @@ SUITES = (
     test_journal,
     test_runlog,
     test_advisories,
-    test_sectors)
+    test_sectors,
+    test_hunt_page)
 
 
 def _run_all() -> int:
