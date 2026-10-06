@@ -1,7 +1,8 @@
 """Weekend Hunt page: start a hunt on the hunt PC and review its picks one at a time.
 
 The hunt itself runs on the Windows PC (scripts/hunt/), which pushes each result folder
-to ``data/cockpit/hunt/<date>/`` on the Pi. This page reads those folders. For every
+to ``data/cockpit/hunt/<date>/`` on the Pi. Start leaves a request file the PC's poller
+picks up over ssh (``hunt_request``). This page reads those folders. For every
 PASS name, bucket by bucket, it shows the chart, the verdict, the Step-2 fundamentals,
 the entry numbers and the catalyst read, with an Add-to-watchlist button. Step 4 stays
 with the user: nothing here arms or submits an order.
@@ -62,19 +63,14 @@ def _go(delta: int, n: int) -> None:
 
 
 def _start_cb() -> None:
-    cfg = hunt_view.api_config()
-    if cfg is None:
-        return
     try:
-        info = hunt_view.start_hunt(cfg)
-        st.session_state["hunt_run"] = {"date": info.get("date"), "started": info.get("started")}
-        st.session_state["hunt_api_msg"] = ""
-    except hunt_view.HuntApiUnreachable:
-        st.session_state["hunt_api_msg"] = ("The hunt PC is unreachable — is it awake, "
-                                            "with the hunt API running?")
-    except hunt_view.HuntApiError as e:
-        st.session_state["hunt_api_msg"] = ("A hunt is already running on the PC."
-                                            if e.status == 409 else f"The hunt PC refused: {e}")
+        _, created = hunt_view.request_hunt()
+    except OSError as e:
+        st.session_state["hunt_msg"] = f"Could not write the request: {e}"
+        return
+    st.session_state["hunt_msg"] = ("Requested. The hunt PC picks it up within a minute "
+                                    "when it is awake; asleep, it runs it when it next wakes."
+                                    if created else "A request is already waiting for the PC.")
 
 
 def _wl_add_cb(pick: hunt_view.Pick, hunt_date: str) -> None:
@@ -98,47 +94,36 @@ with hcol:
     st.markdown("## 🔭 Weekend Hunt")
     st.caption("Every Tier-A base reviewed on the hunt PC; the PASS names below, one at a "
                "time. Step 4 — the entry — is yours.")
+progress = hunt_view.hunt_progress()
+_active = progress["state"] in ("requested", "claimed", "running")
 with scol:
-    cfg = hunt_view.api_config()
     st.button("▶ Start weekend hunt", key="hunt_start", on_click=_start_cb,
-              disabled=cfg is None or bool(st.session_state.get("hunt_run")),
-              width="stretch")
-    if cfg is None:
-        st.caption("Set HUNT_API_URL and HUNT_API_TOKEN in the Pi's .env to start a hunt "
-                   "from here.")
-    if st.session_state.get("hunt_api_msg"):
-        st.warning(st.session_state["hunt_api_msg"])
+              disabled=_active, width="stretch")
+    st.caption("The hunt PC checks for requests every 30 s while awake, and the Friday "
+               "18:00 hunt is requested by the Pi itself.")
+    if st.session_state.get("hunt_msg"):
+        st.info(st.session_state.pop("hunt_msg"))
 
-_iv = "10s" if st.session_state.get("hunt_run") else None
+_iv = "10s" if _active else None
 
 
 @st.fragment(run_every=_iv)
 def _hunt_status_line() -> None:
-    """While a run is in progress, poll the PC every 10 s; on its end, reload the page so
-    the pushed folder shows."""
-    run = st.session_state.get("hunt_run")
-    cfg = hunt_view.api_config()
-    if not run or cfg is None:
-        return
-    try:
-        s = hunt_view.hunt_status(cfg)
-    except hunt_view.HuntApiUnreachable:
-        st.info("Hunt started; the PC is not answering status right now. It will show here "
-                "when the result is pushed.")
-        return
-    except hunt_view.HuntApiError as e:
-        st.warning(f"Status check failed: {e}")
-        return
-    state = s.get("state")
-    if state == "running":
-        st.info(f"Hunt running on the PC since {run.get('started') or '?'} · "
-                f"{s.get('message') or 'reviewing'} …")
-    elif state in ("done", "error", "idle"):
-        st.session_state["hunt_run"] = None
+    """The request's progress, re-read every 10 s while one is pending. The first sight
+    of a finished run reloads the page so its folder shows."""
+    p = hunt_view.hunt_progress()
+    state = p["state"]
+    if state == "requested":
+        st.info(f"Waiting for the hunt PC to pick up the request made "
+                f"{p.get('requested_at') or '?'} (it must be awake).")
+    elif state in ("claimed", "running"):
+        st.info(f"Hunt running on the PC · {p.get('message') or 'starting'} …")
+    elif state in ("done", "error") and st.session_state.get("hunt_seen") != p.get("updated_at"):
+        st.session_state["hunt_seen"] = p.get("updated_at")
         if state == "done":
-            st.success("Hunt finished and pushed; loading it.")
-        elif state == "error":
-            st.error(f"The hunt failed on the PC: {s.get('message') or 'see its log'}")
+            st.success("The hunt finished and is on the Pi; loading it.")
+        else:
+            st.error(f"The hunt failed on the PC: {p.get('message') or 'see its log'}")
         _rerun_app()
 
 

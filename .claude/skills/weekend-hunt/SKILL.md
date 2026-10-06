@@ -107,10 +107,10 @@ bash scripts/hunt/hunt.sh <cmd>
 
 ## Unattended run
 
-The Friday scheduled task (`scripts/hunt/weekend_hunt.ps1`), or the cockpit's Start
-button through the hunt API, starts this skill with nobody at the keyboard. The task
-has already pulled the Pi's scan and checked it, and it pushes the finished folder to
-the Pi afterwards. When the prompt says the run is unattended:
+The hunt PC's poller (`scripts/hunt/hunt_poller.ps1`) starts this skill with nobody at
+the keyboard, on a request the Pi left: the cockpit's Start button, or the Pi's Friday
+timer. The task has already pulled the Pi's scan and checked it, and it pushes the
+finished folder to the Pi afterwards. When the prompt says the run is unattended:
 
 - Ask nothing. Use `--min-fund 0`.
 - Run steps 1–11 and skip step 12 (no Artifact tool here): the hunt folder,

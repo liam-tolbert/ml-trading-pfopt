@@ -2,12 +2,11 @@
 
 The page reads a hunt folder the hunt PC pushed, cycles the PASS names, and adds one to
 the watchlist. These tests build such a folder from tests/test_hunt.py's synthetic bundle.
-The hunt PC's API is never reached: the deploy gate runs with no network.
+Nothing reaches the hunt PC: a request is a file the PC's poller reads over ssh.
 """
 from __future__ import annotations
 
 import json
-import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -122,51 +121,36 @@ def test_inline_report_images():
         assert "<img" not in hunt_view.inline_report_images(gone, h.path, embed=True)
 
 
-def test_api_client_unreachable_and_headers():
-    """Every call carries a timeout and the bearer token; a PC that does not answer is
-    ``HuntApiUnreachable``, a refusal carries its status."""
-    import requests
-    assert hunt_view.api_config({}) is None
-    assert hunt_view.api_config({"HUNT_API_URL": "http://pc:1/"}) is None
-    cfg = hunt_view.api_config({"HUNT_API_URL": "http://pc:1/", "HUNT_API_TOKEN": "tok"})
-    assert cfg.url == "http://pc:1"
-    seen = {}
-
-    class _Resp:
-        status_code = 200
-        text = "{}"
-
-        def json(self):
-            return {"state": "running", "date": "2026-10-10"}
-
-    def fake_request(method, url, headers=None, timeout=None, **kw):
-        seen.update(method=method, url=url, headers=headers, timeout=timeout)
-        return _Resp()
-
-    with patch.object(hunt_view.requests, "request", side_effect=fake_request):
-        out = hunt_view.start_hunt(cfg)
-    assert out["state"] == "running"
-    assert seen["method"] == "POST" and seen["url"] == "http://pc:1/hunt/start"
-    assert seen["headers"]["Authorization"] == "Bearer tok" and seen["timeout"]
-    with patch.object(hunt_view.requests, "request", side_effect=requests.ConnectionError("x")):
-        try:
-            hunt_view.hunt_status(cfg)
-            assert False, "unreachable PC must raise"
-        except hunt_view.HuntApiUnreachable:
-            pass
-
-    class _Busy(_Resp):
-        status_code = 409
-
-        def json(self):
-            return {"message": "busy"}
-
-    with patch.object(hunt_view.requests, "request", return_value=_Busy()):
-        try:
-            hunt_view.start_hunt(cfg)
-            assert False, "a refusal must raise"
-        except hunt_view.HuntApiError as e:
-            assert e.status == 409 and "busy" in str(e)
+def test_request_and_progress():
+    """Start leaves a request file the PC's poller claims over ssh; the page's state comes
+    from that file and the PC's status.json, request first. Two presses are one hunt."""
+    from src.stock_screener.cockpit import hunt_request as hr
+    with _HuntDir() as h:
+        assert hunt_view.hunt_progress()["state"] == "idle"
+        rec, created = hunt_view.request_hunt()
+        assert created and rec["source"] == "cockpit" and rec["requested_at"]
+        assert json.loads(hr.request_path().read_text(encoding="utf-8"))["source"] == "cockpit"
+        rec2, created2 = hunt_view.request_hunt()
+        assert not created2 and rec2 == rec
+        assert hunt_view.hunt_progress()["state"] == "requested"
+        # The PC claims it (removes the file) and reports.
+        hr.request_path().unlink()
+        hr._write(hr.status_path(), {"state": "running", "date": "2026-10-10",
+                                     "message": "review attempt 1 of 2",
+                                     "requested_at": rec["requested_at"],
+                                     "updated_at": hr._now()})
+        p = hunt_view.hunt_progress()
+        assert p["state"] == "running" and p["message"] == "review attempt 1 of 2"
+        # A running status the PC stopped updating hours ago is a dead run.
+        hr._write(hr.status_path(), {"state": "running", "updated_at": "2020-01-01T00:00:00"})
+        assert hunt_view.hunt_progress()["state"] == "error"
+        hr.status_path().write_text("{not json", encoding="utf-8")
+        assert hunt_view.hunt_progress()["state"] == "idle"
+        # The Pi's Friday timer uses the CLI.
+        assert hr.main(["write", "--source", "schedule"]) == 0
+        assert hr.read_request()["source"] == "schedule"
+        assert hr.main(["show"]) == 0
+        assert not (h.root / "request.json.tmp").exists()
 
 
 def test_add_to_watchlist_writes_hunt_pivot():
@@ -284,47 +268,45 @@ def test_hunt_page_add_to_watchlist():
         assert at.session_state["watchlist"] if "watchlist" in at.session_state else True
 
 
-def test_hunt_page_start_unreachable_and_unconfigured():
+def test_hunt_page_start_writes_request():
+    """Start leaves the request and disables itself while one is waiting."""
+    from src.stock_screener.cockpit import hunt_request as hr
     with _HuntDir():
-        with patch.dict(os.environ, {"HUNT_API_URL": "http://pc:9", "HUNT_API_TOKEN": "t"}), \
-                patch.object(hunt_view, "start_hunt",
-                             side_effect=hunt_view.HuntApiUnreachable("down")):
-            at = _apptest()
-            if at is None:
-                return
-            at.run()
-            at.button(key="hunt_start").click().run()
-            assert not at.exception, at.exception
-            assert any("unreachable" in str(w.value) for w in at.warning), \
-                [str(w.value) for w in at.warning]
-            assert at.session_state["hunt_run"] is None if "hunt_run" in at.session_state else True
-        env = {k: v for k, v in os.environ.items() if not k.startswith("HUNT_API")}
-        with patch.dict(os.environ, env, clear=True):
-            at = _apptest()
-            at.run()
-            assert "Set HUNT_API_URL and HUNT_API_TOKEN" in _rendered_text(at)
+        at = _apptest()
+        if at is None:
+            return
+        at.run()
+        at.button(key="hunt_start").click().run()
+        assert not at.exception, at.exception
+        assert hr.read_request()["source"] == "cockpit"
+        assert any("Requested." in str(i.value) for i in at.info), [str(i.value) for i in at.info]
+        assert any("Waiting for the hunt PC" in str(i.value) for i in at.info)
+        assert at.button(key="hunt_start").disabled, "Start stays off while a request waits"
 
 
 def test_hunt_page_status_poll_done():
-    """A run in progress polls the PC; a ``done`` answer clears the run and reloads."""
+    """The status line follows the PC's status.json; the first sight of a finished run
+    reloads the page once, and a running one is shown with the PC's message."""
+    from src.stock_screener.cockpit import hunt_request as hr
     with _HuntDir():
-        with patch.dict(os.environ, {"HUNT_API_URL": "http://pc:9", "HUNT_API_TOKEN": "t"}), \
-                patch.object(hunt_view, "hunt_status", return_value={"state": "done"}):
-            at = _apptest()
-            if at is None:
-                return
-            at.session_state["hunt_run"] = {"date": "2026-10-10", "started": "18:00"}
-            at.run()
-            assert not at.exception, at.exception
-            assert at.session_state["hunt_run"] is None
-        with patch.dict(os.environ, {"HUNT_API_URL": "http://pc:9", "HUNT_API_TOKEN": "t"}), \
-                patch.object(hunt_view, "hunt_status",
-                             return_value={"state": "running", "message": "reviewing"}):
-            at = _apptest()
-            at.session_state["hunt_run"] = {"date": "2026-10-10", "started": "18:00"}
-            at.run()
-            assert any("Hunt running" in str(i.value) for i in at.info)
-            assert at.session_state["hunt_run"] is not None
+        hr._write(hr.status_path(), {"state": "done", "date": "2026-10-10",
+                                     "message": "the hunt is on the Pi",
+                                     "updated_at": "2026-10-10T18:20:00"})
+        at = _apptest()
+        if at is None:
+            return
+        at.run()
+        assert not at.exception, at.exception
+        assert at.session_state["hunt_seen"] == "2026-10-10T18:20:00"
+        assert not at.button(key="hunt_start").disabled
+        hr._write(hr.status_path(), {"state": "running", "date": "2026-10-10",
+                                     "message": "review attempt 1 of 2",
+                                     "updated_at": hr._now()})
+        at = _apptest()
+        at.run()
+        assert any("Hunt running on the PC" in str(i.value)
+                   and "review attempt 1 of 2" in str(i.value) for i in at.info)
+        assert at.button(key="hunt_start").disabled
 
 
 if __name__ == "__main__":

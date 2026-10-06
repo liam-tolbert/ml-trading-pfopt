@@ -102,16 +102,10 @@ Only the Alpaca paper keys are used (`ALPACA_API_KEY_MINERVINI` /
 `ALPACA_API_KEY_SECRET_MINERVINI`, plus the shared fallbacks) — but these are
 credentials on the DNS box; keep the file 600 and LAN-only.
 
-Two more keys let the cockpit's Weekend Hunt page start a hunt on the Windows PC
-(`scripts/hunt/hunt_api.py`, see HANDOFF §8). Without them the page still shows
-pushed hunts; only the Start button is disabled:
-
-```
-HUNT_API_URL=http://<pc-lan-ip>:8765
-HUNT_API_TOKEN=<the same value as the PC's HUNT_API_TOKEN user variable>
-```
-
-Then `docker compose up -d app` so the running app picks them up.
+The cockpit's Weekend Hunt page needs no keys: Start writes a request file under
+`data/cockpit/hunt/` that the Windows PC's poller reads over ssh (HANDOFF §8). The
+Friday request comes from the `cockpit-huntrequest` timer, installed with the other
+units by `sudo deploy/install-units.sh`.
 
 ## 4. Seed the state (strongly recommended)
 

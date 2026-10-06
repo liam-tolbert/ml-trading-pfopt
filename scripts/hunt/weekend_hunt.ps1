@@ -3,8 +3,8 @@
 Unattended weekend hunt: pull the Pi's scan, run the weekend-hunt skill headless, leave the report.
 
 .DESCRIPTION
-Entry point of the "SEPA Weekend Hunt" scheduled task (register_task.ps1) and of the hunt
-API (hunt_api.py). Runs on this Windows box only. The Pi is read for its scan and written
+Run by the hunt poller (hunt_poller.ps1) for every request the Pi leaves: the Friday
+timer's and the cockpit's Start button. Runs on this Windows box only. The Pi is read for its scan and written
 once per run: the finished hunt folder is pushed to its data\cockpit\hunt\<date>\, where
 the cockpit's Weekend Hunt page reads it.
 

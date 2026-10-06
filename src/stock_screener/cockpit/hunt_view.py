@@ -3,21 +3,19 @@
 A hunt result is a folder ``data/cockpit/hunt/<date>/`` the hunt PC pushes to the Pi
 (diagnostics.csv, verdicts.csv, meta.json, narrative.md, catalyst.json, report.html,
 charts/). This module finds those folders, orders the PASS names for the click-through,
-talks to the hunt PC's API, and adds a name to the watchlist.
+leaves a request for the hunt PC and reads its status (``hunt_request``), and adds a
+name to the watchlist.
 """
 from __future__ import annotations
 
 import base64
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-import requests
-
-from src.stock_screener.cockpit import cache
+from src.stock_screener.cockpit import cache, hunt_request
 from src.stock_screener.cockpit.export import (load_watchlist, make_entry, merge_frozen_pivots,
                                                 save_watchlist, watchlist_tickers)
 from src.stock_screener.hunt import pipeline as pl
@@ -182,58 +180,16 @@ def manual_links(ticker: str) -> List[Tuple[str, str]]:
     ]
 
 
-# ---- the hunt PC's API ------------------------------------------------------ #
-class HuntApiUnreachable(RuntimeError):
-    """The PC did not answer: asleep, off, or the API not running."""
+# ---- asking the hunt PC ----------------------------------------------------- #
+def request_hunt() -> Tuple[dict, bool]:
+    """Leave a request for the PC's poller; ``(request, created)``. Nothing connects to
+    the PC: it reads the file over ssh when it is awake."""
+    return hunt_request.write_request("cockpit")
 
 
-class HuntApiError(RuntimeError):
-    """The PC answered with an error; ``status`` is the HTTP code."""
-
-    def __init__(self, status: int, message: str):
-        super().__init__(message)
-        self.status = status
-
-
-@dataclass
-class ApiConfig:
-    url: str
-    token: str
-
-
-def api_config(env: Mapping[str, str] = os.environ) -> Optional[ApiConfig]:
-    """From ``HUNT_API_URL`` and ``HUNT_API_TOKEN``; None unless both are set."""
-    url, token = (env.get("HUNT_API_URL") or "").strip(), (env.get("HUNT_API_TOKEN") or "").strip()
-    return ApiConfig(url.rstrip("/"), token) if url and token else None
-
-
-def _call(method: str, cfg: ApiConfig, path: str, timeout: float) -> dict:
-    headers = {"Authorization": f"Bearer {cfg.token}"}
-    try:
-        r = requests.request(method, cfg.url + path, headers=headers, timeout=timeout)
-    except (requests.ConnectionError, requests.Timeout) as e:
-        raise HuntApiUnreachable(str(e)) from e
-    if r.status_code >= 400:
-        try:
-            msg = r.json().get("message") or r.text
-        except ValueError:
-            msg = r.text
-        raise HuntApiError(r.status_code, str(msg)[:200])
-    try:
-        return r.json()
-    except ValueError:
-        return {}
-
-
-def start_hunt(cfg: ApiConfig, timeout: float = 10.0) -> dict:
-    """``POST /hunt/start``: ``{state, date, started}``. 409 means one is running."""
-    return _call("POST", cfg, "/hunt/start", timeout)
-
-
-def hunt_status(cfg: ApiConfig, timeout: float = 5.0) -> dict:
-    """``GET /hunt/status``: ``{state: idle|running|done|error, date, started, finished,
-    message, pushed}``."""
-    return _call("GET", cfg, "/hunt/status", timeout)
+def hunt_progress() -> dict:
+    """``hunt_request.progress()``: the request and the PC's status, as one state."""
+    return hunt_request.progress()
 
 
 # ---- the watchlist ---------------------------------------------------------- #
