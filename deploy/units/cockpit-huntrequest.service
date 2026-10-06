@@ -1,0 +1,11 @@
+[Unit]
+Description=SEPA cockpit weekend-hunt request (asks the hunt PC for the Friday hunt)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=pi
+WorkingDirectory=/home/pi/ml-trading-pfopt
+ExecStart=/usr/bin/docker compose run --rm oneshot python -m src.stock_screener.cockpit.hunt_request write --source schedule
+TimeoutStartSec=120

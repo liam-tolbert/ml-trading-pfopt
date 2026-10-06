@@ -157,10 +157,14 @@ entry. Nearly every big winner had a reason institutions wanted it:
 - new management, or a change in the industry that favours the company
 - sometimes only an earnings report that changes what the market expects
 
-**The cockpit does not read this.** The F score catches a catalyst's traces in the numbers
-(acceleration, raised estimates, a report the stock held), not the reason behind them. So
-this step is yours: before an entry, write one sentence in the journal note answering
-*why would institutions want this stock now?*
+**The weekend hunt reads it for every PASS name.** The hunt fetches each name's recent
+headlines and the reviewer writes a catalyst read from them: a category (product,
+contract or approval, management, industry shift, earnings, or none found), how the
+headlines read (the sentiment, a separate fact), a short summary, and the headlines it
+relied on. The **Weekend Hunt** page shows it beside the verdict with links to look
+further (Yahoo Finance, SEC filings, Finviz, Google News). The F score catches only a
+catalyst's traces in the numbers. The judgment is still yours: before an entry, write one
+sentence in the journal note answering *why would institutions want this stock now?*
 
 - "I don't know" is an allowed answer. Write it down; it is information.
 - A catalyst is a label, not a gate. It never rescues a chart that failed Step 3 or a

@@ -32,8 +32,9 @@ from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import (  # noqa: E402
     load_watchlist, make_entry, merge_frozen_pivots, parse_ticker_list, save_watchlist,
     watchlist_list_csv, watchlist_ohlcv_csv, watchlist_tickers)
-from src.stock_screener.cockpit.scan import (filter_candidates, leading_groups,  # noqa: E402
-                                             step2_lines)
+from src.stock_screener.cockpit.panels import (  # noqa: E402 (shared with the pages)
+    earnings_flag as _earnings_flag, info_btn, render_step2_panel, step_badge)
+from src.stock_screener.cockpit.scan import filter_candidates, leading_groups  # noqa: E402
 from src.stock_screener.cockpit.trade import (  # noqa: E402
     STALE_PLAN_BARS, TradeUnavailable, build_buy_plan, cancel_pending_buys,
     fetch_account_summary, fetch_gate_inputs, fetch_held_shares, fill_floor, freshen_prices,
@@ -82,33 +83,6 @@ signal.*
   for 6 weeks, ideally 13. **200-day rising**: the books' best names show 4–5 months.
 - Tighten further in the sidebar: raise **min RS** or require a VCP.
 - Sort by `fund_score` / `rs`, then **click a row** to study the chart.
-"""
-
-INFO_STEP2 = """
-**Step 2 — Fundamentals (the fuel).** A great chart with weak earnings is a trap.
-Look for:
-- **EPS & revenue YoY ≥ ~20%** and **accelerating** (this quarter ≥ last),
-- **stable or expanding margins** (positive *margin trend*).
-- **Code 33**: EPS growth, sales growth *and* net margin all rising for three quarters
-  running, Minervini's favourite pattern in the numbers (from SEC filings).
-- **Annual EPS** higher than the year before, ideally three years running.
-- ⚠️ **EPS growth slowing two quarters running**, or **inventory growing faster than
-  sales**: the books' warning signs.
-- **How the stock took its last report.** A drop of 5% or more on heavy volume after
-  the release means big investors were selling the news: the books say stay away.
-- **Analyst estimates raised** ≥ 5% over 90 days, and **fund ownership** (how many
-  institutions hold it, and whether that count is rising). Fund *quality* still needs a
-  look by hand.
-
-`fund_score` (0–8) counts how many of eight checks pass: revenue ≥ 20%, EPS ≥ 20%,
-EPS accelerating, margin expanding, Code 33, annual EPS up, estimates raised ≥ 5%, and
-the last report *held* (no hard drop on heavy volume). A missing figure counts as a
-fail, so read the numbers, not just the score. yfinance often exposes only ~4
-quarters, so **YoY may read n/a** — QoQ is the fallback. Use this to rank the
-Step-1 list, not as a hard cutoff unless you set "min fundamental checks".
-
-The **next earnings date** shows here too — it's an *entry-timing* input
-(see Step 4): don't open a fresh position within ~2–3 weeks of a report.
 """
 
 INFO_STEP3 = """
@@ -301,35 +275,14 @@ INFO_COLUMNS = ("**What each table column means** (hover any header for the same
                     for group, cols in COL_GROUPS))
 
 
-def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
-    """A small clickable info popover (falls back to an expander on older Streamlit)."""
-    try:
-        with st.popover(label):
-            st.markdown(body)
-    except Exception:
-        with st.expander(label):
-            st.markdown(body)
-
-
 def _tag(text, color: str = "blue") -> str:
     """A colored-background inline chip via Streamlit markdown; None -> 'n/a'."""
     return f":{color}-background[{'n/a' if text is None else text}]"
 
 
-def _earnings_flag(days) -> str:
-    """'⚠︎ earnings in Nd' when a report is 0 to ``EARNINGS_SOON_DAYS`` days out, else ''."""
-    return (f"⚠︎ earnings in {int(days)}d"
-            if days is not None and 0 <= days <= EARNINGS_SOON_DAYS else "")
-
-
 def _regime_color(regime) -> str:
     """Strong/moderate Risk-On -> green, Risk-Off -> red, anything else -> orange."""
     return {"strong": "green", "off": "red"}.get(advisories.regime_tier(regime), "orange")
-
-
-def step_badge(step: str, title: str) -> str:
-    """A consistent blue step chip + title, e.g. ':blue-background[Step 3]  Judge the VCP'."""
-    return f":blue-background[{step}]  {title}"
 
 
 def filter_table(df, key_prefix: str = "flt"):
@@ -1343,6 +1296,10 @@ with st.sidebar:
 
     _trigger_report_panel()
 
+    st.markdown("---")
+    st.page_link("pages/4_Weekend_Hunt.py", label="🔭 Weekend hunt",
+                 help="Start a hunt on the hunt PC and review its picks one by one")
+
 # --------------------------------------------------------------------------- #
 # Regime banner
 # --------------------------------------------------------------------------- #
@@ -1455,65 +1412,7 @@ with colSide:
     if payload.get("sma200_rising_m") is not None:
         _s1.append(f"200-day rising {payload['sma200_rising_m']:.1f} mo")
     st.caption("Step 1 · " + " · ".join(_s1))
-    with st.container(border=True):
-        st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
-        info_btn(INFO_STEP2)
-        f = payload.get("fundamentals")
-        s2 = payload.get("step2", {})
-        if not f:
-            st.caption("No fundamental data available (yfinance).")
-        else:
-            def _p(v):                       # signed % (growth), or n/a
-                return "n/a" if v is None else f"{v:+.1f}%"
-
-            mt = f.get("margin_trend")
-            opm = f.get("operating_margin")
-            st.markdown(f"**Rev:** {_p(f.get('revenue_yoy'))} YoY · "
-                        f"{_p(f.get('revenue_qoq'))} QoQ")
-            st.markdown(f"**EPS:** {_p(f.get('eps_yoy'))} YoY · "
-                        f"{_p(f.get('eps_qoq'))} QoQ")
-            st.markdown(f"**Op margin:** {'n/a' if opm is None else f'{opm:.1f}%'} "
-                        f"(Δ {'n/a' if mt is None else f'{mt:+.1f}pp'})")
-            ne, ei = f.get("next_earnings"), payload.get("earnings_in")
-            if ne:
-                when = ("" if ei is None
-                        else f" ({-ei}d ago)" if ei < 0 else f" (in {ei}d)")
-                warn = " ⚠️" if _earnings_flag(ei) else ""
-                st.markdown(f"**Earnings:** {ne}{when}{warn}")
-            # From data_feed._edgar_backfill: yfinance lacks FY growth and 3-quarter
-            # acceleration.
-            _fy, _acc, _sp, _sd = (f.get("eps_fy_yoy"), f.get("eps_accel_3q"),
-                                   f.get("last_surprise_pct"), f.get("last_surprise_date"))
-            _extra = []
-            if _fy is not None:
-                _extra.append(f"**FY EPS:** {_fy:+.1f}%")
-            if _acc is not None:
-                _extra.append("3q accel ✅" if _acc else "3q accel —")
-            # An undated surprise comes from a cache that predates the age check and can
-            # be a year old, so it is not shown.
-            if _sp is not None and _sd:
-                _extra.append(f"surprise {_sp:+.1f}% ({_sd})")
-            if _extra:
-                st.markdown(" · ".join(_extra))
-            for _line in step2_lines(f):
-                st.markdown(_line)
-            _rx = advisories.earnings_reaction_text(payload.get("reaction"),
-                                                    f.get("last_report"),
-                                                    f.get("last_report_time"))
-            if _rx:
-                st.markdown(_rx)
-            checks = s2.get("checks", {})
-            st.markdown(" ".join(
-                f"{'✅' if checks.get(k) else '—'} {lbl}"
-                for k, lbl in [("revenue_growth", "Rev ≥20%"), ("eps_growth", "EPS ≥20%"),
-                               ("eps_accelerating", "EPS accel"),
-                               ("margin_expanding", "Margin ↑"), ("code33", "Code 33"),
-                               ("annual_eps_up", "Annual EPS ↑"),
-                               ("estimates_raised", "Estimates ↑"),
-                               ("report_held", "Report held")]
-                if k in checks))
-            # An older scan's summary holds four checks.
-            st.caption(f"Score {s2.get('score', 0)}/{len(checks) or 8}")
+    render_step2_panel(payload)
 
     # Step-3 controls; the chart renders in colChart.
     with st.container(border=True):

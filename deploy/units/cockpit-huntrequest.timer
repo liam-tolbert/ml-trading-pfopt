@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekend-hunt request, 17:58 ET Fridays (the PC wakes at 18:00 and polls for it)
+
+[Timer]
+OnCalendar=Fri *-*-* 17:58:00 America/New_York
+# A missed request is still worth making: the PC's poller runs it when both are up.
+Persistent=true
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

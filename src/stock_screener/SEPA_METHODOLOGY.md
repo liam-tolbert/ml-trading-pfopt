@@ -136,8 +136,9 @@ trader should know the reason before buying:
 - sometimes only an earnings report that changes what the market expects.
 
 The numbers above are where a catalyst shows up after the fact (acceleration, raised
-estimates, a report the stock holds). The catalyst is the cause; the cockpit reads only
-those traces (§9).
+estimates, a report the stock holds). The catalyst is the cause. The weekend hunt reads
+it for every PASS name from the headlines its `news` step fetched (§9): a category, how
+the headlines read (sentiment, a separate fact), a short summary and the sources cited.
 
 It is a story, and every losing stock has one too. A session asked for a stock's catalyst
 MUST cite a dated source for it and MAY answer "none found". A catalyst is a label on a
@@ -288,7 +289,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | NH/NL breadth | `breadth_store`, regime keys `new_highs`/`new_lows` | Advisory (§6.82) |
 | Step-2 score F (0–8) | `scan._step2_summary`: rev ≥ 20%, EPS ≥ 20%, EPS accel, margin ↑, Code 33, annual EPS ↑, estimates ↑ ≥ 5%, last report held | Never a default gate: thin free data would drop names for missing data (§7, §6.89) |
 | Earnings reaction | `advisories.earnings_reaction`, `EARNINGS_REACTION_PCT` (5%) | The books give no number (§6.87) |
-| Catalyst | none | Not built. F reads its traces in the numbers; the reason behind them is not read. A news read on the hunt's PASS names is planned (§6.103, §12) |
+| Catalyst | `hunt news` fetches each PASS name's headlines; the reviewer writes `catalyst.json` (category, sentiment, summary, cited sources); the Weekend Hunt page and the report show it | A label beside the verdict, never a gate (§6.103, §6.104) |
 | VCP detection | `cockpit/vcp.py` `detect_vcp`, tiers A/B/C | Looser tightening and 2-week bases on purpose, so it never misses a real base; benchmark-calibrated (§10) |
 | Books' halving, base length | `advisories.book_tightening` | Numbers only; no verdict (§6.94, §6.100) |
 | Volume dry-up | `advisories.volume_dryup` | Numbers only: doesn't separate good from bad on the benchmark (§6.91, §6.100) |

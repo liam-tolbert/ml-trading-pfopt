@@ -3,13 +3,16 @@
 Unattended weekend hunt: pull the Pi's scan, run the weekend-hunt skill headless, leave the report.
 
 .DESCRIPTION
-Entry point of the "SEPA Weekend Hunt" scheduled task (register_task.ps1). Runs on this
-Windows box only. The Pi is read, never written.
+Run by the hunt poller (hunt_poller.ps1) for every request the Pi leaves: the Friday
+timer's and the cockpit's Start button. Runs on this Windows box only. The Pi is read for its scan and written
+once per run: the finished hunt folder is pushed to its data\cockpit\hunt\<date>\, where
+the cockpit's Weekend Hunt page reads it.
 
-The deliverable is docs\hunt\<date>\report.html with its charts\ beside it. The working
-state stays in data\cockpit\hunt\<date>\: summary.md (the reviewer's closing message),
-and FAILED.txt when the run did not finish. Log: data\cockpit\hunt\logs\<date>.log.
-Exit code: 0 when the run left a current report, 1 otherwise.
+The deliverable is docs\hunt\<date>\report.html with its charts\ beside it, and the same
+hunt folder on the Pi. The working state stays in data\cockpit\hunt\<date>\: summary.md
+(the reviewer's closing message), and FAILED.txt when the run did not finish.
+Log: data\cockpit\hunt\logs\<date>.log.
+Exit code: 0 when the run left a current report and pushed it, 1 otherwise.
 
 .PARAMETER NoSleep
 Leave the PC awake afterwards, whatever woke it.
@@ -17,12 +20,15 @@ Leave the PC awake afterwards, whatever woke it.
 .PARAMETER SkipPull
 Hunt off the scan already in data\cockpit instead of copying the Pi's.
 
+.PARAMETER NoPush
+Leave the result on this PC; do not copy the hunt folder to the Pi.
+
 .PARAMETER WakeTest
 Skip the hunt. Hold the PC awake for three minutes, then apply the sleep rule. Proves the
 wake timer, the keep-awake and the return to sleep without spending a review.
 #>
 [CmdletBinding()]
-param([switch]$NoSleep, [switch]$SkipPull, [switch]$WakeTest)
+param([switch]$NoSleep, [switch]$SkipPull, [switch]$NoPush, [switch]$WakeTest)
 
 # Native stderr MUST NOT abort the run: Windows PowerShell 5.1 turns it into error records.
 $ErrorActionPreference = 'Continue'
@@ -182,6 +188,11 @@ function Invoke-Hunt {
         $body = ''
         if (Test-Path $Summary) { $body = Get-Content $Summary -Raw -Encoding UTF8 }
         Set-Content -Path $Summary -Value "$note`r`n`r`n$body" -Encoding UTF8
+    }
+    if (-not $NoPush) {
+        if ((Invoke-Bash "bash '$RepoFwd/scripts/hunt/push_result.sh' $Date").Code -ne 0) {
+            throw 'pushing the result to the Pi failed.'
+        }
     }
     Write-Log "done: $Report"
 }

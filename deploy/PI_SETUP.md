@@ -102,6 +102,11 @@ Only the Alpaca paper keys are used (`ALPACA_API_KEY_MINERVINI` /
 `ALPACA_API_KEY_SECRET_MINERVINI`, plus the shared fallbacks) — but these are
 credentials on the DNS box; keep the file 600 and LAN-only.
 
+The cockpit's Weekend Hunt page needs no keys: Start writes a request file under
+`data/cockpit/hunt/` that the Windows PC's poller reads over ssh (HANDOFF §8). The
+Friday request comes from the `cockpit-huntrequest` timer, installed with the other
+units by `sudo deploy/install-units.sh`.
+
 ## 4. Seed the state (strongly recommended)
 
 Skipping this works but the first scan re-downloads ~2 years of history for
