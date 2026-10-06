@@ -4,11 +4,13 @@ Run weekend hunts the Pi asks for. Polls the Pi over ssh; nothing connects to th
 
 .DESCRIPTION
 A request is data\cockpit\hunt\request.json on the Pi, written by the cockpit's Start
-button or by the Pi's Friday timer. This script claims it (an atomic rename on the Pi),
-runs weekend_hunt.ps1, and reports to the Pi's status.json as it goes: claimed, running
-(with the run's last log line), then done or error. weekend_hunt.ps1 pushes the finished
-folder itself and applies its own sleep rule, so a run claimed right after a timer wake
-puts the PC back to sleep, and one claimed while you are at the keyboard does not.
+button or by the Pi's Friday timer. This script holds one ssh session open in which the
+Pi checks for it every 5 s (one login per half hour, not one per check, so the Pi's
+journal stays readable), claims it with an atomic rename, runs weekend_hunt.ps1, and
+reports to the Pi's status.json as it goes: claimed, running (with the run's last log
+line), then done or error. weekend_hunt.ps1 pushes the finished folder itself and applies
+its own sleep rule, so a run claimed right after a timer wake puts the PC back to sleep,
+and one claimed while you are at the keyboard does not.
 
 Two tasks run it (register_task.ps1): "SEPA Hunt Poller" at logon, looping; and the
 Friday 18:00 wake task with -Once. Both may see the same request; the claim makes sure
@@ -19,7 +21,8 @@ Check for a request for up to three minutes (the network returns slowly after a 
 run it if there is one, then exit. Exit code: that of the run, 0 when there was nothing.
 
 .PARAMETER IntervalSeconds
-Seconds between checks when looping. Default 30.
+Seconds between reconnection attempts when the Pi does not answer. Default 30. (While the
+Pi answers, the wait is one open session; the Pi checks for a request every 5 s.)
 #>
 [CmdletBinding()]
 param([switch]$Once, [int]$IntervalSeconds = 30)
@@ -34,6 +37,7 @@ $Local   = Join-Path $Repo 'data\cockpit\hunt\status.json'
 $HuntPs1 = Join-Path $PSScriptRoot 'weekend_hunt.ps1'
 $OnceWaitSeconds = 180
 $ReportEverySeconds = 60
+$SessionSeconds = 1800     # one ssh session per half hour while waiting, not one per check
 
 function Write-Log([string]$Text) {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -62,11 +66,17 @@ function Invoke-Bash([string]$Command) {
     return [pscustomobject]@{ Code = $LASTEXITCODE; Lines = $lines }
 }
 
-# Tries to claim a request on the Pi. Returns the request object, or $null.
-function Get-Claim {
-    $r = Invoke-Bash "bash '$RepoFwd/scripts/hunt/pi_request.sh' claim"
+# Waits up to $Seconds, in ONE ssh session, for a request to claim on the Pi. Returns the
+# request object, or $null (none in time, or the Pi did not answer: $script:PiDown).
+function Get-Claim([int]$Seconds) {
+    $script:PiDown = $false
+    $r = Invoke-Bash "bash '$RepoFwd/scripts/hunt/pi_request.sh' wait $Seconds"
     if ($r.Code -eq 3) { return $null }
-    if ($r.Code -ne 0) { Write-Log "claim failed ($($r.Code)): $($r.Lines -join ' | ')"; return $null }
+    if ($r.Code -ne 0) {
+        $script:PiDown = $true
+        Write-Log "the Pi did not answer ($($r.Code)): $($r.Lines -join ' | ')"
+        return $null
+    }
     try { return ($r.Lines -join "`n") | ConvertFrom-Json } catch { Write-Log "unreadable request: $($r.Lines -join ' ')"; return $null }
 }
 
@@ -119,18 +129,22 @@ if (-not $script:Bash) { Write-Log 'Git Bash not found'; exit 1 }
 Write-Log ("poller started " + $(if ($Once) { '(once)' } else { "(every $IntervalSeconds s)" }))
 
 if ($Once) {
+    # After a wake the network can take a while; keep asking until the deadline.
     $deadline = (Get-Date).AddSeconds($OnceWaitSeconds)
     $req = $null
     while (-not $req -and (Get-Date) -lt $deadline) {
-        $req = Get-Claim
-        if (-not $req) { Start-Sleep -Seconds 15 }
+        $left = [int]($deadline - (Get-Date)).TotalSeconds
+        $req = Get-Claim ([Math]::Max(5, $left))
+        if (-not $req -and $script:PiDown) { Start-Sleep -Seconds 15 }
     }
     if (-not $req) { Write-Log 'no request on the Pi'; exit 0 }
     exit (Invoke-Request $req)
 }
 
+# One session waits up to $SessionSeconds for a request; a Pi that is down is retried
+# every $IntervalSeconds.
 while ($true) {
-    $req = Get-Claim
+    $req = Get-Claim $SessionSeconds
     if ($req) { [void](Invoke-Request $req) }
-    Start-Sleep -Seconds $IntervalSeconds
+    elseif ($script:PiDown) { Start-Sleep -Seconds $IntervalSeconds }
 }

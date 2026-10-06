@@ -298,9 +298,11 @@ itself.
 - **Requests (§6.104): nothing connects to the PC.** A hunt is asked for by a file on the Pi,
   `data/cockpit/hunt/request.json` (`cockpit/hunt_request.py`), written by the page's Start
   button or by the Pi's Friday 17:58 timer `cockpit-huntrequest`. The PC's poller
-  (`scripts/hunt/hunt_poller.ps1`, task "SEPA Hunt Poller" at logon, every 30 s; and the
-  Friday 18:00 wake task with `-Once`) claims it over ssh (an atomic rename, so two pollers
-  cannot run one request), runs `weekend_hunt.ps1`, and writes `status.json` back as it goes;
+  (`scripts/hunt/hunt_poller.ps1`, task "SEPA Hunt Poller" at logon; and the Friday 18:00
+  wake task with `-Once`) holds one ssh session open in which the Pi checks for it every 5 s
+  (one login per half hour, so the Pi's journal is not swamped), claims it with an atomic
+  rename (two pollers cannot run one request), runs `weekend_hunt.ps1`, and writes
+  `status.json` back as it goes;
   the page shows that. No token, no port, no firewall rule: the ssh key is the credential. A
   sleeping PC leaves the request waiting and runs it when it wakes. The run's own sleep rule
   still applies, so the Friday hunt ends with the PC asleep and a button-started one does not.

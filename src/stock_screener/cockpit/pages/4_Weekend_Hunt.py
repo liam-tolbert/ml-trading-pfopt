@@ -68,7 +68,7 @@ def _start_cb() -> None:
     except OSError as e:
         st.session_state["hunt_msg"] = f"Could not write the request: {e}"
         return
-    st.session_state["hunt_msg"] = ("Requested. The hunt PC picks it up within a minute "
+    st.session_state["hunt_msg"] = ("Requested. The hunt PC picks it up within seconds "
                                     "when it is awake; asleep, it runs it when it next wakes."
                                     if created else "A request is already waiting for the PC.")
 
@@ -99,8 +99,8 @@ _active = progress["state"] in ("requested", "claimed", "running")
 with scol:
     st.button("▶ Start weekend hunt", key="hunt_start", on_click=_start_cb,
               disabled=_active, width="stretch")
-    st.caption("The hunt PC checks for requests every 30 s while awake, and the Friday "
-               "18:00 hunt is requested by the Pi itself.")
+    st.caption("The hunt PC watches for requests while awake, and the Friday 18:00 hunt "
+               "is requested by the Pi itself.")
     if st.session_state.get("hunt_msg"):
         st.info(st.session_state.pop("hunt_msg"))
 

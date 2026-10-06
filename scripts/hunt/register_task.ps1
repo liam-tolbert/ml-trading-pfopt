@@ -22,8 +22,8 @@ weekend_hunt.ps1 -WakeTest that many minutes from now. Put the PC to sleep and w
 
 .PARAMETER Poller
 Instead of the weekly task, register and start "SEPA Hunt Poller": at logon, runs
-scripts\hunt\hunt_poller.ps1, which checks the Pi over ssh every 30 s for a hunt request
-(the cockpit's Start button) and runs it. Nothing connects to this PC.
+scripts\hunt\hunt_poller.ps1, which waits on the Pi over ssh for a hunt request (the
+cockpit's Start button) and runs it. Nothing connects to this PC.
 
 .PARAMETER Unregister
 Remove all three tasks.
@@ -44,6 +44,12 @@ $PollerName   = 'SEPA Hunt Poller'
 $Repo         = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $Script       = Join-Path $PSScriptRoot 'weekend_hunt.ps1'
 $PollerScript = Join-Path $PSScriptRoot 'hunt_poller.ps1'
+# Every task starts its script through hidden.vbs: no console window exists to be closed.
+$Hidden       = Join-Path $PSScriptRoot 'hidden.vbs'
+$Launcher     = 'wscript.exe'
+function Hidden-Args([string]$Ps1, [string]$Extra = '') {
+    ("//B //Nologo `"$Hidden`" `"$Ps1`" $Extra").Trim()
+}
 
 if ($Unregister) {
     foreach ($name in $TaskName, $WakeTestName, $PollerName) {
@@ -56,8 +62,8 @@ if ($Unregister) {
 }
 
 if ($Poller) {
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -WorkingDirectory $Repo `
-        -Argument "-NoProfile -WindowStyle Hidden -File `"$PollerScript`""
+    $action = New-ScheduledTaskAction -Execute $Launcher -WorkingDirectory $Repo `
+        -Argument (Hidden-Args $PollerScript)
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
     # No time limit: it polls until logoff. Restarted if it dies; one instance only.
@@ -82,10 +88,9 @@ $isTest    = $WakeTestInMinutes -gt 0
 $name      = if ($isTest) { $WakeTestName } else { $TaskName }
 # The weekly task wakes the PC and runs whatever request the Pi's Friday timer left; the
 # wake test exercises the wake and the sleep rule without a hunt.
-$arguments = if ($isTest) { "-NoProfile -WindowStyle Hidden -File `"$Script`" -WakeTest" }
-             else { "-NoProfile -WindowStyle Hidden -File `"$PollerScript`" -Once" }
+$arguments = if ($isTest) { Hidden-Args $Script '-WakeTest' } else { Hidden-Args $PollerScript '-Once' }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $Repo
+$action = New-ScheduledTaskAction -Execute $Launcher -Argument $arguments -WorkingDirectory $Repo
 $trigger = if ($isTest) {
     New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes($WakeTestInMinutes)
 } else {
