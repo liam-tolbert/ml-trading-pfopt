@@ -110,6 +110,24 @@ def sheet_for(hunt_path: Path, state: HuntState,
     return None
 
 
+def sheet_panel(png: Path, j: Optional[int]) -> Optional[bytes]:
+    """The quarter of a 2×2 review sheet that holds panel ``j``, as PNG bytes. None when
+    the panel is unknown or the image cannot be read; the caller shows the whole sheet."""
+    if j is None or not 0 <= j < len(_PANEL_NAMES):
+        return None
+    try:
+        import io
+        from PIL import Image
+        with Image.open(png) as im:
+            w, h = im.size
+            x0, y0 = (j % 2) * w // 2, (j // 2) * h // 2
+            buf = io.BytesIO()
+            im.crop((x0, y0, x0 + w // 2, y0 + h // 2)).save(buf, format="PNG")
+            return buf.getvalue()
+    except Exception:
+        return None
+
+
 def panel_name(j: Optional[int]) -> str:
     """Where a name sits on its 2×2 review sheet (``charts.render_sheets`` fills it
     row-major)."""
@@ -133,6 +151,39 @@ def entry_numbers(row: dict) -> dict:
             "dist_days": num("dist_days"), "rs": num("rs"), "q": num("q"),
             "fund": num("fund"), "f_max": num("f_max") or 8,
             "depths": str(row.get("depths") or ""), "step3": str(row.get("step3") or "")}
+
+
+PIVOT_DRIFT_PCT = 0.5        # a smaller move is rounding, not a new pivot
+
+
+def hunt_levels(row: dict, scan_levels: Optional[dict] = None) -> dict:
+    """The chart's levels for a hunt pick: the pivot the hunt judged, with its stop, buy
+    zone and +25% target. The detector re-anchors the pivot as bars arrive (a new high
+    starts a new base), so the latest scan's levels can differ from what the verdict and
+    the watchlist entry refer to; the chart MUST show the hunt's. Keys the hunt does not
+    record (breakout flags, volume ratio) come from ``scan_levels`` when given."""
+    nums = entry_numbers(row)
+    out = dict(scan_levels or {})
+    piv = nums["pivot"]
+    if piv is None:
+        return out
+    out.update({"pivot": piv, "buy_zone": (piv, nums["zone_hi"]), "target": piv * 1.25,
+                "stop": nums["stop"] if nums["stop"] is not None else out.get("stop")})
+    return out
+
+
+def pivot_drift(row: dict, scan_levels: Optional[dict]) -> Optional[Tuple[float, float]]:
+    """``(today's pivot, % vs the hunt's)`` when the latest scan detects a pivot at least
+    ``PIVOT_DRIFT_PCT`` away from the hunt's; None otherwise."""
+    hunt_piv = entry_numbers(row)["pivot"]
+    try:
+        now = float((scan_levels or {}).get("pivot"))
+    except (TypeError, ValueError):
+        return None
+    if not hunt_piv or not now:
+        return None
+    pct = (now / hunt_piv - 1.0) * 100.0
+    return (now, pct) if abs(pct) >= PIVOT_DRIFT_PCT else None
 
 
 def latest_payloads() -> Dict[str, dict]:

@@ -77,11 +77,20 @@ def _pct(v) -> str:
         return "n/a"
 
 
-def render_step2_panel(payload: dict) -> None:
-    """The Step-2 box for a scan payload: header, popover and the fundamentals read."""
-    with st.container(border=True):
+def _step2_header(help_popover: bool) -> None:
+    """The box's title row. Without the popover the same help sits on the title's ⓘ,
+    one line shorter, for pages that are short of height."""
+    if help_popover:
         st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
         info_btn(INFO_STEP2)
+    else:
+        st.markdown(step_badge("Step 2", "Fundamentals — the fuel"), help=INFO_STEP2)
+
+
+def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
+    """The Step-2 box for a scan payload: header, help and the fundamentals read."""
+    with st.container(border=True):
+        _step2_header(help_popover)
         f = payload.get("fundamentals")
         s2 = payload.get("step2", {})
         if not f:
@@ -134,12 +143,11 @@ def render_step2_panel(payload: dict) -> None:
         st.caption(f"Score {s2.get('score', 0)}/{len(checks) or 8}")
 
 
-def render_step2_from_hunt_row(row: dict) -> None:
+def render_step2_from_hunt_row(row: dict, help_popover: bool = True) -> None:
     """The Step-2 box from a hunt's diagnostics row, for a name the latest scan no
     longer holds. Same header and chips; the numbers are the hunt's."""
     with st.container(border=True):
-        st.markdown(step_badge("Step 2", "Fundamentals — the fuel"))
-        info_btn(INFO_STEP2)
+        _step2_header(help_popover)
         st.caption("The hunt's numbers: this name is not in the latest scan.")
         st.markdown(f"**Rev:** {_pct(row.get('rev_yoy'))} YoY")
         st.markdown(f"**EPS:** {_pct(row.get('eps_yoy'))} YoY")

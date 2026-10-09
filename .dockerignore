@@ -42,10 +42,11 @@
 !tests/vcp_labels.py
 !tests/fixtures/vcp_bench/**
 
-# --- weekend-hunt pipeline: gated by deploy.sh, so it must be in the image.
-#     pipeline/report are stdlib + pandas + cockpit.cache; charts/__main__ are
-#     re-excluded below (matplotlib is not a runtime dep and the hunt's chart
-#     rendering runs on the laptop, never on the Pi) ---
+# --- weekend-hunt pipeline: gated by deploy.sh, so it must be in the image, and the
+#     Weekend Hunt page reads hunt folders through pipeline/report. pipeline/report are
+#     stdlib + pandas + cockpit.cache, news is stdlib + requests (pinned); charts/__main__
+#     are re-excluded below (matplotlib is not a runtime dep and the hunt itself runs on
+#     the laptop, never on the Pi) ---
 !src/stock_screener/hunt/**
 !tests/test_hunt.py
 

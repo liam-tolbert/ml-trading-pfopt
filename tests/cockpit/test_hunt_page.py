@@ -104,6 +104,13 @@ def test_ordered_picks_bucket_order_and_blocked_last():
         sheet = hunt_view.sheet_for(h.path, state, "DDD")
         assert sheet is not None and sheet[1:] == (1, 1, 2)
         assert hunt_view.panel_name(2) == "bottom-left" and hunt_view.panel_name(None)
+        # The page shows only the name's quarter of the 2×2 sheet.
+        import io
+        from PIL import Image
+        crop = hunt_view.sheet_panel(sheet[0], 2)
+        assert crop is not None and Image.open(io.BytesIO(crop)).size == (4, 4)
+        assert hunt_view.sheet_panel(sheet[0], None) is None
+        assert hunt_view.sheet_panel(h.path / "missing.png", 0) is None
         nums = hunt_view.entry_numbers(picks[0].row)
         assert nums["pivot"] == 100.0 and abs(nums["zone_hi"] - 105.0) < 1e-9
         assert nums["stop"] == 97.0 and nums["earnings_in"] == 60
@@ -213,7 +220,7 @@ def test_hunt_page_renders_and_steps():
         assert not at.exception, at.exception
         text = _rendered_text(at)
         assert "1 of 4 · buy zone · **AAA**" in text, text[:600]
-        assert "Hunt sheet 1 of 1: AAA is the top-left panel" in text
+        assert "From hunt sheet 1 of 1 (top-left): AAA is not in the latest Pi scan" in text
         assert "contract" in text and "A two-billion award." in text and "Acme wins" in text
         assert "Yahoo Finance news" in text and "SEC filings (8-K)" in text
         assert "The hunt's numbers" in text, "the from-row Step-2 panel"
@@ -225,12 +232,31 @@ def test_hunt_page_renders_and_steps():
             at.button(key="hunt_next").click().run()
         text = _rendered_text(at)
         assert "4 of 4 · earnings-blocked · **EEE**" in text
-        assert any("Earnings in 21d" in str(w.value) for w in at.warning), "blocked warning"
+        assert "Earnings in 21d" in text, "blocked warning"
         at.button(key="hunt_next").click().run()
         assert "1 of 4 · buy zone · **AAA**" in _rendered_text(at), "Next wraps"
         at.button(key="hunt_prev").click().run()
         assert "4 of 4 · earnings-blocked" in _rendered_text(at), "Prev wraps"
         assert "Thin **breadth**." in _rendered_text(at), "narrative tab rendered"
+
+
+def test_hunt_levels_and_drift():
+    """Mid-week the detector re-anchors pivots (GH 180.90 → 191.01, SCSC 58.80 → 66.78
+    on 2026-10-06), so the chart draws the hunt's levels and flags today's pivot apart."""
+    row = {"pivot": 100.0, "stop": 92.0}
+    scan = {"pivot": 113.6, "stop": 102.0, "breakout_today": True, "volume_ratio": 1.7}
+    lv = hunt_view.hunt_levels(row, scan)
+    assert lv["pivot"] == 100.0 and lv["stop"] == 92.0
+    assert lv["buy_zone"] == (100.0, 105.0) and abs(lv["target"] - 125.0) < 1e-9
+    assert lv["breakout_today"] is True and lv["volume_ratio"] == 1.7, "scan-only keys kept"
+    assert scan["pivot"] == 113.6, "the scan's levels are not mutated"
+    now, pct = hunt_view.pivot_drift(row, scan)
+    assert now == 113.6 and abs(pct - 13.6) < 1e-9
+    assert hunt_view.pivot_drift(row, {"pivot": 100.3}) is None, "under 0.5% is rounding"
+    assert hunt_view.pivot_drift(row, None) is None and hunt_view.pivot_drift(row, {}) is None
+    assert hunt_view.hunt_levels({"pivot": 100.0, "stop": ""}, scan)["stop"] == 102.0, \
+        "a hunt row without a stop keeps the scan's"
+    assert hunt_view.hunt_levels({"pivot": ""}, scan) == scan
 
 
 def test_hunt_page_chart_path_when_scanned():
@@ -248,7 +274,15 @@ def test_hunt_page_chart_path_when_scanned():
             text = _rendered_text(at)
             assert "**Rev:** +25.0% YoY · +5.0% QoQ" in text, text[:800]
             assert at.get("plotly_chart"), "the interactive chart"
-            assert "Latest scan on the Pi" in text
+            assert "the levels are the hunt's" in text and "re-detects" not in text
+        moved = _payload(110.0, 102.0)
+        with patch.object(hunt_view, "latest_payloads", return_value={"AAA": moved}):
+            at = _apptest()
+            at.run()
+            assert not at.exception, at.exception
+            text = _rendered_text(at)
+            assert "re-detects the pivot at 110.00 (+10.0% vs the hunt's 100.00" in text, \
+                text[:900]
 
 
 def test_hunt_page_add_to_watchlist():
@@ -260,8 +294,8 @@ def test_hunt_page_add_to_watchlist():
         assert "⭐ Add AAA" in "".join(b.label for b in at.button), [b.label for b in at.button]
         at.button(key="hunt_wl_add").click().run()
         assert not at.exception, at.exception
-        assert any("AAA added with the pivot frozen at 100.00" in str(s.value) for s in at.success), \
-            [str(s.value) for s in at.success]
+        assert any("AAA added with the pivot frozen at 100.00" in str(t.value) for t in at.toast), \
+            [str(t.value) for t in at.toast]
         assert "✓ AAA is on the watchlist" in _rendered_text(at)
         disk = load_watchlist(cache.WATCHLIST_JSON)
         assert [e["ticker"] for e in disk] == ["AAA"] and disk[0]["judged_pivot"] == 100.0
