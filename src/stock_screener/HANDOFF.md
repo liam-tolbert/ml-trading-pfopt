@@ -2,10 +2,12 @@
 
 **Scope:** the *classical* stock-screening track. Separate from `docs/HANDOFF.md` (the parked ML
 cross-sectional track). The momentum-*factor* experiment is closed; its essentials are in
-`HANDOFF_HISTORY.md` §5 and its standalone write-up was never committed.
+`HANDOFF_HISTORY.md` §5.
 
-**Status (2026-10-01):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
-frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries. Sell automation is **armed** on the
+**Status (2026-10-09):** live paper trading on a dedicated Raspberry Pi. Weekly `full_us` hunt →
+frozen-pivot watchlist → half-hourly refresh + trigger checks → GTC-stopped entries. The hunt runs
+on the Windows PC when the Pi asks (Fridays 17:58, or the Weekend Hunt page's Start) and is
+reviewed in the cockpit's Weekend Hunt page, one PASS name at a time with its catalyst read (§8). Sell automation is **armed** on the
 Pi (`AUTOSELL=1` since 2026-10-02); armed entries are built but disarmed (`AUTOBUY` unset). A SEPA-fidelity
 audit (the local, gitignored `SEPA_AUDIT.md`) drove §6.72–§6.99. §6.100 trimmed what this stage
 doesn't use, and the audit is frozen until the journal has ~20 more trades (§12). The offline
@@ -21,11 +23,6 @@ deliberately for **execution practice**, judged on execution, not P&L.
 hands. So the tool does the mechanical filtering and hands the user charts to judge. **The user is
 the judge.**
 
-Under `src/stock_screener/`: `minervini_screener/` (vendored third-party *rules*) and the live
-track, `cockpit/`. The daily backtest simulator was removed on 2026-10-05 (§6.102, user decision);
-`backtest_daily/` now holds only the synthetic data the cockpit tests use. The research record
-stands in `HANDOFF_HISTORY.md` §1, and the simulator is parked on branch `park/backtest-daily`.
-
 ---
 
 ## 1. Research: what was tested and what it showed
@@ -36,16 +33,9 @@ management is real, selection is not.
 ## 2. Methodology lessons
 
 - **★ The in-sample tuning trap.** A knob chosen after seeing the outcome manufactured a fake
-  t=2.49. **Any positive result from a post-hoc knob is suspect until OOS-validated.**
-- **The momentum Phase-0 "STOP" measured the wrong object** — an ungated, L/S, large-cap,
-  survivorship-biased *factor*. It does not generalize to the real screener.
-- **Vendored package eager-loaded the live data layer** (`screening/__init__` → `data.storage` →
-  sqlalchemy). Fixed by dropping the import; the dead layer was later deleted outright. A
-  vendored tree is not free — unreachable modules still shape the image and every grep.
-- **Don't fight the import-sorter.** It enforces `from src.X` with the repo ROOT on `sys.path`.
-- **`pytest` isn't installed** — tests run as plain scripts, matching repo style.
-- **The engine was unusably slow** because capacity was checked by *position count* while risk-sizing
-  filled cash at ~10 names, so the expensive VCP scan re-ran while fully invested.
+  t=2.49. **Any positive result from a post-hoc knob is suspect until OOS-validated.** The same
+  holds for a new Step-3 read: its thresholds are fixed before it is measured
+  (`SEPA_METHODOLOGY.md` §0).
 
 ## 3. Open research questions
 
@@ -94,7 +84,7 @@ Moved to `HANDOFF_HISTORY.md` §5. Verdict: STOP; the ranking carries no market-
 
 ## 6. The cockpit — architecture
 
-A local **Streamlit** app running the SEPA funnel as decision support. `src/stock_screener/cockpit/`,
+A **Streamlit** app on the Pi running the SEPA funnel as decision support. `src/stock_screener/cockpit/`,
 live yfinance data (not CRSP). Reuses ONLY the pure rule functions from `minervini_screener/screening/`.
 
 **Funnel:** universe (`full_us`, ~4,120 names — the ONLY universe since §6.32) → **Step 1** hard gate,
@@ -247,8 +237,9 @@ diverging watchlists is a lost-update race across hosts.
 | `cockpit-deploy` | hourly, 17:00–09:00 daily | `deploy.sh` |
 | `cockpit-huntrequest` | 17:58 Fridays | writes `data/cockpit/hunt/request.json`; the PC wakes at 18:00 and runs it (§8, the hunt) |
 
-`Persistent=false` on everything but deploy: a missed buy/sell must never replay late against a stale
-plan. Deploy is `Persistent=true` (catch-up is harmless off-hours).
+`Persistent=false` on everything but deploy and huntrequest: a missed buy/sell must never replay
+late against a stale plan. Those two are `Persistent=true`: a late deploy is harmless off-hours, and
+a late hunt request still gets the weekend's hunt run.
 
 **Deploy pipeline (`deploy.sh`).** Pull-based, no inbound anything. `flock` → dirty-checkout halt →
 fetch → compare `origin/main` to the **`cockpit.sha` label on `cockpit:live`** → ff-only merge →
@@ -268,44 +259,51 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 
 **Health check one-liner:** `journalctl -u 'cockpit-*' --since -7d | grep -c 'Failed with result'`
 
-**Friday hunt task — on the Windows box, never the Pi (§6.101).** The scheduled task "SEPA Weekend
-Hunt" (`scripts/hunt/register_task.ps1`; Fridays 18:00 local, wakes the PC from sleep) runs
-`scripts/hunt/weekend_hunt.ps1`. It copies the Pi's `last_scan.pkl` and `watchlist.json` down
-(read-only on the Pi), runs the `/weekend-hunt` skill headless (`claude -p`), and checks the result
-itself.
+**The weekend hunt — run on the Windows box, read on the Pi (§6.101, §6.104).** A hunt is
+requested on the Pi (the Weekend Hunt page's Start button, or the Friday 17:58 timer) and run
+by the PC's poller, which calls `scripts/hunt/weekend_hunt.ps1`. That script copies the Pi's
+`last_scan.pkl` and `watchlist.json` down, runs the `/weekend-hunt` skill headless (`claude -p`),
+checks the result itself, and pushes the hunt folder back to the Pi.
 
-- **Output:** `docs/hunt/<date>/report.html` with its `charts/`, the deliverable: the reviewer's
-  `narrative.md` under "Reviewer's read", the gated tables, every chart sheet under its verdicts.
-  Working state stays in `data/cockpit/hunt/<date>/` (`summary.md`, verdicts, `FAILED.txt`
-  naming the reason when a run did not finish). Log: `data/cockpit/hunt/logs/<date>.log`.
+- **Requests and tasks (§6.104): nothing connects to the PC.** A request is
+  `data/cockpit/hunt/request.json` on the Pi (`cockpit/hunt_request.py`), written by the page's
+  Start button or the Friday 17:58 timer `cockpit-huntrequest`. The PC's
+  `scripts/hunt/hunt_poller.ps1` holds one ssh session open in which the Pi checks for it every
+  5 s (one login per half hour, so the Pi's journal is not swamped), claims it with an atomic
+  rename (two pollers cannot run one request), runs `weekend_hunt.ps1`, and writes `status.json`
+  back every minute (claimed, running, done or error) for the page. `scripts/hunt/pi_request.sh`
+  is its ssh half (`claim`, `wait SECONDS`, `status FILE`). No token, no port, no firewall rule:
+  the ssh key is the credential. Two tasks run the poller (`scripts/hunt/register_task.ps1`):
+  "SEPA Weekend Hunt" (Fridays 18:00, wakes the PC; `-Once`: up to 3 min for the network, claim
+  the request the Pi's timer left, run it; none → nothing, and the PC sleeps again) and "SEPA
+  Hunt Poller" (`-Poller`; at logon). Both launch through `scripts/hunt/hidden.vbs`
+  (`wscript.exe`), so no console window exists to be closed; Task Scheduler's End stops one.
+- **Output:** the run pushes its folder to the Pi's `data/cockpit/hunt/<date>/`
+  (`push_result.sh`; renamed into place, so the app never reads a half copy; a failed push is a
+  failed run). The same folder stays on the PC with the working state (`summary.md`, verdict
+  batches, `FAILED.txt` naming the reason when a run did not finish), and `report.html` with
+  its `charts/` is mirrored to `docs/hunt/<date>/`. Log: `data/cockpit/hunt/logs/<date>.log`.
+- **The Weekend Hunt page (§6.104, §6.105)** lists a dated folder only once it holds
+  `report.html` (`hunt_view.FINISHED_FILES`), so a run in progress never shows. It shows every
+  PASS name one at a time, laid out to fit one laptop screen: a control strip (Prev, the
+  verdict, ⭐ Add to watchlist, Next), the chart at 500 px beside the verdict and entry numbers,
+  then Step 2 beside the catalyst read. **The chart draws the hunt's levels**, not the latest
+  scan's: the detector re-anchors pivots as bars arrive, and the verdict, the numbers and the
+  watchlist entry all refer to the pivot the hunt judged. When today's scan puts the pivot
+  ≥ 0.5% elsewhere, a dotted "today's pivot" line and a caption show it (`hunt_view.hunt_levels`,
+  `pivot_drift`). A name the latest scan no longer holds shows its quarter of the hunt's sheet.
 - **The allowlist is the safety boundary** (`scripts/hunt/unattended_settings.json`): the hunt
   CLI, file reads, and writes inside `data/cockpit/hunt/`. No ssh, no cockpit or trade code.
-- **Needs:** the standalone `claude` CLI on PATH and `CLAUDE_CODE_OAUTH_TOKEN` in the user's
-  environment (`claude setup-token`). The desktop app's login is not usable from a task.
-- **Wake:** from sleep or hibernate only, with the user logged in. After a shutdown or logout the
-  missed run starts at the next logon. The PC sleeps again only if the run woke it and nobody has
-  touched it since.
-- **By hand:** `scripts/hunt/weekend_hunt.ps1 -NoSleep`. `register_task.ps1 -WakeTestInMinutes 5`
-  proves the wake without spending a review; `-Unregister` removes the task.
-- **Friday hunt task (§6.104):** the Windows task "SEPA Weekend Hunt" (Fridays 18:00, wakes the
-  PC) now runs `hunt_poller.ps1 -Once`: it looks for the request the Pi's timer left and runs
-  it; with none (the Pi down) it does nothing and the PC sleeps again.
-- **The push (§6.104):** a finished run copies its hunt folder to the Pi's
-  `data/cockpit/hunt/<date>/` (`push_result.sh`; folder renamed into place, so the app never
-  reads a half copy). The cockpit's **Weekend Hunt** page reads those folders: every PASS name
-  one at a time with the chart (latest scan, or the hunt's sheet), verdict, Step-2 panel, entry
-  numbers, the catalyst read, and Add to watchlist. A failed push is a failed run.
-- **Requests (§6.104): nothing connects to the PC.** A hunt is asked for by a file on the Pi,
-  `data/cockpit/hunt/request.json` (`cockpit/hunt_request.py`), written by the page's Start
-  button or by the Pi's Friday 17:58 timer `cockpit-huntrequest`. The PC's poller
-  (`scripts/hunt/hunt_poller.ps1`, task "SEPA Hunt Poller" at logon; and the Friday 18:00
-  wake task with `-Once`) holds one ssh session open in which the Pi checks for it every 5 s
-  (one login per half hour, so the Pi's journal is not swamped), claims it with an atomic
-  rename (two pollers cannot run one request), runs `weekend_hunt.ps1`, and writes
-  `status.json` back as it goes;
-  the page shows that. No token, no port, no firewall rule: the ssh key is the credential. A
-  sleeping PC leaves the request waiting and runs it when it wakes. The run's own sleep rule
-  still applies, so the Friday hunt ends with the PC asleep and a button-started one does not.
+- **Needs:** the standalone `claude` CLI on PATH (`~/.local/bin/claude.exe`), logged in once:
+  the stored login in `~/.claude/.credentials.json` is used, and bills the subscription, not the
+  API. `CLAUDE_CODE_OAUTH_TOKEN` also works. The desktop app's login is not usable from a task.
+- **Wake:** from sleep or hibernate only, with the user logged in. A sleeping, shut-down or
+  logged-out PC leaves the request waiting on the Pi; the logon poller runs it. The PC sleeps
+  again only if the run woke it and nobody has touched it since, so the Friday hunt ends with
+  the PC asleep and a button-started one does not.
+- **By hand:** `scripts/hunt/weekend_hunt.ps1 -NoSleep` (`-NoPush` keeps the result on the PC).
+  `register_task.ps1 -WakeTestInMinutes 5` proves the wake without spending a review;
+  `-Unregister` removes all three tasks.
 - **Artifact:** the task cannot publish one (no Artifact tool outside a session). Ask a session
   to publish a run; the skill's step 12 has the call (`report.html` plus its sheets). Printing
   an artifact from the claude.ai viewer cuts it off; print `report.html` from a browser instead.
@@ -338,6 +336,8 @@ stuck Alpaca call: a finished request leaves exactly that.
 - **`RS_FLOOR` is one constant.** The scan gate, the app's slider default, P2 and the hunt read
   `doctrine.RS_FLOOR`. The gate's RS leg lives inside `screen_universe`, so `filter_candidates`
   needs no mirror for it; its own `min_rs` is the slider's extra filter above the floor.
+- **Imports are `from src.X …` with the repo root on `sys.path`.** The import-sorter enforces it;
+  don't fight it.
 - **Tests run as plain scripts**, no pytest. `python tests/test_cockpit.py` is the gate's entry point;
   the suites live in `tests/cockpit/test_<category>.py` and each runs standalone.
 - **Exit-code contract: 0 for anything normal — including "nothing to do" and "disabled" — and 1 only
@@ -408,7 +408,8 @@ positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negat
 - Derived stop: tagged closed trades, **≥5 wins**, ½ × average win, clamped [4%, 10%]; the 4% floor
   came from the §6.73 pre-registered rule on ONE winner.
 - Post-breakout window: **20** sessions for the 20-day line; violation cluster for the switch = **3**.
-- Re-entry lag: **15** sessions of SPY in Stage 1–2 (the OOS-validated value; SPY-only, no breadth).
+- Re-entry lag: **15** sessions of SPY in Stage 1–2, each also with breadth ≥ `BREADTH_MIN_PHASE2`
+  (§6.82; Breadth below). The 15 was fixed out of sample and MUST NOT be tuned.
 - **Promotion switches, all OFF:** `VIOLATIONS_CAN_FAIL`, `MARKET_TURN_CAN_TRADE` and
   `STRENGTH_CAN_TRADE`. Read at call time (`doctrine.X`), so tests patch the module attribute.
 - **Strength signs (`advisories.strength_signs`)**, read from `STRENGTH_MIN_GAIN` (+20%) on the latest
@@ -452,7 +453,6 @@ trailing 50-day.
   gaps and are dropped.
 - **Halving.** `book_tightening` gives each dip's depth over the one before and the base length,
   numbers only (§6.100).
-- Shakeouts and V recovery were removed in §6.100 after failing their checks (§6.92, §6.93).
 
 **Sector labels (`sectors.py`):**
 - `Ticker.info["sector"]` is one of Yahoo's 11 sectors; `["industry"]` one of ~145 industries.
@@ -553,8 +553,6 @@ source comments live. A new entry goes there, numbered after the last one.
   rating and the regime banner. No orphan is older than 90 days, so a staleness rule catches nothing
   either. The interesting question is the opposite one: why `ACN`/`BRK-B` fall out of
   `_filter_us_symbols` at all.
-- **`AUTOSELL=1` on the Pi since 2026-10-02**: the evening plan's full exits (hard P1/P2/P4
-  fails) submit at 09:25 unless vetoed on the Positions page. `AUTOBUY` is unset.
 - **P2's RS leg can flip daily.** The RS rating is a rank across the universe, so a holding near
   70 can fail P2 on one close and pass the next. The two-consecutive-closes rule is the only
   hysteresis. If RS-only P2 fails prove noisy on live positions, a band (fail under 65, warn
@@ -593,10 +591,10 @@ source comments live. A new entry goes there, numbered after the last one.
 
 ## Files (this venture)
 
-- **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package: the live-only modules (`data/`, `notifications/`, `analysis/`, batch processors, `quant_engine.py`, `screener.py`) were deleted 2026-09-02.
-- **Test fixture:** `backtest_daily/` — `providers.py`, `fundamentals_adapter.py`, `synthetic_provider.py`: the seeded synthetic market `tests/cockpit/_common.py` builds its prices from. The backtest simulator that lived here was removed (§6.102).
+- **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package (what was deleted and why: `PROVENANCE.md`).
+- **Test fixture:** `backtest_daily/` — `providers.py`, `fundamentals_adapter.py`, `synthetic_provider.py`: the seeded synthetic market `tests/cockpit/_common.py` builds its prices from. The backtest simulator that lived here was removed (§6.102) and is parked on branch `park/backtest-daily`; its findings are `HANDOFF_HISTORY.md` §1.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
-- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`; `charts` and the CLI stay off the Pi); the `/weekend-hunt` skill judges the charts and the catalysts. `scripts/hunt/` (repo root) holds the env wrapper `hunt.sh`, the Friday task, the push and the request poller (§8). The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
+- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`; `charts` and the CLI stay off the Pi); the `/weekend-hunt` skill judges the charts and the catalysts. `scripts/hunt/` (repo root) holds the PC side (§8): `weekend_hunt.ps1` (one run), `hunt.sh` (the env wrapper), `pull_scan.sh` / `push_result.sh` (scan down, result up), `hunt_poller.ps1` + `pi_request.sh` (requests), `register_task.ps1` + `hidden.vbs` (the tasks and their windowless launch), and the unattended review's prompt and allowlist. The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
 - **Method:** `SEPA_METHODOLOGY.md` — the books' rules for sessions, with a rule-to-code map (§9 of that file) and the deviations; `minervini_sepa_system.md` is the user-facing guide the app renders. A rule change updates both, plus the ledger in `HANDOFF_HISTORY.md`.
 - **History:** `HANDOFF_HISTORY.md` — the research record (§1, §3, §5), the change ledger (§11) and parked ideas.
 - **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suite runs in neither CI nor `deploy.sh`.

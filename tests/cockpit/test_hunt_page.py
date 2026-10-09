@@ -241,8 +241,9 @@ def test_hunt_page_renders_and_steps():
 
 
 def test_hunt_levels_and_drift():
-    """Mid-week the detector re-anchors pivots (GH 180.90 → 191.01, SCSC 58.80 → 66.78
-    on 2026-10-06), so the chart draws the hunt's levels and flags today's pivot apart."""
+    """§6.105(c): mid-week the detector re-anchors pivots (GH 180.90 → 191.01, SCSC
+    58.80 → 66.78 on 2026-10-06), so the chart draws the hunt's levels and flags today's
+    pivot apart."""
     row = {"pivot": 100.0, "stop": 92.0}
     scan = {"pivot": 113.6, "stop": 102.0, "breakout_today": True, "volume_ratio": 1.7}
     lv = hunt_view.hunt_levels(row, scan)
