@@ -171,18 +171,19 @@ def build_report(today=None, write_watchlist: bool = True,
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    ap = argparse.ArgumentParser(description="Scheduled data refresh: price top-up + "
-                                             "watchlist trigger check (decision support "
-                                             "only — never places orders).")
+    ap = argparse.ArgumentParser(description="Scheduled data refresh: download the missing "
+                                             "recent prices + watchlist trigger check (it "
+                                             "only informs you — never places orders).")
     ap.add_argument("--scope", choices=SCOPES, default=SCOPE_WATCHLIST,
-                    help="watchlist (default; + held names not on it) or universe")
+                    help="watchlist (default; + held stocks not on it) or universe "
+                         "(every ticker the scan screens)")
     ap.add_argument("--max-age-days", type=float, default=REFRESH_MAX_AGE_DAYS,
-                    metavar="N", help="serve a cache younger than this instead of "
-                                      f"re-fetching (default {REFRESH_MAX_AGE_DAYS})")
+                    metavar="N", help="use saved prices newer than this many days instead "
+                                      f"of downloading again (default {REFRESH_MAX_AGE_DAYS})")
     ap.add_argument("--date", default=None, metavar="YYYY-MM-DD",
-                    help="pin the run date (tests/backfill); default = today in New York")
+                    help="set the run date (for tests or past dates); default = today in New York")
     ap.add_argument("--no-write", action="store_true",
-                    help="print only — skip the report file AND the watchlist write-back")
+                    help="print only — don't save the report file OR the watchlist")
     args = ap.parse_args(argv)
 
     try:

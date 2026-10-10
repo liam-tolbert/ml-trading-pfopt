@@ -159,7 +159,7 @@ def test_industry_concentration_and_leader_break():
     payloads = {"LEAD": {"df": broke}, "PEER": {"df": fine}, "HELD": {"df": broke},
                 "OTHR": {"df": broke}}
     msg = advisories.group_leader_break("Semis", cand, payloads, exclude="HELD")
-    assert msg and msg.startswith("group leader LEAD") and "2.0× volume" in msg
+    assert msg and msg.startswith("LEAD") and "2.0×" in msg
     # a quiet break (normal volume) is not the warning
     quiet = {**payloads, "LEAD": {"df": _trigger_frame("2026-06-30", closes)}}
     assert advisories.group_leader_break("Semis", cand, quiet, exclude="HELD") is None

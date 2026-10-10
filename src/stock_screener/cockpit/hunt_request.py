@@ -102,7 +102,7 @@ def progress() -> dict:
     age = _age_s(st.get("updated_at"))
     if state in ACTIVE_STATES and age is not None and age > STALE_RUN_S:
         state = "error"
-        st = {**st, "message": "the hunt PC stopped reporting mid-run; check its log"}
+        st = {**st, "message": "the hunt PC stopped sending updates before the run finished; check its log"}
     return {"state": state, "message": str(st.get("message") or ""),
             "requested_at": st.get("requested_at"), "updated_at": st.get("updated_at"),
             "date": st.get("date")}
@@ -112,7 +112,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hunt_request", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("write", help="ask the hunt PC for a hunt (no-op when one is waiting)")
+    p = sub.add_parser("write", help="ask the hunt PC for a hunt (does nothing when one is already waiting)")
     p.add_argument("--source", default="schedule")
     sub.add_parser("show", help="print the request and status files")
     args = ap.parse_args(argv)

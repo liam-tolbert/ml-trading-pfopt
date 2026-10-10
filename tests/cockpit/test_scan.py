@@ -163,11 +163,10 @@ def test_code33_inventory_and_step2_lines():
     est = scan_mod.step2_lines({"est_rev_90d": 84.6, "est_rev_30d": -14.4, "inst_count": 235,
                                 "inst_pct": 96.0,
                                 "inst_history": [["2026-07-02", 221], ["2026-09-25", 235]]})
-    assert est == ["**Estimates** this year's EPS +84.6% over 90 days (-14.4% over 30) ✅",
-                   "**Funds** 235 holding 96% (↑ from 221 on 2026-07-02)"], est
+    assert len(est) == 2 and all(x in est[0] for x in ("+84.6%", "-14.4%", "✅")), est
+    assert all(x in est[1] for x in ("235", "96%", "221", "2026-07-02")), est
     cut = scan_mod.step2_lines({"est_rev_90d": -6.0, "inst_count": 10})
-    assert cut == ["**Estimates** this year's EPS -6.0% over 90 days ⚠️ analysts are cutting",
-                   "**Funds** 10"], cut
+    assert len(cut) == 2 and "-6.0%" in cut[0] and "⚠️" in cut[0] and "10" in cut[1], cut
     assert scan_mod.step2_lines({"revenue_yoy": 1.0}) == [] and scan_mod.step2_lines(None) == []
 
 

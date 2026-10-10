@@ -113,14 +113,14 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                     reasons.append(f"{k} fail (2nd consecutive close): {p['detail']}")
                 else:
                     notes.append(f"{sym}: {k} first failing close - streak started, "
-                                 "no order yet")
+                                 "no order until a 2nd in a row")
         warn_only = [f"{k} warn: {snapshot[sym][k]['detail']}"
                      for k in ("P1", "P2", "P3", "P4")
                      if snapshot[sym][k]["status"] == "warn"]
         p3 = snapshot[sym]["P3"]
         if p3["status"] == "fail":
-            notes.append(f"{sym}: P3 fail ({p3['detail']}) - tape is report-only, "
-                         "de-grossing stays a human call")
+            notes.append(f"{sym}: P3 fail ({p3['detail']}) - the market check never sells "
+                         "by itself; cutting back is your decision")
         if warn_only and not reasons:
             notes.append(f"{sym}: " + "; ".join(warn_only))
 
@@ -138,9 +138,9 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                       "streak": stk.get("streak")}
         frac = doctrine.MARKET_TURN_REDUCE_FRACTION
         if turn["turn"]:
-            notes.append(f"MARKET: SPY closed in Stage 4 today. Reduce exposure (sell "
-                         f"{frac:.0%} of each position) and add nothing until SPY recovers "
-                         f"for {doctrine.REGIME_CONFIRM_DAYS} sessions.")
+            notes.append(f"MARKET: SPY closed in Stage 4 today. Cut back (sell "
+                         f"{frac:.0%} of each position) and buy nothing new until SPY "
+                         f"recovers for {doctrine.REGIME_CONFIRM_DAYS} sessions.")
             if doctrine.MARKET_TURN_CAN_TRADE:
                 full = {o["symbol"] for o in orders}
                 for pos in positions:
@@ -149,8 +149,8 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                         continue
                     qty = int(held * frac)
                     if qty < 1:
-                        notes.append(f"{sym}: market turn — a single share, no partial "
-                                     "sell (decide by hand)")
+                        notes.append(f"{sym}: market turn — a single share, so no part "
+                                     "to sell (decide by hand)")
                         continue
                     orders.append({"symbol": sym, "qty": qty, "exit": "partial",
                                    "reasons": [f"market turn: SPY entered Stage 4 — sell "
@@ -158,14 +158,14 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                                    "status": ORDER_PLANNED, "detail": ""})
         elif turn["unconfirmed"]:
             notes.append("MARKET: SPY is in Stage 4, but with no earlier plan on file the "
-                         "turn can't be dated — the book may already have been reduced; "
-                         "decide by hand.")
+                         "day of the turn is unknown — positions may already have been "
+                         "cut back; decide by hand.")
         elif turn["stage4"]:
             notes.append("MARKET: SPY still in Stage 4 — stay defensive, no new buys.")
         elif stk.get("streak") is not None and not stk.get("satisfied"):
             notes.append(f"MARKET: SPY {stk['streak']}/{doctrine.REGIME_CONFIRM_DAYS} "
-                         "sessions back in Stage 1-2 — the re-entry lag isn't met; don't "
-                         "add yet"
+                         "sessions back in Stage 1-2 — the wait before buying again "
+                         "isn't over; don't add yet"
                          + (" (with breadth)" if stk.get("breadth") else " (SPY only)")
                          + ".")
 
@@ -183,16 +183,16 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
             continue
         # Once per position: a second strength sale every evening would empty it.
         if rd.get("trimmed"):
-            notes.append(f"{sym}: already trimmed - no second strength sale")
+            notes.append(f"{sym}: already sold part - no second strength sale")
             continue
         qty = int(held * doctrine.STRENGTH_SELL_FRACTION)
         if qty < 1:
-            notes.append(f"{sym}: selling into strength - a single share, no partial "
-                         "sell (decide by hand)")
+            notes.append(f"{sym}: selling into strength - a single share, so no "
+                         "part to sell (decide by hand)")
             continue
         order = {"symbol": sym, "qty": qty, "exit": "partial",
                  "reasons": [f"selling into strength: {len(signs)} signs - sell "
-                             f"{qty}/{held}, rest stopped at breakeven"],
+                             f"{qty}/{held}, stop on the rest at breakeven"],
                  "status": ORDER_PLANNED, "detail": ""}
         if rd.get("avg_entry"):
             order["remainder_stop"] = round(float(rd["avg_entry"]), 2)

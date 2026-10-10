@@ -43,7 +43,7 @@ from .vcp import detect_vcp
 
 @dataclass
 class ScanConfig:
-    min_criteria: int = 8          # Step 1: require all 8 of the book's criteria
+    min_criteria: int = 8          # Step 1: require all 8 of Minervini's criteria
     min_history_rows: int = 200    # classify_phase needs >= 200 rows
     rs_period: int = 126           # ~6 months, for the RS rating percentile
     min_rs: float = 0.0            # 0 = off; an extra RS minimum above Step 1's RS_FLOOR
@@ -205,18 +205,21 @@ def step2_lines(f: Optional[dict]) -> List[str]:
                       " · 3 years rising ✅" if up3 else " · not 3 years rising"))
     if f.get("eps_decel_2q"):
         out.append(f"⚠️ EPS growth slowed two quarters running "
-                   f"({run(f.get('eps_g3'), '{:+.0f}%')}), a sign the books disqualify on")
+                   f"({run(f.get('eps_g3'), '{:+.0f}%')}); the books rule a stock out "
+                   f"for this")
     if inventory_flag(f):
         out.append(f"⚠️ Inventory {f['inventory_qoq']:+.1f}% vs sales "
-                   f"{f['revenue_qoq']:+.1f}% last quarter: stock is piling up faster "
-                   f"than it sells")
+                   f"{f['revenue_qoq']:+.1f}% last quarter: goods are piling up faster "
+                   f"than they sell")
     est = f.get("est_rev_90d")
     if est is not None:
         mark = (" ✅" if est >= ESTIMATE_RAISE_MIN_PCT
-                else " ⚠️ analysts are cutting" if est <= -ESTIMATE_RAISE_MIN_PCT else "")
+                else " ⚠️ analysts are lowering it" if est <= -ESTIMATE_RAISE_MIN_PCT
+                else "")
         e30 = f.get("est_rev_30d")
-        recent = "" if e30 is None else f" ({e30:+.1f}% over 30)"
-        out.append(f"**Estimates** this year's EPS {est:+.1f}% over 90 days{recent}{mark}")
+        recent = "" if e30 is None else f" ({e30:+.1f}% over 30 days)"
+        out.append(f"**Estimates** analysts' forecast of this year's EPS {est:+.1f}% over "
+                   f"90 days{recent}{mark}")
     cnt, pct = f.get("inst_count"), f.get("inst_pct")
     if cnt is not None:
         hist = f.get("inst_history") or []
@@ -224,8 +227,8 @@ def step2_lines(f: Optional[dict]) -> List[str]:
         if len(hist) >= 2:
             (d0, c0) = hist[-2]
             trend = f" ({'↑' if cnt > c0 else '↓'} from {c0} on {d0})"
-        held = "" if pct is None else f" holding {pct:.0f}%"
-        out.append(f"**Funds** {cnt}{held}{trend}")
+        held = "" if pct is None else f", owning {pct:.0f}% of the shares"
+        out.append(f"**Funds holding it** {cnt}{held}{trend}")
     return out
 
 
@@ -729,7 +732,8 @@ def run_scan(universe: str, cfg: Optional[ScanConfig] = None,
     tickers = data_feed.get_universe(universe, force=force)
     spy = data_feed.get_spy(force=force, max_age_days=0.0)
     if spy is None or len(spy) < 200:
-        raise RuntimeError("Could not fetch SPY benchmark data (needed for RS/regime).")
+        raise RuntimeError("Could not download SPY data (needed for the RS ratings and the "
+                           "market banner).")
     # Two sequential progress phases share one (done, total, label) callback; the label
     # prefix tells the UI which phase the bar is in.
     _p_fetch = (None if progress is None

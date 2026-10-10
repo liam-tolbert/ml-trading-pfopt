@@ -399,8 +399,8 @@ def detect_vcp(price_data: pd.DataFrame, current_price: float, phase_info: Dict,
         # A stock that has barely moved for months has no swings to contract, so it can't
         # be a setup worth buying.
         if np.isfinite(med_tr) and med_tr < DEAD_TAPE_MEDIAN_TR:
-            return {**_empty(f'Dead tape: median daily range {med_tr * 100:.2f}% '
-                             f'over the last {DEAD_TAPE_BARS} sessions'),
+            return {**_empty(f'Barely moving: median daily range {med_tr * 100:.2f}% '
+                             f'over the last {DEAD_TAPE_BARS} trading days'),
                     'median_tr_pct': med_tr_pct}
         thr_long = _adaptive_threshold(base)
         thr_recent = _adaptive_threshold(base.tail(RECENT_WINDOW_BARS))

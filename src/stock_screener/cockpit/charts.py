@@ -114,13 +114,13 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     if show_bollinger and len(d_full) >= 20:
         bb_up, bb_mid, bb_lo = (s.reindex(d.index) for s in bollinger_bands(d_full))
         band = "rgba(75,108,183,0.55)"
-        fig.add_trace(go.Scatter(x=d.index, y=bb_lo, name="BB lower", line=dict(width=1, color=band),
+        fig.add_trace(go.Scatter(x=d.index, y=bb_lo, name="Bollinger lower", line=dict(width=1, color=band),
                                  showlegend=False, hoverinfo="skip"), row=1, col=1)
         fig.add_trace(go.Scatter(x=d.index, y=bb_up, name="Bollinger (20, 2σ)",
                                  line=dict(width=1, color=band), fill="tonexty",
                                  fillcolor="rgba(75,108,183,0.07)", hoverinfo="skip"),
                       row=1, col=1)
-        fig.add_trace(go.Scatter(x=d.index, y=bb_mid, name="BB basis (SMA20)",
+        fig.add_trace(go.Scatter(x=d.index, y=bb_mid, name="Bollinger middle (SMA20)",
                                  line=dict(width=1, color="rgba(75,108,183,0.8)", dash="dot"),
                                  showlegend=False, hoverinfo="skip"), row=1, col=1)
 

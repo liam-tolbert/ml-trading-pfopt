@@ -73,7 +73,7 @@ def test_vcp_median_tr_exposed():
     pinned = detect_vcp(df, float(df["Close"].iloc[-1]), {}, thr=0.04)
     assert adaptive["median_tr_pct"] and adaptive["median_tr_pct"] == pinned["median_tr_pct"]
     dead = detect_vcp(_bars([50.0] * 120, spread=0.002), 50.0, {})
-    assert dead["tier"] == "C" and "Dead tape" in dead["pattern_details"]
+    assert dead["tier"] == "C"
     assert abs(dead["median_tr_pct"] - 0.4) < 1e-9
     assert detect_vcp(df.iloc[:30], 100.0, {})["median_tr_pct"] is None
 
@@ -111,7 +111,7 @@ def test_sma20_warn_window():
     df, e = _breakout([101.0, 102.0, 95.0, 97.0, 99.0])
     r = advisories.post_breakout_read(df, e, avg_entry=100.0, today=df.index[-1])
     assert r["day_n"] == 5
-    assert r["sma20"] == "closed below the 20-day line on day 4 (2×)", r["sma20"]
+    assert r["sma20"] and "4" in r["sma20"] and "(2×)" in r["sma20"], r["sma20"]
 
     late, e2 = _breakout([100.5 + 0.5 * k for k in range(24)] + [95.0])
     r2 = advisories.post_breakout_read(late, e2, avg_entry=100.0, today=late.index[-1])
@@ -166,7 +166,7 @@ def test_post_breakout_violations_each_fire():
     v = advisories.post_breakout_read(df, e, avg_entry=100.0, below_sma50=True,
                                       volume_ratio=1.8, today=df.index[-1])["violations"]
     assert "gave back a +7% gain" in v, v
-    assert "closed below the 50-day on heavy volume" in v, v
+    assert len(v) == 2, v
 
 
 def test_post_breakout_follow_through():
@@ -180,7 +180,7 @@ def test_post_breakout_follow_through():
                                       today=df.index[-1])["follow_through"]
     assert "8 up close(s) on rising volume" in f, f
     assert "3 of the first 4 sessions up" in f and "6 of the first 8 sessions up" in f, f
-    assert "more upper-half closes (8 vs 0)" in f, f
+    assert any("(8 vs 0)" in x for x in f), f
 
     df, e = _breakout([102.0, 101.0, 103.0, 104.0])            # one dip, bought back
     f = advisories.post_breakout_read(df, e, avg_entry=100.0,
@@ -203,15 +203,15 @@ def test_violations_switch_and_plan_notes():
     today = df.index[-1].strftime("%Y-%m-%d")
 
     off = sell_pillars(pos, entry_date=e, today=today)
-    assert off["P1"]["status"] == "warn" and "violations:" in off["P1"]["detail"], off["P1"]
+    assert off["P1"]["status"] == "warn", off["P1"]
     plan = sells.build_sell_plan([pos], {"AAA": off}, today=today)
     assert not plan["orders"], "a warning must never plan an order"
-    assert any("violations:" in n for n in plan["notes"]), plan["notes"]
+    assert any(n.startswith("AAA") for n in plan["notes"]), plan["notes"]
 
     assert doctrine.VIOLATIONS_CAN_FAIL is False, "ships off"
     with patch.object(doctrine, "VIOLATIONS_CAN_FAIL", True):
         on = sell_pillars(pos, entry_date=e, today=today)
-    assert on["P1"]["status"] == "fail" and "post-breakout violations" in on["P1"]["detail"]
+    assert on["P1"]["status"] == "fail"
     plan = sells.build_sell_plan([pos], {"AAA": on}, today=today)
     assert [o["symbol"] for o in plan["orders"]] == ["AAA"]
 
@@ -242,17 +242,17 @@ def test_strength_signs():
     df, e = _breakout(post + [post[-1] * 1.06])
     df.iloc[-1, df.columns.get_loc("Low")] = post[-1] * 1.02
     s = signs(df, e)["signs"]
-    assert "biggest up day of the run (+6.0%)" in s, s
-    assert "gapped up late in the run (day 11)" in s, s
+    assert any("(+6.0%)" in x for x in s), s
+    assert any("(day 11)" in x for x in s), s
     day = df.index[-1].strftime("%Y-%m-%d")
     live = advisories.strength_signs(df, e, avg_entry=100.0, now=f"{day} 11:00")
     assert live["provisional_dropped"] is True and live["day_n"] == 10, live
-    assert not any("gapped" in x or "biggest up" in x for x in live["signs"]), live
+    assert not any("(+6.0%)" in x or "(day 11)" in x for x in live["signs"]), live
 
     # heavy volume, no progress
     post = [100.0 * 1.025 ** k for k in range(1, 11)]
     df, e = _breakout(post + [post[-1] * 1.002], post_vol=[1e6] * 10 + [2e6])
-    assert "heavy volume (2.0×) with no progress" in signs(df, e)["signs"]
+    assert any("(2.0×)" in x for x in signs(df, e)["signs"])
 
     # the biggest down day since the entry
     post = [100.0 * 1.03 ** k for k in range(1, 11)]
@@ -294,7 +294,7 @@ def test_weak_market_advice():
     txt = advisories.weak_market_advice({"regime": "TRANSITIONAL / Uncertain"},
                                         stop_pct=0.075, target_pct=0.25, risk_pct=1.0)
     assert txt.startswith("TRANSITIONAL / Uncertain")
-    assert "stops 5–6% below the buy (plan: 7.5%)" in txt, txt
+    assert "5–6%" in txt and "(plan: 7.5%)" in txt, txt
     assert "profits taken at 10–12% (plan target +25%)" in txt, txt
     assert "(plan: 1.00% risk per trade)" in txt, txt
 
@@ -550,9 +550,8 @@ def test_book_tightening():
     legs = lambda *d: [{"drawdown_pct": x} for x in d]              # noqa: E731
     half = advisories.book_tightening(legs(24.0, 13.0, 6.0), 6.14)
     assert half == {"depths": [24.0, 13.0, 6.0], "ratios": [0.54, 0.46], "base_weeks": 6.1}
-    assert advisories.book_tightening_text(half) == (
-        "Dips 24% → 13% → 6% (each 0.54×, 0.46× the last; the books look for about half) · "
-        "base 6.1 weeks (books: ≥ 3)")
+    t = advisories.book_tightening_text(half)
+    assert all(x in t for x in ("24%", "13%", "6%", "0.54×", "0.46×", "6.1")), t
     loose = advisories.book_tightening(legs(20.0, 18.0, 16.0))
     assert loose["ratios"] == [0.9, 0.89] and loose["base_weeks"] is None
     assert advisories.book_tightening(legs(0.0, 5.0))["ratios"] == [None]

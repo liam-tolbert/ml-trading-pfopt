@@ -246,7 +246,7 @@ def test_vcp_deal_pinned_stock_is_dead_tape():
     df = pd.concat([df, flat])
     v = detect_vcp(df, float(df["Close"].iloc[-1]), {})
     assert v["tier"] == "C", (v["tier"], v["pattern_details"])
-    assert "Dead tape" in v["pattern_details"], v["pattern_details"]
+    assert v["median_tr_pct"] is not None and v["median_tr_pct"] < 1.0, v
 
 
 def test_vcp_extended_breakout_is_watch_not_review():

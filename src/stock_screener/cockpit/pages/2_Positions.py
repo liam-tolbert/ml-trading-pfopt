@@ -47,9 +47,9 @@ st.markdown(
     unsafe_allow_html=True)
 
 _BASIS_LABELS = {
-    "auto": "Auto (the books' triggers)",
+    "auto": "Auto (the books' rules)",
     "initial": "Initial (8% below entry)",
-    "breakeven": "Breakeven (entry)",
+    "breakeven": "Breakeven (entry price)",
     "sma50": "Trail 50-day SMA",
 }
 _ICONS = {"submitted": "✅", "stop_only": "🛑", "stop_kept": "🔒", "skipped": "—", "failed": "⚠️"}
@@ -180,7 +180,7 @@ m[3].metric("Unrealized P&L", f"${_pl:,.0f}", border=True)
 
 _src = ("Minervini Trader keys" if acct.get("using_dedicated")
         else "shared ALPACA_* keys — set ALPACA_API_KEY_MINERVINI / "
-             "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
+             "ALPACA_API_KEY_SECRET_MINERVINI to use the Minervini account")
 st.caption(f"Account **…{str(acct['account_number'])[-4:]}** ({_src}) · "
            f"as of {read_at:%H:%M:%S} ET")
 
@@ -243,10 +243,10 @@ try:
 except Exception:
     _mk = {}
 if _mk.get("turn"):
-    st.error("**Market turn:** SPY closed in Stage 4 on the last evening plan. Reduce "
-             "exposure and add nothing until SPY recovers (see the plan notes below).")
+    st.error("**Market turn:** SPY closed in Stage 4 on the last evening plan. Hold less "
+             "stock and buy nothing until SPY recovers (see the plan notes below).")
 elif _mk.get("spy_phase") == 4:
-    st.warning("**SPY is in Stage 4** — stay defensive; no new buys.")
+    st.warning("**SPY is in Stage 4** — be careful; no new buys.")
 _weak_tape = advisories.weak_market_advice(_regime, _spy, target_pct=0.25)
 if _weak_tape:
     st.warning(_weak_tape)
@@ -316,58 +316,62 @@ col_config = {
     "qty": _num("Shares", format="%d"),
     "avg_entry": _num("Avg entry", format="$%.2f"),
     "current_price": _num("Price", format="$%.2f"),
-    "gain_pct": _num("Gain", format="%.1f%%", help="Unrealized gain/loss on the position."),
+    "gain_pct": _num("Gain", format="%.1f%%",
+                     help="Gain or loss on the position so far (shares not yet sold)."),
     "R": st.column_config.Column(
         "R", help="Gain as a multiple of the initial risk. Exact when the stop in force "
-                  "is the one the trade plan attached (from the watchlist's frozen pivot, "
-                  "raised to 10% below the fill); '~' = an estimate — the stop has been "
-                  "raised since, or the name isn't watchlisted (8% off the entry). At ≥2R "
-                  "the free-roll applies: sell half, move the stop to breakeven, and the "
-                  "rest rides risk-free."),
+                  "is the one the trade plan set (from the pivot saved on the watchlist, "
+                  "raised to 10% below the buy price); '~' = an estimate — the stop has "
+                  "been raised since, or the stock isn't on the watchlist (8% below the "
+                  "entry). At ≥2R: sell half and move the stop to breakeven, so the rest "
+                  "can't lose."),
     "stage": st.column_config.Column(
-        "Stage", help="The stop ladder, by the books' triggers: underwater · initial "
-                      "(no trigger yet) · breakeven (the rising 50-day reached your cost, "
-                      "3R, or 2× your average win) · back stop (at your average win) · "
-                      "trailing 50-day (the 50-day is above your cost). The average-win "
-                      "triggers start at 5 wins."),
+        "Stop stage", help="Where the stop is, by the books' rules: underwater (at a loss) "
+                           "· initial (no rule met yet) · breakeven (the rising 50-day "
+                           "reached your cost, 3R, or 2× your average win) · back stop (at "
+                           "your average win) · trailing 50-day (the 50-day is above your "
+                           "cost). The average-win rules start at 5 wins."),
     "P1": st.column_config.Column(
-        "P1", help="Breakout holding: Day-0 close below pivot, decisive close below "
-                   "pivot, close below the breakout bar's low once back under the pivot (above it, "
-                   "a warning), and the laggard clock "
-                   "(no ~3% cushion by ~day 10; flat-to-red by day 15). ⚠ also lists "
-                   "post-breakout violations: a close under the 20-day line in the first "
-                   "month, a heavy down day after a light-volume breakout, lower lows, "
-                   "more down/lower-half closes, a gain given back. Needs the journal "
-                   "entry date; pivot flags need the watchlist's frozen pivot."),
+        "P1", help="Is the breakout holding: a close below the pivot on breakout day, a "
+                   "clear close below the pivot, a close below the breakout day's low once "
+                   "back under the pivot (above it, a warning), and a slow start "
+                   "(not ~3% up by ~day 10; flat or down by day 15). ⚠ also lists "
+                   "warning signs since the breakout: a close under the 20-day line in the "
+                   "first month, a heavy-volume down day after a light-volume breakout, "
+                   "lower lows, more down days or closes in the lower half of the day's "
+                   "range, a gain given back. Needs the entry date from the journal; the "
+                   "pivot checks need the pivot saved on the watchlist."),
     "P2": st.column_config.Column(
-        "P2", help="The book's trend template on the holding: the seven price criteria "
+        "P2", help="Minervini's Trend Template on this stock: the seven price checks "
                    "plus an RS rating ≥ 70 from the last scan. Strict: anything under "
-                   "8/8 is a fail (a knife-edge SMA criterion can flip it for a day, and "
+                   "8/8 is a fail (an SMA check that is very close can flip for a day, and "
                    "RS is a rank that can dip under 70 for a day). Seven passing with no "
-                   "scan reads —."),
+                   "scan shows —."),
     "P3": st.column_config.Column(
-        "P3", help="The tape: scan regime when available, else the trigger report's "
-                   "SPY-only read. Risk-off = demote every yellow flag to red."),
+        "P3", help="The market: the scan's market reading when there is one, else the "
+                   "trigger report's SPY check. When the market is risk-off (weak), every "
+                   "⚠️ counts as ❌."),
     "P4": st.column_config.Column(
-        "P4", help="Earnings window: inside ~21 days a loss or <8% cushion fails "
-                   "(a stop can't protect against a gap); a real cushion still says "
-                   "trim to hold-through size."),
-    "market_value": _num("Mkt value", format="$%.0f"),
-    "unrealized_pl": _num("Unreal. P&L", format="$%.0f"),
+        "P4", help="Earnings: within ~21 days of the report, a loss or a gain under 8% "
+                   "fails (the price can open far below a stop after a report); with a "
+                   "bigger gain, still cut to a size you can hold through it."),
+    "market_value": _num("Market value", format="$%.0f"),
+    "unrealized_pl": _num("Unrealized P&L", format="$%.0f"),
     "current_stop": _num("Stop", format="$%.2f",
-                         help="Highest open protective sell-stop in force (blank = no stop)."),
+                         help="The highest stop order in place (blank = no stop)."),
     "sma_20": _num("20-day SMA", format="$%.2f",
                    help="A fresh breakout should hold its 20-day line for the first ~month; "
-                        "a close below it is a violation — a reason to doubt the breakout."),
+                        "a close below it is a warning sign — a reason to doubt the breakout."),
     "sma_50": _num("50-day SMA", format="$%.2f",
-                   help="Once the rising 50-day passes your cost, the stop trails just under "
-                        "it; a close below it on "
-                        "heavy volume is an exit signal."),
+                   help="Once the rising 50-day passes your cost, the stop follows just "
+                        "under it; a close below it on "
+                        "heavy volume is a sign to sell."),
     "earnings": st.column_config.Column(
-        "Earnings", help="Next scheduled report. ⚠︎ inside ~21 days: a stop can't protect "
-                         "against an earnings gap — hold through only with a profit cushion "
-                         "(~8%+), otherwise trim or exit before the report."),
-    "advisories": st.column_config.Column("Advisories", width="large"),
+        "Earnings", help="Next earnings report. ⚠︎ within ~21 days: a stop can't protect "
+                         "you, since the price can open far below it after the report — "
+                         "hold through only with a gain of ~8%+, otherwise sell part or all "
+                         "before the report."),
+    "advisories": st.column_config.Column("Advice", width="large"),
 }
 col_order = ["symbol", "qty", "avg_entry", "current_price", "gain_pct", "R", "stage",
              "P1", "P2", "P3", "P4",
@@ -375,9 +379,10 @@ col_order = ["symbol", "qty", "avg_entry", "current_price", "gain_pct", "R", "st
              "advisories"]
 st.dataframe(pd.DataFrame(rows), column_config=col_config, column_order=col_order,
              hide_index=True, width="stretch")
-st.caption("Sell pillars — P1 breakout holding · P2 trend template · P3 tape · "
-           "P4 earnings. Any ❌ kills the thesis; the stop is only the disaster floor "
-           "between checks. — = not enough data (journal / frozen pivot / scan).")
+st.caption("Sell pillars (four keep-or-sell checks) — P1 breakout holding · P2 Trend "
+           "Template · P3 market · P4 earnings. Any ❌ means the reason to own the stock is "
+           "gone; the stop only guards against disaster between checks. — = not enough "
+           "data (journal / saved pivot / scan).")
 
 # --- Planned auto-sells: evening plan → overnight veto → morning submit --------------------- #
 _plan = None
@@ -387,11 +392,12 @@ except Exception:
     _plan = None
 if _plan and _plan.get("orders"):
     st.markdown("#### Planned auto-sells")
-    _armed = ("**ARMED** — still-planned orders submit at ~9:25 ET"
-              if sells.autosell_enabled() else "not armed (`AUTOSELL` unset) — plan only")
-    st.caption(f"Evening plan **{_plan.get('date')}** · morning submit {_armed}. "
-               "Veto anything you disagree with before the open; a vetoed order is never "
-               "submitted (its stop stays armed as your floor).")
+    _armed = ("**ARMED** (on) — orders still planned are sent at ~9:25 ET"
+              if sells.autosell_enabled()
+              else "not armed (off: `AUTOSELL` unset) — plan only, nothing is sent")
+    st.caption(f"Evening plan **{_plan.get('date')}** · morning send {_armed}. "
+               "Veto any order you disagree with before the market opens; a vetoed order "
+               "is never sent (its stop order stays in place).")
     _OICON = {"planned": "🕗", "vetoed": "🚫", "submitted": "✅",
               "failed": "⚠️", "skipped": "—"}
     for o in _plan["orders"]:
@@ -415,16 +421,18 @@ if _plan and _plan.get("notes"):
 
 # --- Stop management: stop basis, an editable stop per row, the Re-arm button --------------- #
 st.markdown("#### 🛡️ Stops & sells")
-st.caption("The GTC ratchet only ever RAISES a stop — a suggestion below the stop already in "
-           "force is ignored. Edit any row before re-arming. Each row's expander sells "
-           "part/all at market (two-step confirm); a partial sell re-places the stop for the "
-           "remaining shares at the same level.")
+st.caption("A GTC stop only ever moves UP — a suggested stop below the one already in "
+           "place is ignored. Edit any row before pressing Re-arm (place or raise the "
+           "stops). Each row's Sell section sells part or all at market (two-step confirm); "
+           "after a partial sell, the stop is placed again for the shares left, at the same "
+           "level.")
 basis = st.radio("Stop basis", trade.STOP_BASES, horizontal=True, key="pos_basis",
                  format_func=lambda b: _BASIS_LABELS.get(b, b),
                  help="How each row's suggested new stop is chosen. 'Auto' uses the books' "
-                      "triggers: breakeven once the rising 50-day reaches your cost, at 3R, "
+                      "rules: breakeven once the rising 50-day reaches your cost, at 3R, "
                       "or at 2× your average win; a back stop at your average win; then a "
-                      "trail under the 50-day. With no trigger it stays at the initial stop.")
+                      "stop that follows just under the 50-day. With no rule met it stays "
+                      "at the initial stop.")
 _nonce = st.session_state.pos_nonce
 for p in positions:
     sym, price = p["symbol"], p["current_price"]
@@ -450,32 +458,32 @@ for p in positions:
         avg_entry=p.get("avg_entry"), below_sma50=bool(p.get("below_sma50")),
         volume_ratio=p.get("volume_ratio"))
     if _pb and _pb["follow_through"]:
-        cA.caption(f"  ↳ ✅ follow-through (day {_pb['day_n']}): "
+        cA.caption(f"  ↳ ✅ good signs since the breakout (day {_pb['day_n']}): "
                    + " · ".join(_pb["follow_through"]))
     _signs = (_strength.get(sym) or {}).get("signs")
     if _signs:
         cA.caption(f"  ↳ 📈 selling-into-strength signs ({len(_signs)}): "
-                   + " · ".join(_signs) + " — the books sell part into strength")
+                   + " · ".join(_signs) + " — the books sell part while the price is rising")
     if sym in _leader_breaks:
         cA.caption(f"  ↳ ⚠️ {_leader_breaks[sym]}")
     if _weak_tape and advisories.in_weak_take_profit_band(p.get("gain_pct")):
-        cA.caption(f"  ↳ weak tape: the book takes profits at 10–12% — this one is up "
+        cA.caption(f"  ↳ weak market: the books take profits at 10–12% — this one is up "
                    f"{p['gain_pct'] * 100:.1f}%")
     cB.number_input(f"stop {sym}", min_value=0.0, value=float(seed), step=0.01, format="%.2f",
                     key=f"posstop_{sym}_{_nonce}_{basis}", label_visibility="collapsed")
     _ed = st.session_state.get(f"posstop_{sym}_{_nonce}_{basis}", seed)
     if not trade.stop_is_valid(_ed, price):
-        cB.caption(":red[stop must be < price — set manually]")
+        cB.caption(":red[stop must be below the price — set it by hand]")
     elif price:
         _dr = advisories.typical_day_range(p.get("df"))
         _room = advisories.stop_room(_dr, _ed, price)
-        cA.caption(f"  ↳ risk to stop ≈ {(price - _ed) / price * 100:.1f}%"
+        cA.caption(f"  ↳ drop to the stop ≈{(price - _ed) / price * 100:.1f}%"
                    + (f" · {advisories.stop_room_text(_room, _dr)}" if _room else ""))
 
     # --- Manual sell (market, paper, two-step confirm) ------------------------------------ #
     _held = int(p["qty"] or 0)
     if _held >= 1:
-        with st.expander(f"Sell {sym} (market, paper)"):
+        with st.expander(f"Sell {sym} (market order, paper account)"):
             sc = st.columns([2, 1, 1, 1])
             # The default MUST be set through session_state, not value=: the ¼/½/All
             # buttons also write this key, and a widget given both logs a warning.
@@ -497,7 +505,7 @@ for p in positions:
                     and (p["current_stop"] is None
                          or p["current_stop"] < p["avg_entry"])):
                 if _held >= 2:
-                    if st.button(f"Free-roll — sell ½ {sym} + stop → breakeven",
+                    if st.button(f"Sell ½ {sym} + move stop to breakeven",
                                  key=f"froll_{sym}_{_nonce}", width="stretch"):
                         st.session_state["sell_pending"] = {
                             "symbol": sym, "qty": _held // 2, "held": _held,
@@ -505,8 +513,8 @@ for p in positions:
                             "remainder_stop": p["avg_entry"]}
                 else:
                     st.caption("≥2R on a single share — no half to sell; raise the "
-                               "stop to breakeven instead (re-arm above).")
-            if st.button(f"Sell (market) — {sym}", key=f"sell_{sym}_{_nonce}",
+                               "stop to breakeven instead (stop box above, then Re-arm).")
+            if st.button(f"Sell at market — {sym}", key=f"sell_{sym}_{_nonce}",
                          width="stretch"):
                 # Save the quantity now: Confirm MUST sell what was shown, not a quantity
                 # edited while the warning is open.
@@ -521,24 +529,25 @@ for p in positions:
                 _rstop = _sp.get("remainder_stop")
                 if _rstop is not None and _rem > 0:
                     _sfx = (f"the remaining {_rem} sh get a stop at breakeven @ "
-                            f"{_rstop:.2f} (ratchet — kept if the current stop is "
-                            "higher)")
+                            f"{_rstop:.2f} (stops only move up: the current stop is kept "
+                            "if higher)")
                 elif _stop is None:
-                    _sfx = (f"no stop is armed; the remaining {_rem} sh stay unprotected"
-                            if _rem > 0 else "no stop is armed")
+                    _sfx = (f"no stop is in place; the remaining {_rem} sh stay unprotected"
+                            if _rem > 0 else "no stop is in place")
                 elif _rem > 0:
-                    _sfx = (f"stop @ {_stop:.2f} is cancelled, then re-placed for the "
+                    _sfx = (f"stop @ {_stop:.2f} is cancelled, then placed again for the "
                             f"remaining {_rem} sh at the same level")
                 else:
                     _sfx = f"stop @ {_stop:.2f} is cancelled (no shares remain)"
-                st.warning(f"Sell **{_q}/{_sp['held']} sh {sym}** at market (DAY)? {_sfx}.")
+                st.warning(f"Sell **{_q}/{_sp['held']} sh {sym}** at market (day order)? "
+                           f"{_sfx}.")
                 cc1, cc2 = st.columns(2)
                 cc1.button("✅ Confirm sell", key=f"sellgo_{sym}_{_nonce}", type="primary",
                            width="stretch", on_click=_do_sell, args=(sym, _q, _rstop))
                 cc2.button("Cancel", key=f"sellno_{sym}_{_nonce}", width="stretch",
                            on_click=_cancel_sell)
 
-st.button("🛡️ Re-arm / raise all stops", type="primary", width="stretch",
+st.button("🛡️ Re-arm: place or raise all stops", type="primary", width="stretch",
           on_click=_do_rearm, args=(positions, _nonce, basis))
 
 _sr = st.session_state.get("sell_result")
@@ -557,10 +566,11 @@ if _rr:
         st.error(f"Re-arm failed: {_rr['error']}")
     else:
         _act = [r for r in _rr["results"] if r["status"] in ("stop_only", "stop_kept")]
-        st.success(f"Actioned {len(_act)}/{len(_rr['results'])} stop(s) on "
+        st.success(f"Placed or kept {len(_act)}/{len(_rr['results'])} stop(s) on "
                    f"account …{str(_rr['account_number'])[-4:]} · equity ${_rr['equity']:,.0f}")
         for r in _rr["results"]:
             ic = _ICONS.get(r["status"], "•")
             st.caption(f"{ic} {r['ticker']}: {r['status']} — {r.get('detail', '')}")
 
-st.caption("Educational tool — not financial advice. Stops are GTC on the paper account.")
+st.caption("Educational tool — not financial advice. Stops are GTC (good till cancelled) "
+           "orders on the paper account.")

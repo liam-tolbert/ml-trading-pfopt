@@ -105,8 +105,8 @@ progress = hunt_view.hunt_progress()
 _active = progress["state"] in ("requested", "claimed", "running")
 tcol, dcol, scol = st.columns([2, 2, 1.3], vertical_alignment="center")
 tcol.markdown("### 🔭 Weekend Hunt",
-              help="Every Tier-A base reviewed on the hunt PC; the PASS names here, one at a "
-                   "time. Step 4 — the entry — is yours.")
+              help="Every Tier-A (top-grade) base from the scan, reviewed on the hunt PC; the "
+                   "stocks that PASS show here, one at a time. Step 4 — the buy — is yours.")
 if date_names:
     if st.session_state.get("hunt_date") not in date_names:
         st.session_state["hunt_date"] = date_names[0]
@@ -116,7 +116,8 @@ if date_names:
 scol.button("▶ Start weekend hunt", key="hunt_start", on_click=_start_cb,
             disabled=_active, width="stretch",
             help="The hunt PC watches for requests while awake; asleep, it runs the request "
-                 "when it next wakes. The Friday 18:00 hunt is requested by the Pi itself.")
+                 "when it next wakes. The Friday 18:00 hunt is requested by the Raspberry Pi "
+                 "itself.")
 if st.session_state.get("hunt_msg"):
     st.info(st.session_state.pop("hunt_msg"))
 
@@ -157,7 +158,7 @@ if state is None:
 
 meta = state.meta
 regime = (meta.get("regime") or {}).get("regime", "?")
-st.caption(f"Scan of **{str(meta.get('scan_time', ''))[:10]}** · regime **{regime}** · "
+st.caption(f"Scan of **{str(meta.get('scan_time', ''))[:10]}** · market **{regime}** · "
            f"{meta.get('n_eligible', len(state.diag_rows))} reviewed · "
            f":green[PASS {state.n['PASS']}] · :orange[PASS- {state.n['PASS-']}] · "
            f":red[FAIL {state.n['FAIL']}]")
@@ -168,7 +169,7 @@ tab_review, tab_narr, tab_report = st.tabs(["Review", "Narrative", "Report"])
 with tab_review:
     picks = hunt_view.ordered_picks(state)
     if not picks:
-        st.info("No PASS names in this hunt.")
+        st.info("No PASS stocks in this hunt.")
     else:
         if st.session_state.get("hunt_idx_date") != hunt_date:
             st.session_state["hunt_idx"] = 0
@@ -204,8 +205,8 @@ with tab_review:
                         key="hunt_wl_add", on_click=_wl_add_cb, args=(pick, hunt_date),
                         width="stretch")
         if pick.blocked:
-            st.caption(f":orange[⚠︎ Earnings in {pick.earnings_in}d — the hunt bars an entry "
-                       f"inside the window.]")
+            st.caption(f":orange[⚠︎ Earnings in {pick.earnings_in}d — the hunt allows no buy "
+                       f"this close to a report.]")
         if st.session_state.get("hunt_wl_msg"):
             st.toast(st.session_state.pop("hunt_wl_msg"), icon="⭐")
 
@@ -226,24 +227,25 @@ with tab_review:
                                   annotation_font_color="#9e9e9e")
                 st.plotly_chart(fig, width="stretch")
                 if drift:
-                    st.caption(f":orange[Since the hunt the scan re-detects the pivot at "
+                    st.caption(f":orange[Since the hunt the scan finds the pivot at "
                                f"{drift[0]:.2f} ({drift[1]:+.1f}% vs the hunt's "
                                f"{_fmt(nums['pivot'])}; dotted line).] The levels drawn, the "
-                               "numbers and ⭐ Add use the hunt's pivot; re-freeze it with 📌 "
-                               "on the scan page if you judge the new one.")
+                               "numbers and ⭐ Add use the hunt's pivot; save the new one with "
+                               "📌 on the scan page if you think it is right.")
                 else:
-                    st.caption("Today's bars and detected legs; the levels are the hunt's.")
+                    st.caption("Today's price bars and the contractions found; the levels "
+                               "are the hunt's.")
             else:
                 sheet = hunt_view.sheet_for(hunt_path, state, pick.ticker)
                 if sheet:
                     png, k, total, j = sheet
                     panel = hunt_view.sheet_panel(png, j)
                     st.image(panel if panel is not None else str(png), width=SHEET_WIDTH)
-                    st.caption(f"From hunt sheet {k} of {total} ({hunt_view.panel_name(j)}): "
-                               f"{pick.ticker} is not in the latest Pi scan.")
+                    st.caption(f"From review sheet {k} of {total} ({hunt_view.panel_name(j)}): "
+                               f"{pick.ticker} is not in the latest scan on the Pi.")
                 else:
-                    st.info("No chart: the name is not in the latest scan and the hunt "
-                            "left no sheet for it.")
+                    st.info("No chart: the stock is not in the latest scan and the hunt "
+                            "left no review sheet for it.")
 
         with colSide:
             with st.container(border=True):
@@ -251,20 +253,22 @@ with tab_review:
                 if pick.notes:
                     st.markdown(pick.notes)
                 if nums["depths"] or nums["step3"]:
-                    st.caption(" · ".join(x for x in (f"legs {nums['depths']}" if nums["depths"]
-                                                      else "", nums["step3"]) if x))
+                    st.caption(" · ".join(x for x in (f"contractions {nums['depths']}"
+                                                      if nums["depths"] else "",
+                                                      nums["step3"]) if x))
             with st.container(border=True):
-                st.markdown(step_badge("Step 4", "Entry numbers at the hunt's close"))
-                st.markdown(f"**Pivot** {_fmt(nums['pivot'])} · zone to "
+                st.markdown(step_badge("Step 4", "Entry numbers as of the hunt"))
+                st.markdown(f"**Pivot** {_fmt(nums['pivot'])} · buy zone to "
                             f"{_fmt(nums['zone_hi'])} · **stop** {_fmt(nums['stop'])}")
                 # Two bare dollar signs in one markdown string render as math.
                 st.markdown(f"**ADV** {_fmt(nums['adv_musd'], r'\${:.1f}M')} · max order "
                             f"{_fmt(nums['max_order_usd'], r'\${:,.0f}')}")
                 ern = nums["earnings_in"]
                 st.markdown(f"**Earnings** {'n/a' if ern is None else f'in {ern}d'} · "
-                            f"DD {_fmt(nums['dist_days'], '{:.0f}')} · RS "
-                            f"{_fmt(nums['rs'], '{:.0f}')} · Q {_fmt(nums['q'], '{:.0f}')} · "
-                            f"F {_fmt(nums['fund'], '{:.0f}')}/{int(nums['f_max'])}")
+                            f"heavy down days {_fmt(nums['dist_days'], '{:.0f}')} · RS "
+                            f"{_fmt(nums['rs'], '{:.0f}')} · VCP score "
+                            f"{_fmt(nums['q'], '{:.0f}')} · "
+                            f"fundamentals {_fmt(nums['fund'], '{:.0f}')}/{int(nums['f_max'])}")
 
         # Row 2: Step 2 and the catalyst, side by side.
         colFund, colCat = st.columns(2)
@@ -277,7 +281,7 @@ with tab_review:
         # element, summarised from the hunt's headlines.
         with colCat, st.container(border=True):
             st.markdown(step_badge("Catalyst", "why would institutions want it now?"),
-                        help="A label, never a gate: the catalyst does not change a verdict.")
+                        help="For information only: the catalyst never changes a verdict.")
             cat = catalysts.get(pick.ticker)
             if not cat:
                 st.caption("Not read for this hunt.")
@@ -314,7 +318,7 @@ with tab_report:
     if not html:
         st.info("This hunt left no report.html.")
     else:
-        embed = st.checkbox("Embed the review sheets (slow on a Pi)", key="hunt_embed_sheets",
+        embed = st.checkbox("Show the review sheet images (slow on a Pi)", key="hunt_embed_sheets",
                             value=False)
         components.html(hunt_view.inline_report_images(html, hunt_path, embed),
                         height=REPORT_HEIGHT, scrolling=True)

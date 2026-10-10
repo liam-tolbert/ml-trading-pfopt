@@ -49,9 +49,10 @@ def _pct(v, signed=False, digits=1):
 
 # --------------------------------------------------------------------------- #
 st.title("🧾 Journal — know your numbers")
-st.caption("Closed round trips reconstructed from the Minervini Trader **paper** account's "
-           "order history (cockpit orders are tagged by client_order_id — no separate "
-           "bookkeeping). Educational only — not financial advice.")
+st.caption("Closed trades (a buy and its matching sells) rebuilt from the Minervini Trader "
+           "**paper** account's order history (the cockpit tags each order it places in its "
+           "client_order_id, so no separate record is kept). Educational only — not "
+           "financial advice.")
 
 if "jr_nonce" not in st.session_state:
     st.session_state.jr_nonce = 1
@@ -69,7 +70,7 @@ fills = data["fills"]
 
 _src = ("Minervini Trader keys" if acct.get("using_dedicated")
         else "shared ALPACA_* keys — set ALPACA_API_KEY_MINERVINI / "
-             "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
+             "ALPACA_API_KEY_SECRET_MINERVINI to use the Minervini account")
 st.caption(f"Account **…{str(acct['account_number'])[-4:]}** ({_src}) · "
            f"equity ${acct['equity']:,.0f}")
 
@@ -80,9 +81,10 @@ if not fills:
 journal = trade.build_trade_journal(fills)
 only_tagged = st.checkbox(
     "Cockpit trades only (SEPA-tagged orders)", value=True,
-    help="On: only round trips containing a cockpit order (client_order_id SEPAoto-/SEPAstop-/"
-         "SEPAcockpit-). Off: every trade in the account's history, including manual ones — "
-         "and the All-Weather mirror's if this page is running on the shared keys.")
+    help="On: only trades that include an order the cockpit placed (client_order_id "
+         "SEPAoto-/SEPAstop-/SEPAcockpit-). Off: every trade in the account's history, "
+         "including ones placed by hand — and the All-Weather mirror's (another program) "
+         "if this page uses the shared keys.")
 closed = [t for t in journal["closed"] if t["tagged"] or not only_tagged]
 open_eps = [t for t in journal["open"] if t["tagged"] or not only_tagged]
 stats = trade.journal_stats(closed)
@@ -94,29 +96,29 @@ m = st.columns(5)
 m[0].metric("Closed trades", str(stats["n"]), border=True)
 m[1].metric("Batting avg", _pct(stats["batting_avg"], digits=0), border=True,
             help="Winners as a share of all closed trades. Minervini: ~50% is plenty when "
-                 "the win/loss ratio is ≥ 2:1.")
+                 "the average win is at least 2× the average loss.")
 m[2].metric("Avg win / loss", f"{_pct(stats['avg_win_pct'], signed=True)} / "
                               f"{_pct(stats['avg_loss_pct'], signed=True)}", border=True,
             help="Average gain of winners vs average loss of losers (% of cost).")
 m[3].metric("Expectancy", _pct(stats["expectancy_pct"], signed=True, digits=2), border=True,
-            help="Mean P&L% per closed trade = batting × avg win + (1 − batting) × avg loss. "
-                 "This is the edge that earns progressive exposure.")
+            help="Average P&L % per closed trade = batting × avg win + (1 − batting) × avg "
+                 "loss. Above zero, you have earned the right to trade bigger, step by step.")
 m[4].metric("Realized P&L", f"${stats['total_pl']:,.0f}", border=True)
 
 _ratio = stats["win_loss_ratio"]
 _hw, _hl = stats["avg_hold_days_win"], stats["avg_hold_days_loss"]
-st.caption(f"{stats['wins']}W · {stats['losses']}L · {stats['scratches']} scratch — "
+st.caption(f"{stats['wins']}W · {stats['losses']}L · {stats['scratches']} even — "
            f"win/loss ratio **{f'{_ratio:.2f}' if _ratio is not None else '—'}** · avg hold "
            f"**{f'{_hw:.0f}d' if _hw is not None else '—'}** wins / "
-           f"**{f'{_hl:.0f}d' if _hl is not None else '—'}** losses. Positive expectancy → "
-           "press exposure progressively; negative → cut size until the numbers turn "
+           f"**{f'{_hl:.0f}d' if _hl is not None else '—'}** losses. Expectancy above zero → "
+           "trade bigger step by step; below zero → trade smaller until the numbers improve "
            "(*Think & Trade Like a Champion*).")
 
 # --- Closed trades table --------------------------------------------------------------------- #
 import pandas as pd  # noqa: E402
 
 if not closed:
-    st.info("No closed round trips yet"
+    st.info("No closed trades yet"
             + (f" — {len(open_eps)} trade(s) still open." if open_eps else "."))
 else:
     rows = [{
@@ -139,7 +141,7 @@ else:
         "pl": _num("P&L", format="$%.0f"),
         "pl_pct": _num("P&L %", format="%.1f%%"),
         "source": st.column_config.Column(
-            "Source", help="cockpit = the round trip contains a SEPA-tagged order."),
+            "Source", help="cockpit = the trade includes an order the cockpit placed."),
     }
     df = pd.DataFrame(rows)
     st.dataframe(df, column_config=col_config, hide_index=True, width="stretch",
@@ -161,10 +163,11 @@ else:
     _xs = [r["x"] for r in _sw["rows"]]
     _fig = go.Figure()
     _fig.add_trace(go.Scatter(x=_xs, y=[r["book_total"] * 100 for r in _sw["rows"]],
-                              mode="lines+markers", name="Book — big losses cut to −X"))
+                              mode="lines+markers",
+                              name="Losses capped — every bigger loss cut to −X"))
     _fig.add_trace(go.Scatter(x=_xs, y=[r["aware_total"] * 100 for r in _sw["rows"]],
                               mode="lines+markers",
-                              name="Price-aware — the stop also hits dipping winners"))
+                              name="Price-aware — the stop also sells winners that dipped"))
     _fig.add_hline(y=_sw["actual_total"] * 100, line_dash="dot",
                    annotation_text="what you actually got")
     _fig.update_layout(height=320, margin=dict(l=10, r=10, t=30, b=10),
@@ -178,20 +181,21 @@ else:
               for r in _sw["rows"] if r["x"] in _pick]
     st.dataframe(pd.DataFrame(_lrows), hide_index=True, width="stretch", column_config={
         "stop": st.column_config.Column("Stop"),
-        "book": _num("Book", format="%+.1f%%"),
+        "book": _num("Losses capped", format="%+.1f%%"),
         "price_aware": _num("Price-aware", format="%+.1f%%"),
         "winners_stopped": _num("Winners stopped", format="%d",
                                 help="Winners this stop would have turned into losses — "
                                      "they dipped that far below your cost first."),
     })
     st.caption(f"Minervini's Loss Adjustment Exercise on your {_sw['n']} closed trade(s): "
-               "cut every loss to X% and see what the record would have been. The book "
-               "line can only improve; the price-aware line replays the stop on each "
-               f"trade's own bars — price-aware for {_sw['n_price_aware']} of {_sw['n']} "
-               "trades (the rest have no cached price history for their holding period "
-               "and use the book value). Totals compound each trade as if it used the whole "
-               "account: a way to compare stops, not an account curve. With few wins this "
-               "is noise — read the shape, not the peak.")
+               "cut every loss to X% and see what the record would have been. The "
+               "losses-capped line can only improve; the price-aware line replays the stop "
+               f"on each trade's own daily prices — price-aware for {_sw['n_price_aware']} "
+               f"of {_sw['n']} trades (the rest have no saved prices for the days they were "
+               "held and use the losses-capped value). Totals chain each trade's return as "
+               "if it used the whole account: a way to compare stops, not the account's real "
+               "growth. With few wins the result is mostly chance — look at the shape, not "
+               "the highest point.")
 
 # --- Open trades (not in the stats) ----------------------------------------------------------- #
 if open_eps:
@@ -209,14 +213,15 @@ if open_eps:
         "shares_open": _num("Shares open", format="%g"),
         "avg_entry": _num("Avg entry", format="$%.2f"),
         "realized_pl": _num("Realized so far", format="$%.0f",
-                            help="Partial sells booked at the episode's average cost."),
+                            help="P&L on shares already sold, against the trade's "
+                                 "average cost."),
         "source": st.column_config.Column("Source"),
     })
 
 if journal["unmatched_sells"]:
-    st.caption(f"⚠ {len(journal['unmatched_sells'])} sell fill(s) had no matching prior buy "
-               "in the pulled history (pre-history or transferred shares) — excluded from "
-               "every number above.")
+    st.caption(f"⚠ {len(journal['unmatched_sells'])} filled sell(s) had no matching earlier "
+               "buy in the order history read (bought before it starts, or shares moved in "
+               "from elsewhere) — left out of every number above.")
 
-st.caption("Educational tool — not financial advice. Stats count position episodes "
-           "(flat → long → flat), so scale-ins and partial exits aggregate into one trade.")
+st.caption("Educational tool — not financial advice. A trade runs from the first buy until "
+           "no shares are left, so extra buys and partial sells count as one trade.")

@@ -1356,7 +1356,7 @@ def get_fundamentals(ticker: str, force: bool = False,
         # Any EDGAR failure leaves the yfinance dict as is. After a report, EDGAR is
         # downloaded again too, for the new release date.
         try:
-            ed = _edgar_backfill(sym, force=True) if reported else _edgar_backfill(sym)
+            ed = _edgar_backfill(sym, today, force=True) if reported else _edgar_backfill(sym)
         except Exception:
             ed = None
         _merge_edgar(out, ed)

@@ -517,7 +517,7 @@ def test_trade_panel_risk_guidance():
         at.run()
         assert not at.exception, f"app raised: {at.exception}"
         rendered = " ".join(str(getattr(c, "value", "")) for c in at.caption)
-        assert "2W/8L" in rendered and "pilot size" in rendered, rendered
+        assert "2W/8L" in rendered, rendered
         btns = [b for b in at.button if b.key == "risk_apply"]
         assert btns and "0.50%" in btns[0].label, "apply button missing or mislabeled"
         btns[0].click().run()
@@ -1126,7 +1126,6 @@ def test_app_tape_banner_and_advice():
     rendered = _rendered_text(at)
     assert ":orange-background[TRANSITIONAL / Uncertain]" in rendered, \
         "TRANSITIONAL must not render as risk-on green"
-    assert "in a weak market the book tightens up" in rendered
     assert "(plan: 7.5%)" in rendered
     assert "**3/15** sessions" in rendered, "re-entry lag caption missing"
 

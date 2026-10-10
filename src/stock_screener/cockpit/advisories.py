@@ -125,7 +125,7 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
              if np.isfinite(s20[d]) and c[d] < s20[d]]
     sma20_note = None
     if under:
-        sma20_note = (f"closed below the 20-day line on day {under[-1]}"
+        sma20_note = (f"closed below the 20-day average on day {under[-1]}"
                       + (f" ({len(under)}×)" if len(under) > 1 else ""))
         violations.append(sma20_note)
 
@@ -161,7 +161,7 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
                           f"({lower_half} vs {upper_half})")
 
     if below_sma50 and volume_ratio is not None and volume_ratio >= heavy:
-        violations.append("closed below the 50-day on heavy volume")
+        violations.append("closed below the 50-day average on heavy volume")
 
     if avg_entry and n >= 1:
         best = float(np.max(hi[1:])) / float(avg_entry) - 1.0
@@ -177,7 +177,8 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
     if n >= 8 and sum(1 for d in ups if d <= 8) >= 6:
         follow.append("6 of the first 8 sessions up")
     if n >= 3 and upper_half > lower_half:
-        follow.append(f"more upper-half closes ({upper_half} vs {lower_half})")
+        follow.append(f"more closes in the upper half of the day's range "
+                      f"({upper_half} vs {lower_half})")
     judged = [d for d in downs if d + 2 <= n]
     if judged and all(max(c[d + 1], c[d + 2]) > c[d - 1] for d in judged):
         follow.append("every dip recovered within 2 sessions")
@@ -256,21 +257,22 @@ def strength_signs(df, entry_date, *, avg_entry, today=None, now=None,
     chg = c[1:] / c[:-1] - 1.0
     if n >= STRENGTH_MIN_DAYS:
         if chg[-1] > 0 and chg[-1] >= np.max(chg):
-            signs.append(f"biggest up day of the run (+{chg[-1] * 100:.1f}%)")
+            signs.append(f"biggest up day since the entry (+{chg[-1] * 100:.1f}%)")
         if chg[-1] < 0 and chg[-1] <= np.min(chg):
             signs.append(f"biggest down day since the entry ({chg[-1] * 100:.1f}%)")
     hi = post["High"].to_numpy(dtype=float)
     lo = post["Low"].to_numpy(dtype=float)
     gaps = [d for d in range(max(1, n - STRENGTH_GAP_BARS + 1), n + 1) if lo[d] > hi[d - 1]]
     if gaps:
-        signs.append(f"gapped up late in the run (day {gaps[-1]})")
+        signs.append(f"a day entirely above the prior day's high, late in the rise "
+                     f"(day {gaps[-1]})")
     if n >= 1 and "Volume" in df.columns:
         vol = df["Volume"].astype(float)
         vavg = prior_volume_average(vol, doctrine.VOL_AVG_DAYS)
         vr = float(vol.iloc[-1] / vavg.iloc[-1]) if vavg.iloc[-1] > 0 else float("nan")
         if (np.isfinite(vr) and vr >= doctrine.VOL_CONFIRM_RATIO
                 and abs(chg[-1]) <= STRENGTH_STALL_PCT):
-            signs.append(f"heavy volume ({vr:.1f}×) with no progress")
+            signs.append(f"heavy volume ({vr:.1f}×) but the price barely moved")
     out["signs"] = signs
     return out
 
@@ -313,9 +315,10 @@ def weak_market_advice(regime=None, spy_note=None, *, stop_pct=None, target_pct=
     plan_stop = f" (plan: {stop_pct * 100:.1f}%)" if stop_pct else ""
     plan_tgt = f" (plan target +{target_pct * 100:.0f}%)" if target_pct else ""
     plan_risk = f" (plan: {risk_pct:.2f}% risk per trade)" if risk_pct else ""
-    return (f"{label} — in a weak market the book tightens up: stops {lo * 100:.0f}–"
-            f"{hi * 100:.0f}% below the buy{plan_stop}, profits taken at {tlo * 100:.0f}–"
-            f"{thi * 100:.0f}%{plan_tgt}, and smaller size{plan_risk}.")
+    return (f"{label} — in a weak market the books use tighter numbers: stops "
+            f"{lo * 100:.0f}–{hi * 100:.0f}% below the buy price{plan_stop}, profits taken "
+            f"at {tlo * 100:.0f}–{thi * 100:.0f}%{plan_tgt}, and smaller positions"
+            f"{plan_risk}.")
 
 
 def in_weak_take_profit_band(gain_pct) -> bool:
@@ -441,8 +444,9 @@ def depth_vs_market_text(depth: Optional[dict]) -> str:
     body = (f"Base depth **{depth['depth_pct']:.0f}%** while the market fell "
             f"{depth['spy_depth_pct']:.0f}% (**{depth['ratio']:.1f}×**)")
     if depth["flag"]:
-        return ("⚠️ " + body + f" — more than {DEPTH_VS_MARKET_MAX:.0f}× the market's "
-                "decline leaves more trapped sellers overhead than the books accept.")
+        return ("⚠️ " + body + f" — a fall over {DEPTH_VS_MARKET_MAX:.0f}× the market's "
+                "leaves too many holders who bought higher and will sell into a rise; "
+                "the books avoid it.")
     return body + "."
 
 
@@ -462,8 +466,9 @@ def industry_concentration(positions) -> Optional[str]:
     ind, n = Counter(inds).most_common(1)[0]
     m = len(positions)
     if n >= CONCENTRATION_NAMES or (m >= 2 and n / m >= CONCENTRATION_SHARE and n >= 2):
-        return (f"{n} of your {m} positions are in **{ind}**. The books: a group moves "
-                "together, and a leader's breakdown often takes its neighbours with it.")
+        return (f"{n} of your {m} positions are in **{ind}**. The books: stocks in one "
+                "industry move together, and when its strongest stock falls hard the rest "
+                "often follow.")
     return None
 
 
@@ -487,20 +492,20 @@ def group_leader_break(industry, candidates, payloads, exclude=None) -> Optional
         sma50 = float(close.tail(50).mean())
         vr = volume_ratio(df, doctrine.VOL_AVG_DAYS)
         if float(close.iloc[-1]) < sma50 and vr is not None and vr >= doctrine.VOL_CONFIRM_RATIO:
-            return (f"group leader {t} closed below its 50-day on {vr:.1f}× volume — "
-                    f"watch the rest of {industry}")
+            return (f"{t}, one of this industry's strongest stocks by RS, closed below its "
+                    f"50-day average on {vr:.1f}× volume — watch the rest of {industry}")
     return None
 
 
 def stop_room_text(room: Optional[dict], day_range) -> str:
-    """A caption fragment for a :func:`stop_room` result, e.g. ``'stop 3.1 typical days
-    away (2.4%/day)'``. Prefixed ⚠ on ``warn``; empty when unknown."""
+    """A caption fragment for a :func:`stop_room` result, e.g. ``'stop 3.1 typical days'
+    moves away (a typical day: 2.4%)'``. Prefixed ⚠ on ``warn``; empty when unknown."""
     if not room or not day_range:
         return ""
     head = "⚠ " if room["warn"] else ""
-    tail = " — inside ordinary daily noise" if room["warn"] else ""
-    return (f"{head}stop {room['room_days']:.1f} typical days away "
-            f"({float(day_range) * 100:.1f}%/day){tail}")
+    tail = " — a normal day or two could hit it" if room["warn"] else ""
+    return (f"{head}stop {room['room_days']:.1f} typical days' moves away "
+            f"(a typical day: {float(day_range) * 100:.1f}%){tail}")
 
 
 REPORT_MAX_AGE_DAYS = 100   # older than this, the release is not "the last report" any more
@@ -561,7 +566,7 @@ def earnings_reaction(df, report_date, report_time=None) -> Optional[dict]:
 def earnings_reaction_text(reaction: Optional[dict], report_date=None,
                            report_time=None) -> str:
     """A Step-2 caption for an :func:`earnings_reaction` result, e.g. ``'Last report
-    2026-08-06 (after the close): -9.2% on 3.4× volume (gap -7.0%) ⚠️ …; since then
+    2026-08-06 (after the close): -9.2% on 3.4× volume (opened -7.0%) ⚠️ …; since then
     +4.1%'``. Empty when unknown."""
     if not reaction:
         return ""
@@ -569,14 +574,14 @@ def earnings_reaction_text(reaction: Optional[dict], report_date=None,
     if report_time:
         when = (" (after the close)" if str(report_time) >= "16:00"
                 else " (before the open)" if str(report_time) < "09:30"
-                else " (during the session)")
+                else " (during trading hours)")
     vol = ("" if reaction.get("vol_ratio") is None
            else f" on {reaction['vol_ratio']:.1f}× volume")
-    note = {"hard_drop": " ⚠️ a hard drop on heavy volume; the books say big money knew "
-                         "something",
+    note = {"hard_drop": " ⚠️ a hard drop on heavy volume; the books say large investors "
+                         "knew something",
             "strong": " ✅ a strong move on heavy volume"}.get(reaction.get("flag"), "")
     return (f"**Last report** {report_date or reaction['date']}{when}: "
-            f"{reaction['day_pct']:+.1f}%{vol} (gap {reaction['gap_pct']:+.1f}%){note}; "
+            f"{reaction['day_pct']:+.1f}%{vol} (opened {reaction['gap_pct']:+.1f}%){note}; "
             f"since then {reaction['since_pct']:+.1f}%")
 
 
@@ -676,5 +681,5 @@ def book_tightening_text(read: Optional[dict]) -> str:
     dips = " → ".join(f"{d:.0f}%" for d in read["depths"])
     each = ", ".join("n/a" if r is None else f"{r:.2f}×" for r in read["ratios"])
     weeks = ("" if read["base_weeks"] is None
-             else f" · base {read['base_weeks']:.1f} weeks (books: ≥ 3)")
+             else f" · base {read['base_weeks']:.1f} weeks long (books: at least 3)")
     return f"Dips {dips} (each {each} the last; the books look for about half){weeks}"

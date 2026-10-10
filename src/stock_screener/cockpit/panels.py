@@ -16,7 +16,7 @@ from src.stock_screener.cockpit.scan import step2_lines
 INFO_STEP2 = """
 **Step 2 — Fundamentals (the fuel).** A great chart with weak earnings is a trap.
 Look for:
-- **EPS & revenue YoY ≥ ~20%** and **accelerating** (this quarter ≥ last),
+- **EPS & revenue up ≥ ~20% on a year ago (YoY)** and **accelerating** (this quarter ≥ last),
 - **stable or expanding margins** (positive *margin trend*).
 - **Code 33**: EPS growth, sales growth *and* net margin all rising for three quarters
   running, Minervini's favourite pattern in the numbers (from SEC filings).
@@ -24,28 +24,29 @@ Look for:
 - ⚠️ **EPS growth slowing two quarters running**, or **inventory growing faster than
   sales**: the books' warning signs.
 - **How the stock took its last report.** A drop of 5% or more on heavy volume after
-  the release means big investors were selling the news: the books say stay away.
+  the release means big investors were selling on the report: the books say stay away.
 - **Analyst estimates raised** ≥ 5% over 90 days, and **fund ownership** (how many
   institutions hold it, and whether that count is rising). Fund *quality* still needs a
   look by hand.
 
-`fund_score` (0–8) counts how many of eight checks pass: revenue ≥ 20%, EPS ≥ 20%,
+The **Score** (0–8) counts how many of eight checks pass: revenue ≥ 20%, EPS ≥ 20%,
 EPS accelerating, margin expanding, Code 33, annual EPS up, estimates raised ≥ 5%, and
-the last report *held* (no hard drop on heavy volume). A missing figure counts as a
-fail, so read the numbers, not just the score. yfinance often exposes only ~4
-quarters, so **YoY may read n/a** — QoQ is the fallback. Use this to rank the
-Step-1 list, not as a hard cutoff unless you set "min fundamental checks".
+the stock *held* after its last report (no hard drop on heavy volume). A missing figure
+counts as a fail, so read the numbers, not just the score. yfinance often has only ~4
+quarters, so **YoY may read n/a**; then use QoQ (the change from the quarter before).
+Use the score to rank the Step-1 list, not to drop stocks, unless you set
+"min fundamental checks".
 
-The **next earnings date** shows here too — it's an *entry-timing* input
-(see Step 4): don't open a fresh position within ~2–3 weeks of a report.
+The **next earnings date** shows here too — it decides *when* to buy
+(see Step 4): don't open a new position within ~2–3 weeks of a report.
 """
 
 # The eight Step-2 checks: scan key, on-screen label, and the hunt diagnostics column.
-STEP2_CHECKS = (("revenue_growth", "Rev ≥20%", "f_rev"), ("eps_growth", "EPS ≥20%", "f_eps"),
-                ("eps_accelerating", "EPS accel", "f_accel"),
+STEP2_CHECKS = (("revenue_growth", "Revenue ≥20%", "f_rev"), ("eps_growth", "EPS ≥20%", "f_eps"),
+                ("eps_accelerating", "EPS accelerating", "f_accel"),
                 ("margin_expanding", "Margin ↑", "f_margin"), ("code33", "Code 33", "f_code33"),
                 ("annual_eps_up", "Annual EPS ↑", "f_fy"),
-                ("estimates_raised", "Estimates ↑", "f_est"), ("report_held", "Report held", "f_react"))
+                ("estimates_raised", "Estimates ↑", "f_est"), ("report_held", "Held after report", "f_react"))
 
 
 def info_btn(body: str, label: str = "ℹ️ How to use") -> None:
@@ -103,12 +104,12 @@ def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
 
         mt = f.get("margin_trend")
         opm = f.get("operating_margin")
-        st.markdown(f"**Rev:** {_p(f.get('revenue_yoy'))} YoY · "
+        st.markdown(f"**Revenue:** {_p(f.get('revenue_yoy'))} YoY · "
                     f"{_p(f.get('revenue_qoq'))} QoQ")
         st.markdown(f"**EPS:** {_p(f.get('eps_yoy'))} YoY · "
                     f"{_p(f.get('eps_qoq'))} QoQ")
-        st.markdown(f"**Op margin:** {'n/a' if opm is None else f'{opm:.1f}%'} "
-                    f"(Δ {'n/a' if mt is None else f'{mt:+.1f}pp'})")
+        st.markdown(f"**Operating margin:** {'n/a' if opm is None else f'{opm:.1f}%'} "
+                    f"(change {'n/a' if mt is None else f'{mt:+.1f}pp'})")
         ne, ei = f.get("next_earnings"), payload.get("earnings_in")
         if ne:
             when = ("" if ei is None
@@ -121,13 +122,13 @@ def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
                                f.get("last_surprise_pct"), f.get("last_surprise_date"))
         _extra = []
         if _fy is not None:
-            _extra.append(f"**FY EPS:** {_fy:+.1f}%")
+            _extra.append(f"**Full-year EPS:** {_fy:+.1f}%")
         if _acc is not None:
-            _extra.append("3q accel ✅" if _acc else "3q accel —")
+            _extra.append("accelerating 3 quarters ✅" if _acc else "accelerating 3 quarters —")
         # An earnings surprise without a date has no known age and may be a year old, so
         # it is not shown.
         if _sp is not None and _sd:
-            _extra.append(f"surprise {_sp:+.1f}% ({_sd})")
+            _extra.append(f"last EPS vs estimate {_sp:+.1f}% ({_sd})")
         if _extra:
             st.markdown(" · ".join(_extra))
         for _line in step2_lines(f):
@@ -149,15 +150,15 @@ def render_step2_from_hunt_row(row: dict, help_popover: bool = True) -> None:
     longer has. Same header and check marks; the numbers are the hunt's."""
     with st.container(border=True):
         _step2_header(help_popover)
-        st.caption("The hunt's numbers: this name is not in the latest scan.")
-        st.markdown(f"**Rev:** {_pct(row.get('rev_yoy'))} YoY")
+        st.caption("The hunt's numbers: this stock is not in the latest scan.")
+        st.markdown(f"**Revenue:** {_pct(row.get('rev_yoy'))} YoY")
         st.markdown(f"**EPS:** {_pct(row.get('eps_yoy'))} YoY")
         extra = []
         c33 = row.get("code33")
         if c33 not in (None, ""):
             extra.append(f"**Code 33** {int(float(c33))}/3")
         if str(row.get("inv_flag")) == "True":
-            extra.append("⚠️ inventory outrunning sales")
+            extra.append("⚠️ inventory growing faster than sales")
         react = row.get("earn_react")
         if react not in (None, ""):
             extra.append(f"last report {_pct(react)}"
@@ -167,7 +168,7 @@ def render_step2_from_hunt_row(row: dict, help_popover: bool = True) -> None:
             extra.append(f"estimates {_pct(est)} over 90d")
         inst = row.get("inst_count")
         if inst not in (None, ""):
-            extra.append(f"{int(float(inst))} funds")
+            extra.append(f"{int(float(inst))} funds hold it")
         if extra:
             st.markdown(" · ".join(extra))
         st.markdown(" ".join(f"{'✅' if int(row.get(col) or 0) else '—'} {lbl}"

@@ -23,7 +23,7 @@ scan_worker.autostart()
 
 st.set_page_config(page_title="SEPA Guide", page_icon="📖", layout="wide")
 st.title("📖 Minervini SEPA — Method Guide")
-st.caption("The 4-step funnel the cockpit implements. Educational reference only — "
+st.caption("The 4 steps the cockpit follows, in order. Educational reference only — "
            "not financial advice.")
 
 # minervini_sepa_system.md lives at src/stock_screener/ (two levels up from pages/)
@@ -36,5 +36,5 @@ try:
         text = "\n".join(lines[1:])
     st.markdown(text)
 except FileNotFoundError:
-    st.error(f"Guide source not found at {md_path}. Expected "
+    st.error(f"Guide file not found at {md_path}. It should be at "
              "src/stock_screener/minervini_sepa_system.md.")

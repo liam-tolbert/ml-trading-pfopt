@@ -176,7 +176,7 @@ def fetch_account_summary() -> dict:
 def fetch_held_shares() -> Dict[str, int]:
     """``{symbol: whole shares held}`` on the cockpit's paper account, truncated by
     ``int(float(qty))`` as in :func:`submit_buy_plan`. Feeds :func:`build_buy_plan`'s
-    ``held`` and the Build preview's "stop re-arm only, no buy" marks. Raises
+    ``held`` and the Build preview's "stop placed again, no buy" marks. Raises
     :class:`TradeUnavailable` on missing package/credentials; the caller reads that as
     unknown (no held marks)."""
     client, _ = _connect_paper()
@@ -266,12 +266,12 @@ def gate_status(positions: List[dict], open_episodes: List[dict],
         else:
             break
     factor = 0.5 if streak >= GATE_HALF_SIZE_AFTER else 1.0
-    half_note = (f"; {streak} consecutive losses — half-size probe advised"
+    half_note = (f"; {streak} losses in a row — half-size buys advised"
                  if factor < 1.0 else "")
 
     if not scoped:
         return {"open": True,
-                "reason": "book flat (no cockpit positions) — first pilot allowed"
+                "reason": "no cockpit positions held — a small first buy is allowed"
                           + half_note,
                 "probe_size_factor": factor, "consecutive_losses": streak}
 
@@ -294,16 +294,16 @@ def gate_status(positions: List[dict], open_episodes: List[dict],
     if losers:
         return {"open": False,
                 "reason": "newest position below breakeven: " + ", ".join(sorted(losers))
-                          + " — let the probe prove itself first" + half_note,
+                          + " — wait for it to show a gain first" + half_note,
                 "probe_size_factor": factor, "consecutive_losses": streak}
     net = sum(p.get("unrealized_pl") or 0.0 for p in scoped)
     if net < 0:
         return {"open": False,
-                "reason": f"net open P&L ${net:,.0f} < 0 — work the book before adding"
+                "reason": f"net open P&L ${net:,.0f} < 0 — manage the open positions before adding"
                           + half_note,
                 "probe_size_factor": factor, "consecutive_losses": streak}
     return {"open": True,
-            "reason": "newest position at breakeven+ and net open P&L >= 0" + half_note,
+            "reason": "newest position at or above breakeven and net open P&L >= 0" + half_note,
             "probe_size_factor": factor, "consecutive_losses": streak}
 
 
@@ -514,7 +514,7 @@ def position_advisories(pos: dict) -> List[str]:
     cur_stop = pos.get("current_stop")
 
     if not pos.get("has_stop"):
-        out.append("⚠ No protective stop armed — arm one.")
+        out.append("⚠ No protective stop set — place one.")
     elif (cur_stop and avg_entry and cur_stop < avg_entry
             and not stop_within_max_loss(cur_stop, avg_entry)):
         # A market buy that filled above the planned price (the stock opened higher) leaves
@@ -531,18 +531,18 @@ def position_advisories(pos: dict) -> List[str]:
                        "exit or reduce before the report.")
         elif gain < EARNINGS_CUSHION_MIN:
             out.append(f"⚠ Earnings in {int(ei)}d with only a {gain * 100:.0f}% cushion — "
-                       "consider trimming before the report.")
+                       "consider selling part before the report.")
     mv, adv = pos.get("market_value"), pos.get("adv_usd")
     if mv and adv and mv / adv >= POSITION_ADV_WARN_PCT:
-        out.append(f"Position ≈ {mv / adv * 100:.0f}% of a day's $ volume — an exit at "
-                   f"{MAX_ORDER_ADV_PCT * 100:.0f}%/day takes ~"
-                   f"{math.ceil(mv / adv / MAX_ORDER_ADV_PCT)} sessions.")
+        out.append(f"Position ≈ {mv / adv * 100:.0f}% of a day's $ volume — selling at most "
+                   f"{MAX_ORDER_ADV_PCT * 100:.0f}% of a day's volume per day takes ~"
+                   f"{math.ceil(mv / adv / MAX_ORDER_ADV_PCT)} trading days.")
     if gain is not None and gain >= SELL_STRENGTH_GAIN and not pos.get("strength_signs"):
-        out.append(f"Up {gain * 100:.0f}% — consider selling part into strength.")
+        out.append(f"Up {gain * 100:.0f}% — consider selling part while it is rising.")
     if pos.get("below_sma50"):
         vr = pos.get("volume_ratio")
         heavy = " on heavy volume" if (vr is not None and vr >= HEAVY_VOL_RATIO) else ""
-        out.append(f"Closed below the 50-day SMA{heavy} — exit signal.")
+        out.append(f"Closed below the 50-day SMA{heavy} — a sign to sell.")
     trig = _book_stop_triggers(avg_entry, pos.get("sma_50"), gain, pos.get("r_now"),
                                pos.get("avg_win"))
     if trig and (cur_stop is None or cur_stop < avg_entry):
@@ -612,7 +612,7 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
     gain = pos.get("gain_pct")
     df = pos.get("df")
     if entry_date is None:
-        p1 = _pill("unknown", "no journal episode — refresh the Journal page")
+        p1 = _pill("unknown", "no journal record of this buy — refresh the Journal page")
     else:
         try:
             e = pd.Timestamp(entry_date)
@@ -633,8 +633,8 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
             warns: List[str] = []
             if pivot and last_close is not None:
                 if day_n == 0 and last_close < pivot:
-                    fails.append("Day-0 close back below the pivot — the breakout "
-                                 "never happened; sell next open")
+                    fails.append("Day-0 (entry day) close back below the pivot — the "
+                                 "breakout failed; sell at the next open")
                 if last_close < pivot * (1.0 - DECISIVE_BELOW_PIVOT_PCT):
                     fails.append(f"closed {(1 - last_close / pivot) * 100:.1f}% below "
                                  "the pivot — decisive break")
@@ -648,18 +648,18 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                     if len(bo):
                         bo_low = float(bo["Low"].iloc[-1])
                         if last_close < bo_low and pivot and last_close >= pivot:
-                            warns.append("below the entry-day low, holding the pivot")
+                            warns.append("below the entry-day low, still above the pivot")
                         elif last_close < bo_low:
-                            fails.append("closed below the breakout bar's low — "
-                                         "no grace day")
+                            fails.append("closed below the breakout day's low — "
+                                         "no second chance")
                 except Exception:
                     pass
             if day_n is not None and gain is not None:
                 if day_n >= P1_STALL_DAYS and gain <= 0:
-                    fails.append(f"day {day_n} and flat-to-red — exit")
+                    fails.append(f"day {day_n} with no gain — sell")
                 elif day_n >= P1_CUSHION_DAYS and gain < P1_CUSHION_PCT:
                     warns.append(f"day {day_n}, no {P1_CUSHION_PCT * 100:.0f}% cushion "
-                                 "— sell into strength")
+                                 "yet — sell part while it rises")
             if df is not None and len(df):
                 from . import advisories, doctrine
                 read = advisories.post_breakout_read(
@@ -669,16 +669,16 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
                 viol = (read or {}).get("violations") or []
                 if (viol and doctrine.VIOLATIONS_CAN_FAIL
                         and len(viol) >= doctrine.VIOLATION_FAIL_COUNT):
-                    fails.append(f"{len(viol)} post-breakout violations: " + "; ".join(viol))
+                    fails.append(f"{len(viol)} warning signs after the breakout: " + "; ".join(viol))
                 elif viol:
-                    warns.append("violations: " + "; ".join(viol))
-            note = "" if pivot else " (no frozen pivot — clock only)"
+                    warns.append("warning signs after the breakout: " + "; ".join(viol))
+            note = "" if pivot else " (no frozen pivot — time checks only)"
             if fails:
                 p1 = _pill("fail", "; ".join(fails) + note)
             elif warns:
                 p1 = _pill("warn", "; ".join(warns) + note)
             elif day_n is None and last_close is None:
-                p1 = _pill("unknown", "no bars to judge" + note)
+                p1 = _pill("unknown", "no price data to judge" + note)
             else:
                 p1 = _pill("ok", f"day {day_n}, holding{note}")
 
@@ -691,29 +691,29 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
     except (TypeError, ValueError):
         rs_ok = None
     if tc is None:
-        p2 = _pill("unknown", "no template read (no bars)")
+        p2 = _pill("unknown", "no Trend Template check (no price data)")
     elif int(tc) < 7:
-        p2 = _pill("fail", f"{int(tc) + (1 if rs_ok else 0)}/8 — template broken")
+        p2 = _pill("fail", f"{int(tc) + (1 if rs_ok else 0)}/8 — Trend Template failed")
     elif rs_ok is None:
         p2 = _pill("unknown", "7/7 price criteria; no RS rating (no scan)")
     elif not rs_ok:
         p2 = _pill("fail", f"7/8 — RS {float(rs):.0f} under {RS_FLOOR}")
     else:
-        p2 = _pill("ok", f"8/8 trend template (RS {float(rs):.0f})")
+        p2 = _pill("ok", f"8/8 Trend Template (RS {float(rs):.0f})")
 
     # ---- P3: the overall market --------------------------------------------------- #
     if isinstance(regime, dict) and regime.get("regime") is not None:
         if regime.get("should_generate_buys"):
             p3 = _pill("ok", str(regime.get("regime")))
         else:
-            p3 = _pill("fail", f"{regime.get('regime')} — risk-off: demote yellow "
-                               "flags to red, laggards go first")
+            p3 = _pill("fail", f"{regime.get('regime')} — weak market: treat warnings "
+                               "as fails, sell the weakest stocks first")
     elif isinstance(spy_note, dict) and spy_note.get("trend"):
         trend = str(spy_note["trend"])
         if trend.lower().startswith("bull"):
-            p3 = _pill("ok", f"SPY {trend} (trigger-report read, no breadth)")
+            p3 = _pill("ok", f"SPY {trend} (from the trigger report — SPY only)")
         else:
-            p3 = _pill("warn", f"SPY {trend} (trigger-report read, no breadth)")
+            p3 = _pill("warn", f"SPY {trend} (from the trigger report — SPY only)")
     else:
         p3 = _pill("unknown", "no scan or trigger report yet")
 
@@ -724,17 +724,17 @@ def sell_pillars(pos: dict, *, entry_date=None, pivot=None, regime=None,
     elif ei < 0:
         p4 = _pill("ok", f"reported {-int(ei)}d ago")
     elif ei > EARNINGS_SOON_DAYS:
-        p4 = _pill("ok", f"next report {int(ei)}d out")
+        p4 = _pill("ok", f"next report in {int(ei)}d")
     elif gain is None:
         p4 = _pill("warn", f"report in {int(ei)}d — cushion unknown")
     elif gain < 0:
         p4 = _pill("fail", f"report in {int(ei)}d with a loss — a loss is never "
-                           "carried into a report")
+                           "held through a report")
     elif gain < EARNINGS_CUSHION_MIN:
         p4 = _pill("fail", f"report in {int(ei)}d, cushion {gain * 100:.0f}% < "
-                           f"{EARNINGS_CUSHION_MIN * 100:.0f}% — trim/exit first")
+                           f"{EARNINGS_CUSHION_MIN * 100:.0f}% — sell part or all first")
     else:
-        p4 = _pill("warn", f"report in {int(ei)}d — trim to hold-through size")
+        p4 = _pill("warn", f"report in {int(ei)}d — cut to a size you'd hold through it")
 
     return {"P1": p1, "P2": p2, "P3": p3, "P4": p4}
 
@@ -866,7 +866,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             _age = _trading_days_since(df.index[-1], _stale_ref)
             if _age is not None and _age > max_bar_age_days:
                 skipped.append({"ticker": t, "reason":
-                                f"stale price data (last bar "
+                                f"stale price data (latest prices from "
                                 f"{pd.Timestamp(df.index[-1]).date()}, ~{_age} trading days "
                                 f"old) — Re-scan to refresh"})
                 continue
@@ -902,7 +902,7 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
             if stop and stop > 0 and price and stop >= price:
                 skipped.append({"ticker": t, "reason":
                                 "stop not below the current price — the base has broken "
-                                "down below its pivot; re-judge or remove the name"})
+                                "down below its pivot; review the chart again or remove the stock"})
                 continue
             limit = float(buy_hi) if buy_hi and buy_hi > 0 else price
             basis = limit
@@ -925,8 +925,8 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                 skipped.append({"ticker": t, "reason":
                                 f"a limit at {basis:,.2f} needs a stop ≥ {stop:,.2f} "
                                 f"({_rule} below the price paid), above the current price "
-                                f"{price:,.2f} — lower the limit or wait for the name to "
-                                "reach its zone"})
+                                f"{price:,.2f} — lower the limit or wait for the stock to "
+                                "reach its buy zone"})
                 continue
 
         if mode == "pct":
@@ -941,12 +941,12 @@ def build_buy_plan(tickers: Sequence[str], payloads: Dict[str, dict], *,
                 skipped.append({"ticker": t, "reason": "account equity unavailable"})
                 continue
             if not stop or stop <= 0:
-                skipped.append({"ticker": t, "reason": "no stop to risk-size against"})
+                skipped.append({"ticker": t, "reason": "no stop to size the risk against"})
                 continue
             if stop >= basis:
                 skipped.append({"ticker": t, "reason":
                                 f"stop not below {'limit' if limit else 'price'} — "
-                                "can't risk-size"})
+                                "can't size by risk"})
                 continue
             shares = int((equity * amount / 100.0) / (basis - stop))  # round down
             # Position% ≈ risk% / stop%, which often exceeds the 10% cap (1% / 8% = 12.5%).
@@ -1229,7 +1229,7 @@ def _rearm_gtc_stop(client, symbol: str, held_shares: int, desired_stop, price, 
                 out["stop_price"] = cur
                 out["detail"] += f"; previous stop restored @ {cur:.2f}"
             else:
-                out["detail"] += "; stop restore FAILED — arm a stop manually"
+                out["detail"] += "; stop restore FAILED — place a stop by hand"
         return out
 
     # A lower-or-equal stop is kept unless the stops cover fewer shares than are held, e.g.
@@ -1344,7 +1344,7 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                 if not attach_stop:
                     results.append({**o, "status": "skipped",
                                     "detail": f"already held ({held_shares} sh); "
-                                              "stop attach disabled"})
+                                              "Attach stop is off"})
                     continue
                 existing = _open_sell_stops(
                     client, t, GetOrdersRequest=GetOrdersRequest,
@@ -1370,8 +1370,8 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                 continue
             if t in pending_buys:
                 results.append({**o, "status": "skipped",
-                                "detail": "a cockpit BUY is already queued (pending fill) — "
-                                          "not re-submitting"})
+                                "detail": "a cockpit BUY is already queued, waiting to fill — "
+                                          "not sending another"})
                 continue
             _lim = o.get("limit_price")
             # None is a market plan. A present, non-positive limit is an edit error: skip it
@@ -1427,7 +1427,7 @@ def submit_buy_plan(plan: List[dict], *, attach_stop: bool = True) -> dict:
                         stop_loss=StopLossRequest(stop_price=round(float(stop), 2)),
                         client_order_id=f"SEPAoto-{t}-{int(time.time() * 1000)}")
                     detail_head = (f"limit buy {o['shares']} @ {limit:.2f} + stop @ "
-                                   f"{stop:.2f} (GTC — rests until filled/canceled)")
+                                   f"{stop:.2f} (GTC — waits until filled or cancelled)")
                 else:
                     req = MarketOrderRequest(
                         symbol=t, qty=o["shares"], side=OrderSide.BUY,
@@ -1722,7 +1722,7 @@ def submit_position_sell(symbol: str, qty: int, *,
         return {**base, "status": "skipped", "detail": "sell quantity must be ≥ 1"}
     clamp_note = ""
     if qty > held:
-        clamp_note = f" (requested {qty}, clamped to the {held} held)"
+        clamp_note = f" (requested {qty}, cut to the {held} held)"
         qty = held
     remaining = held - qty
     base.update(sold_qty=qty, remaining=remaining)
@@ -1764,7 +1764,7 @@ def submit_position_sell(symbol: str, qty: int, *,
             # take effect.
             detail += (f"; previous stop restored @ {old_level:.2f}"
                        if _place_stop(held, old_level)
-                       else "; stop restore FAILED — arm a stop manually")
+                       else "; stop restore FAILED — place a stop by hand")
         return {**base, "status": "failed", "detail": detail + clamp_note}
 
     detail = f"market SELL {qty}/{held} sh (DAY)"
@@ -1778,9 +1778,9 @@ def submit_position_sell(symbol: str, qty: int, *,
                     detail += f" (raised from {old_level:.2f})"
             else:
                 detail += (f"; stop re-place FAILED — remaining {remaining} sh "
-                           "unprotected, re-arm manually")
+                           "unprotected, place a stop by hand")
         else:
-            detail += f"; remaining {remaining} sh have no stop — arm one"
+            detail += f"; remaining {remaining} sh have no stop — place one"
     elif cancelled:
         detail += "; protective stop cancelled (no shares remain)"
     return {**base, "status": "submitted", "detail": detail + clamp_note}
@@ -1962,10 +1962,10 @@ def suggest_risk_pct(closed: List[dict], last_n: int = RISK_GUIDE_LAST_N) -> dic
     exp_s = f"{expectancy * 100:+.1f}%"
     form = f"last {n} closed: {wins}W/{losses}L, expectancy {exp_s}"
     if expectancy <= 0 or batting < 0.3:
-        return {**base, "risk_pct": RISK_PCT_PILOT, "reason": f"{form} — pilot size"}
+        return {**base, "risk_pct": RISK_PCT_PILOT, "reason": f"{form} — half size"}
     if batting >= 0.5:
         return {**base, "risk_pct": RISK_PCT_STRONG,
-                "reason": f"{form} — press modestly"}
+                "reason": f"{form} — size up a little"}
     return {**base, "risk_pct": RISK_PCT_BASE, "reason": f"{form} — normal size"}
 
 

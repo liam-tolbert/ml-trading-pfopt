@@ -59,71 +59,73 @@ st.markdown(
 # Contextual help for the ℹ️ popovers (full reference: pages/1_SEPA_Guide.py)
 # --------------------------------------------------------------------------- #
 INFO_REGIME = """
-**Market environment — check this first.** SEPA is market-aware: most breakouts
-fail in a weak tape. **Phase-2 breadth** = % of scanned names in confirmed uptrends.
+**Market environment — check this first.** SEPA follows the market: most breakouts
+fail in a weak market. **Phase-2 breadth** = % of scanned stocks in confirmed uptrends.
 - **BUY OK / Risk-On** → trade actively.
-- **CAUTION / weak breadth / Risk-Off** → preserve capital, wait.
-- **NH/NL** = names at a new 52-week high vs at a new low, the books' own breadth read.
-  ↑ means the spread is wider than ten sessions ago (a bottoming or broadening market),
-  ↓ narrower (leadership thinning). It needs ten evenings of history before it shows.
+- **CAUTION / weak breadth / Risk-Off** → protect your capital, wait.
+- **NH/NL** = stocks at a new 52-week high vs at a new low, the books' own breadth measure.
+  ↑ means the gap is wider than ten trading days ago (the market is bottoming or
+  broadening), ↓ narrower (fewer stocks leading). It needs ten evenings of history first.
 
-Don't force trades when few names qualify — the market is telling you something.
+Don't force trades when few stocks qualify — the market is telling you something.
 """
 
 INFO_STEP1 = """
-**Step 1 — Trend Template (automated gate).** Every row passes **all 8** of the book's
-trend-template criteria: price above stacked **50 > 150 > 200-day SMAs**, 200-day rising
-≥1 month, **≥30% above the 52-wk low**, **within 25% of the 52-wk high**, and an **RS
-rating of 70 or more** — the book's eighth criterion. This is *eligibility, not a buy
-signal.*
+**Step 1 — Trend Template (automatic filter).** Every row passes **all 8** of Minervini's
+Trend Template criteria: price above the **50 > 150 > 200-day SMAs**, in that order,
+200-day rising ≥1 month, **≥30% above the 52-wk low**, **within 25% of the 52-wk high**,
+and an **RS rating of 70 or more** — Minervini's eighth criterion. This makes a stock
+*eligible; it is not a buy signal.*
 
-- **RS** = relative-strength rating (IBD-style weighted blend of 3/6/9/12-mo returns,
-  recent 3-mo counted double, percentiled vs the scanned set); the book wants the 80s–90s.
-- **RS line trend**: the 2017 book adds that the stock-÷-SPY line should have been rising
-  for 6 weeks, ideally 13. **200-day rising**: the books' best names show 4–5 months.
-- Tighten further in the sidebar: raise **min RS** or require a VCP.
-- Sort by `fund_score` / `rs`, then **click a row** to study the chart.
+- **RS** = relative-strength rating (a weighted blend of 3/6/9/12-mo returns, the recent
+  3 months counted double, ranked 1–99 against the scanned stocks); Minervini wants 80–99.
+- **RS line trend**: the 2017 book adds that the stock ÷ SPY line should have been rising
+  for 6 weeks, ideally 13. **200-day rising**: the books' best stocks show 4–5 months.
+- Filter harder in the sidebar: raise **Min RS rating** or show only VCPs.
+- Sort by **Fundamental score** / **RS rating**, then **click a row** to study the chart.
 """
 
 INFO_STEP3 = """
-**Step 3 — Read the VCP yourself (this is the discretionary part).** On the chart,
+**Step 3 — Read the VCP yourself (this part is your judgment).** On the chart,
 look for a **Volatility Contraction Pattern**:
-- 2–6 pullbacks, each **tighter** than the last (e.g. 18% → 12% → 6%),
+- 2–6 pullbacks (dips), each **tighter** than the last (e.g. 18% → 12% → 6%),
 - **higher lows**, **volume drying up** into the tightest part,
 - price holding above the **50-day SMA**, total base depth ~10–35%,
-- a depth in proportion to the market's: the books avoid a name that fell more than
-  ~2.5–3× what the S&P 500 fell over the same stretch (the "Depth vs market" read),
+- a depth in proportion to the market's: the books avoid a stock that fell more than
+  ~2.5–3× what the S&P 500 fell over the same dates (the "Depth vs market" column),
 - **volume drying up** in the final tight area: below its 50-day average, with a day or
-  two of almost none (the "Dry-up" read; the chart marks the near-silent days),
+  two of almost none (the "Dry-up" column; the chart marks the near-silent days),
 - the books' rule of thumb that each dip is about **half** the one before (the scan's
   own rule is deliberately looser, so it never misses a real base), and a base of at
-  least **3 weeks** (the detector's length can read short; judge it on the chart).
+  least **3 weeks** (the scan can measure it short; judge it on the chart).
 
-Shaded bands mark *detected* contractions (a hint — you decide). The bottom **RMV** pane
+Shaded bands mark *detected* contractions (a hint — you decide). The bottom **RMV** chart
 (Relative Measured Volatility, 0–100) tracks how tight the base is versus the stock's own
 recent range — falling **into the green < 25 band = a genuine volatility contraction**, the
-VCP sweet spot; a high RMV means the base is still loose. Use the **Time range** buttons to
-zoom into the base (a tight VCP is invisible over 2 years), **Weekly** for base structure,
-**Daily** for the exact pivot. **No clean VCP → no trade.**
+ideal VCP zone; a high RMV means the base is still loose. Use the **Time range** buttons to
+zoom into the base (a tight VCP is invisible over 2 years), **Weekly** for the base's
+overall shape, **Daily** for the exact pivot. **No clean VCP → no trade.**
 """
 
 INFO_STEP4 = """
-**Step 4 — Entry (you pull the trigger).** Two opposite states, in sequence — the same
-two axes flip from quiet to loud:
-- **The base** (you wait on it): volume **dries up** and volatility **contracts** (tight
-  RMV / BBWP, squeeze on).
+**Step 4 — Entry (you decide to buy).** Two opposite states, one after the other — the
+same two measures flip from quiet to loud:
+- **The base** (you wait on it): volume **dries up** and volatility **contracts** (low
+  RMV / BBWP, Bollinger bands squeezed tight: "squeeze on").
 - **The breakout** (the trigger): price **closes above the pivot** on volume **≥ 40–50%
-  above average** (the "breakout today" flag), and volatility **expands** (the squeeze fires).
-- **Don't chase** more than ~5% above the pivot (the buy zone).
-- **Check the calendar:** don't open a fresh position within ~2–3 weeks of a
-  scheduled **earnings report** — with no profit cushion, an earnings gap can blow
-  straight through the stop. (Minervini holds through earnings only with a cushion.)
+  above average** (the "Breakout today" column), and volatility **expands** (the squeeze
+  releases).
+- **Don't buy** more than ~5% above the pivot (the top of the buy zone).
+- **Check the calendar:** don't open a new position within ~2–3 weeks of a
+  scheduled **earnings report** — with no profit built up yet, a price jump at the
+  report can skip right past the stop. (Minervini holds through earnings only with a
+  profit built up.)
 - Set the **stop immediately** — 7–8% below the price you pay, **never more than 10%** —
-  and never lower it. The loss is measured from your fill, not the pivot: buying higher in
-  the zone means a tighter stop (the trade plan raises it for you).
+  and never lower it. The loss is measured from the price you paid, not the pivot: buying
+  higher in the zone means a tighter stop (the trade plan raises it for you).
 - First target **+25%** above the pivot. Move the stop to breakeven once the rising 50-day
-  reaches your cost (or at 3R), then trail just under the 50-day.
-- **Size** so a stop-out costs ~1% of the account (set Account $ / Risk %).
+  reaches your cost (or at 3R, three times your risk), then keep it just under the 50-day.
+- **Size** so hitting the stop costs ~1% of the account (set Account $ / Risk %).
 
 These levels are advisory — place the order in your broker.
 """
@@ -141,7 +143,7 @@ READABLE_COLS = {
     "price": "Price ($)",
     "industry": "Industry",
     "rs": "RS rating",
-    "rs_nh": "RS line NH",
+    "rs_nh": "RS line new high",
     "rs_trend": "RS line trend",
     "sma200_rising_m": "200-day rising (months)",
     "criteria": "Trend criteria (/8)",
@@ -151,7 +153,7 @@ READABLE_COLS = {
     "op_margin": "Operating margin (%)",
     "code33": "Code 33 (of 3)",
     "earn_react": "Last report reaction (%)",
-    "est_rev_90d": "EPS estimate 90d (%)",
+    "est_rev_90d": "EPS estimate change 90d (%)",
     "earnings_in": "Earnings in (days)",
     "tier": "Tier",
     "vcp": "VCP detected",
@@ -160,9 +162,9 @@ READABLE_COLS = {
     "dryup_ratio": "Dry-up (× avg volume)",
     "vcp_quality": "VCP quality (0-100)",
     "breakout_today": "Breakout today",
-    "vol_confirmed": "Vol confirmed",
+    "vol_confirmed": "Volume confirmed",
     "pct_to_pivot": "Distance to pivot (%)",
-    "day_range": "Typical day (%)",
+    "day_range": "Typical daily move (%)",
     "adv_musd": "Avg $ volume (M)",
     "pivot": "Pivot ($)",
     "stop": "Stop ($)",
@@ -174,82 +176,90 @@ COL_HELP = {
     "ticker": "Stock symbol. Click a row to chart it.",
     "price": "Latest close price.",
     "industry": "The company's industry (Yahoo). Most big winners move with their group: "
-                "several names from one industry on the list is a group move, and the "
-                "banner's 'Leading groups' line counts them. n/a = not labelled yet.",
-    "rs": "Relative-strength rating 1–99: IBD-style weighted return blend (2×3-mo + 6-mo "
-          "+ 9-mo + 12-mo — recent strength counts double), percentiled vs the scanned "
-          "universe. Minervini wants 70+.",
+                "several stocks from one industry on the list means the whole group is "
+                "moving, and the banner's 'Leading groups' line counts them. n/a = not "
+                "labelled yet.",
+    "rs": "Relative-strength rating 1–99: a weighted blend of returns (2×3-mo + 6-mo "
+          "+ 9-mo + 12-mo — recent strength counts double), ranked against all scanned "
+          "stocks. Minervini wants 70+.",
     "rs_nh": "RS line (price ÷ SPY) at its 52-week high while the PRICE is still below its "
-             "own 52-week high — IBD's 'RS new high before price' blue dot: the stock is "
-             "outperforming the market while still basing, the classic institutional-"
-             "accumulation tell. One of the strongest breakout-confirmation signals for a "
-             "coiled name. n/a = under ~6 months of overlapping history.",
+             "own 52-week high: the stock is beating the market while still forming its "
+             "base, a classic sign that big funds are buying. One of the strongest signs "
+             "that a breakout from a tight base will hold. n/a = under ~6 months of "
+             "overlapping history.",
     "rs_trend": "Direction of the RS line (price ÷ SPY) over the last ~6 and ~13 weeks. "
                 "The 2017 template wants it rising 6 weeks, ideally 13: 'rising 13w' is "
-                "the book's ideal, 'rising 6w' the minimum, 'rolling over' means the recent "
-                "leg has turned down, 'falling' fails it. One strong day can fake 'at a "
-                "high'; this reads the slope instead.",
+                "Minervini's ideal, 'rising 6w' the minimum, 'rolling over' means the recent "
+                "stretch has turned down, 'falling' fails it. One strong day can fake 'at a "
+                "high'; this measures the slope instead.",
     "sma200_rising_m": "How many months the 200-day SMA has risen without a pause, counted "
                        "the way the template tests it (above its value ~1 month earlier). "
-                       "1 month is the gate; the books' best names show 4–5.",
+                       "1 month is the minimum; the books' best stocks show 4–5.",
     "fund_score": "Step-2 fundamental checks passed (0–8): revenue ≥20%, EPS ≥20%, EPS "
                   "accelerating, margins expanding, Code 33, annual EPS up, estimates "
-                  "raised ≥5% over 90 days, last report held. Missing data counts as a fail.",
+                  "raised ≥5% over 90 days, price held up after the last report. Missing "
+                  "data counts as a fail.",
     "rev_yoy": "Revenue growth vs the year-ago quarter. 'n/a' = too few quarters in yfinance "
                "(unknown, not zero).",
     "eps_yoy": "EPS growth vs the year-ago quarter. Want ≥20% and accelerating.",
     "op_margin": "Current operating margin. Look for stable or expanding.",
     "code33": "Minervini's 'Code 33': over the last three quarters, EPS growth, sales growth "
               "and net profit margin each rose every quarter. This counts how many of the "
-              "three did; 3 is Code 33. Blank = too little SEC history (e.g. foreign filers).",
-    "earn_react": "How the stock closed on the session after its last earnings release "
+              "three did; 3 is Code 33. Blank = too little SEC history (e.g. foreign "
+              "companies).",
+    "earn_react": "How the stock closed on the trading day after its last earnings release "
                   "(SEC 8-K), vs the day before. The books: a stock that drops hard on heavy "
-                  "volume after its report is one big money is leaving — the Step-2 panel "
+                  "volume after its report is one big funds are selling — the Step-2 panel "
                   "warns at −5% on ≥1.5× volume. Blank = no release in the last ~100 days.",
     "est_rev_90d": "Change in analysts' consensus EPS estimate for this fiscal year over the "
                    "last 90 days (Yahoo). The guide wants it raised ≥5%; cuts are a warning.",
     "earnings_in": "Calendar days until the next scheduled earnings report (yfinance). "
-                   "Minervini: don't open a fresh position within ~2–3 weeks of a report — "
-                   "with no profit cushion, an earnings gap can blow straight through the "
-                   "stop. Negative = just reported (the safest window); n/a = no date found.",
-    "tier": "Review tier (recall-first): A = valid tightening base in/near the buy zone — "
-            "review these. B = watch: base still forming, or valid but extended past the "
-            "buy zone; never hidden. C = safely skipped (dead tape / no pullbacks / stale "
-            "base). Benchmarked on 200 hand-labeled charts: zero real setups landed in C.",
+                   "Minervini: don't open a new position within ~2–3 weeks of a report — "
+                   "with no profit built up yet, a price jump at the report can skip right "
+                   "past the stop. Negative = just reported (the safest time); n/a = no "
+                   "date found.",
+    "tier": "Review tier (errs toward showing more): A = valid tightening base in/near the "
+            "buy zone — review these. B = watch: base still forming, or valid but already "
+            "risen past the buy zone; never hidden. C = safely skipped (barely moving / no "
+            "pullbacks / base too old). Tested on 200 hand-labeled charts: zero real bases "
+            "landed in C.",
     "vcp": "A valid Volatility Contraction Pattern was detected: 2–6 progressively tighter "
            "pullbacks, the last one tight (≤12%), with price near its 52-week high.",
-    "num_contractions": "Number of peak→trough pullbacks in the current base. Minervini's "
+    "num_contractions": "Number of peak-to-low pullbacks in the current base. Minervini's "
                         "range is 2–6.",
     "depth_vs_spy": "How far the base fell against how far the market fell over the same "
                     "dates: 2.3 = the stock's deepest pullback was 2.3× the S&P 500's. The "
-                    "books avoid names that corrected more than ~2.5–3× the market: a 23% "
-                    "dip in a 10% correction is fine, in a 3% one it isn't. n/a = no "
+                    "books avoid stocks that fell more than ~2.5–3× the market: a 23% "
+                    "dip in a 10% market drop is fine, in a 3% one it isn't. n/a = no "
                     "contractions, or the market barely moved.",
     "dryup_ratio": "Volume in the final tight area (from the last pullback's peak up to any "
                    "breakout) against the 50-day average before it. Under 1 = drying up, the "
                    "books' sign that sellers are gone; the Step-3 panel also counts "
                    "near-silent days (≤ half the average). n/a = no contractions.",
     "vcp_quality": "Base quality 0–100 (tightening 30 + volume-drying 20 + #contractions 20 "
-                   "+ near-high 20 + base length 10). Shown even when VCP is False.",
-    "breakout_today": "Price is clearing the pivot right now (price only — see 'Vol "
+                   "+ near-high 20 + base length 10). Shown even when no VCP is detected.",
+    "breakout_today": "Price is above the pivot right now (price only — see 'Volume "
                       "confirmed' for the volume side).",
-    "vol_confirmed": "The scan's 20-day context read (latest volume ≥ 1.5× it). The trigger "
-                     "job confirms on the prior 50-day average instead — this column is a "
-                     "hint, the trigger report is the decision.",
+    "vol_confirmed": "Latest volume ≥ 1.5× its 20-day average. The trigger check uses the "
+                     "prior 50-day average instead — this column is a hint; the trigger "
+                     "report decides.",
     "pct_to_pivot": "Distance from price to the pivot. Positive = below pivot (needs to rise); "
-                    "negative = already above/extended.",
-    "day_range": "How far this stock ordinarily moves in a day: the median daily true range "
+                    "negative = already above it.",
+    "day_range": "How far this stock usually moves in a day: the median daily true range "
                  "over the last ~2 months, as % of price. A stop only one or two of these "
-                 "below your buy gets hit by normal noise before the trade can work — a "
-                 "wild mover needs a wider stop (and so a smaller position), or a pass.",
-    "adv_musd": "Average daily dollar volume over the last 20 sessions, in $M. One order "
-                "stays within 2% of it: a $2M-a-day name allows a $40k order. Bigger orders "
-                "move the price against you, so the trade plan clamps the share count.",
-    "pivot": "Buy-trigger line — the breakout/base level (or 52-wk high). Buy a close above it.",
+                 "below your buy gets hit by ordinary daily swings before the trade can "
+                 "work — a stock that swings a lot needs a wider stop (and so a smaller "
+                 "position), or skip it.",
+    "adv_musd": "Average daily dollar volume over the last 20 trading days, in $M. One order "
+                "stays within 2% of it: a stock trading $2M a day allows a $40k order. "
+                "Bigger orders move the price against you, so the trade plan cuts the "
+                "share count.",
+    "pivot": "Buy line — the top of the base (or the 52-wk high). Buy when price closes "
+             "above it.",
     "stop": "Advisory stop-loss, ~7–8% below the pivot. The 10% maximum loss is measured "
-            "from the price you PAY, so a trade plan raises this stop for a fill higher in "
+            "from the price you PAY, so a trade plan raises this stop for a buy higher in "
             "the buy zone.",
-    "target": "First objective, +25% above the pivot.",
+    "target": "First profit target, +25% above the pivot.",
 }
 
 # The table's four decision groups, in display order. They set column order and
@@ -257,10 +267,10 @@ COL_HELP = {
 # stocks that pass all 8, so it is always 8. It stays in the scan DataFrame for the tests.
 COL_GROUPS = [
     ("Identify", ["ticker", "price", "industry"]),
-    ("Fuel — catalyst & strength", ["rs", "rs_nh", "rs_trend", "sma200_rising_m",
+    ("Fuel — growth & strength", ["rs", "rs_nh", "rs_trend", "sma200_rising_m",
                                     "fund_score", "rev_yoy", "eps_yoy", "op_margin",
                                     "code33", "earn_react", "est_rev_90d"]),
-    ("Base — the VCP setup", ["tier", "vcp", "num_contractions", "vcp_quality",
+    ("Base — the VCP pattern", ["tier", "vcp", "num_contractions", "vcp_quality",
                               "depth_vs_spy", "dryup_ratio"]),
     ("Entry — timing & risk", ["earnings_in", "breakout_today", "vol_confirmed",
                                "pct_to_pivot", "day_range", "adv_musd", "pivot", "stop",
@@ -520,12 +530,12 @@ def _wl_add_from_upload() -> None:
 # Sidebar — scan settings
 # --------------------------------------------------------------------------- #
 st.sidebar.title("SEPA Cockpit")
-st.sidebar.caption("Mechanical Steps 1-2; you judge Steps 3-4.")
+st.sidebar.caption("Steps 1-2 are automatic; you judge Steps 3-4.")
 
 with st.sidebar.popover("ℹ️ How to use this tool"):
     st.markdown(
-        "1. **Check the market environment** banner — only push in a healthy tape.\n"
-        "2. **Step 1:** the table lists trend-template passers (eligibility).\n"
+        "1. **Check the market environment** banner — buy actively only in a healthy market.\n"
+        "2. **Step 1:** the table lists stocks that pass the Trend Template (eligible).\n"
         "3. **Step 2:** rank by fundamental quality (the 'fuel').\n"
         "4. **Step 3:** click a row and *judge the VCP yourself* on the chart.\n"
         "5. **Step 4:** if it breaks out on volume, use the advisory entry/stop/size.\n\n"
@@ -535,18 +545,18 @@ with st.sidebar.popover("ℹ️ How to use this tool"):
 # the minimum criteria are set in scan_worker, so a scan started from another page is the
 # same scan this page reads.
 min_criteria = scan_worker.DEFAULT_MIN_CRITERIA  # all 8 trend-template criteria
-st.sidebar.caption("Universe: **all US common stocks** (~3–4k names from Nasdaq/NYSE "
-                   "listings). ⏳ The first cold scan pulls every price history (several "
+st.sidebar.caption("Stocks scanned: **all US common stocks** (~3–4k from Nasdaq/NYSE "
+                   "listings). ⏳ The first scan downloads every price history (several "
                    "minutes) — it runs in the background, so you can browse the other "
-                   "pages while it finishes; later scans use the cache and fetch only "
-                   "new days.")
-st.sidebar.caption("Gate: full **8/8** trend template")
+                   "pages while it finishes; later scans reuse the saved prices and "
+                   "download only new days.")
+st.sidebar.caption("Filter: full **8/8** Trend Template")
 min_rs = st.sidebar.slider("Min RS rating", 0, 99, RS_FLOOR,
-                           help="IBD-style weighted multi-horizon return percentile "
-                                "(2×3-mo + 6-mo + 9-mo + 12-mo) vs the scanned universe. "
-                                f"The gate already requires {RS_FLOOR}, the book's eighth "
-                                "criterion; raise this to tighten further.")
-require_vcp = st.sidebar.checkbox("VCP only (hint filter)", value=False)
+                           help="A weighted blend of returns (2×3-mo + 6-mo + 9-mo + "
+                                "12-mo), ranked 1–99 against all scanned stocks. "
+                                f"The Trend Template already requires {RS_FLOOR}, "
+                                "Minervini's eighth criterion; raise this to filter harder.")
+require_vcp = st.sidebar.checkbox("Only detected VCPs", value=False)
 min_fund = st.sidebar.slider("Min fundamental checks (0-8)", 0, 8, 0)
 
 # The scan runs in scan_worker's background thread. It starts when any cockpit page loads
@@ -563,11 +573,11 @@ if st.sidebar.button("🔄 Re-scan (refresh prices)", key="rescan"):
 # need it: a ticker with no saved prices is fully downloaded on any scan.
 with st.sidebar.expander("⚙ Advanced"):
     if st.button("⟳ Full re-download (2y, slow)", key="full_refetch",
-                 help="Ignores every price cache and re-downloads the full 2-year history "
-                      "for ALL names in the universe (several minutes; yfinance rate-limit "
-                      "risk). Only for re-baselining suspect caches — new tickers are "
-                      "fetched in full automatically, and normal scans already top up "
-                      "the latest bars."):
+                 help="Ignores all saved prices and re-downloads the full 2-year history "
+                      "for ALL scanned stocks (several minutes; yfinance may block too "
+                      "many requests). Only for when saved prices look wrong — new tickers "
+                      "are downloaded in full automatically, and normal scans already "
+                      "download the missing recent days."):
         _worker.request_rescan(force=True)
         _invalidate_trade_plan()
 
@@ -586,7 +596,7 @@ if res is None:
 if res is None:
     _snap = _worker.snapshot()
     if _snap["status"] == "error":
-        st.error("Scan failed — the market-data fetch or screen raised:")
+        st.error("Scan failed — downloading prices or screening hit an error:")
         st.code(_snap["error"] or "unknown error", language=None)
         if st.button("🔁 Retry scan", key="scan_retry"):
             _worker.request_rescan()
@@ -595,7 +605,7 @@ if res is None:
     # Reached only on the first scan on this machine. Later restarts load the saved last
     # scan at once and show progress in the status line.
     st.info("First scan in progress — the table appears when it completes (a few "
-            "minutes cold). Switching pages won't cancel it. After this one-time "
+            "minutes the first time). Switching pages won't cancel it. After this one-time "
             "scan, restarts load the last result instantly.")
     time.sleep(1.0)
     st.rerun()
@@ -701,16 +711,16 @@ with st.sidebar:
         "Watchlist tickers", options=sorted(set(_all_tickers) | set(_watch_t)),
         key="wl_picker", on_change=_wl_sync_from_picker,
         placeholder="Pick tickers to add…",
-        help="Pick to add; click a pill's × to remove — removing forgets the frozen 📌 "
-             "pivot (a re-add auto-freezes at the CURRENT scan pivot, not the old level). "
-             "The ⭐ button next to any chart adds too. Saved automatically; persists "
-             "between sessions; the downloads below give you a portable copy.")
+        help="Pick to add; click a ticker's × to remove — removing forgets the frozen 📌 "
+             "pivot (adding it back freezes the CURRENT scan pivot, not the old level). "
+             "The ⭐ button next to any chart adds too. Saved automatically and kept "
+             "between visits; the downloads below give you a copy to keep.")
     st.file_uploader(
         "Upload tickers (.txt)", type=["txt"], key="wl_upload",
         on_change=_wl_add_from_upload,
         help="A .txt file of ticker symbols separated by commas (and/or new lines) — "
-             "e.g. `AAPL, MSFT, NVDA`. They're merged into the watchlist, upper-cased "
-             "and de-duplicated. Pairs with the '⬇ Names (.txt)' download below.")
+             "e.g. `AAPL, MSFT, NVDA`. They're added to the watchlist in upper case, "
+             "duplicates dropped. Pairs with the '⬇ Tickers (.txt)' download below.")
     _up_msg = st.session_state.pop("_wl_upload_msg", None)
     if _up_msg:
         st.caption(_up_msg)
@@ -723,39 +733,41 @@ with st.sidebar:
             if e.get("judged_pivot") else f"{e['ticker']}\\*"
             for e in _watch))
         if any(not e.get("judged_pivot") or e.get("pivot_source") == "auto" for e in _watch):
-            st.caption("\\* no frozen pivot yet — the nightly EOD check freezes one on "
-                       "first sight · (a) = auto-frozen; chart it and 📌 to judge your own.")
+            st.caption("\\* no frozen pivot yet — the nightly end-of-day check freezes one "
+                       "the first time it sees the stock · (a) = frozen automatically; chart "
+                       "it and 📌 to set your own.")
         _d1, _d2 = st.columns(2)
         _d1.download_button(
             "⬇ List (CSV)",
             watchlist_list_csv(res.candidates, _watch, DISPLAY_ORDER),
             file_name="watchlist.csv", mime="text/csv", width="stretch",
             help="Your shortlist with its decision columns (tier, pivot, stop, target, …) "
-                 "plus the frozen judged_pivot/date/source, in the order you added them.")
+                 "plus the frozen pivot, its date and who set it, in the order you added "
+                 "them.")
         _d2.download_button(
             "⬇ OHLCV (CSV)", watchlist_ohlcv_csv(_watch_t, res.payloads),
             file_name="watchlist_ohlcv.csv", mime="text/csv", width="stretch",
-            help="Daily Open/High/Low/Close/Volume for every watchlisted name, stacked "
-                 "long-format with a Ticker column.")
+            help="Daily Open/High/Low/Close/Volume for every watchlist stock, all in one "
+                 "table with a Ticker column.")
         st.download_button(
-            "⬇ Names (.txt)", ",".join(_watch_t), file_name="watchlist.txt",
+            "⬇ Tickers (.txt)", ",".join(_watch_t), file_name="watchlist.txt",
             mime="text/plain", width="stretch",
             help="Just the tickers, comma-separated — the format the uploader above reads "
                  "back in.")
         _missing = [t for t in _watch_t if t not in res.payloads]
         if _missing:
             st.caption(f"⚠︎ {', '.join(_missing)} not in the current scan — the list CSV "
-                       "keeps the ticker only and the OHLCV omits it. Re-scan the universe "
-                       "that has them to include their data.")
+                       "keeps the ticker only and the OHLCV file leaves it out. Re-scan to "
+                       "include their data.")
 
         # --- Paper-trade the watchlist via Alpaca (paper account only) --------------- #
         st.markdown("---")
         st.markdown("**⚡ Paper trade (Alpaca)**")
         # The regime warning is repeated at the point of action; the banner is at the top.
         if not res.regime.get("should_generate_buys"):
-            st.caption(":orange[**⚠︎ CAUTION tape** — the market regime advises against "
-                       "NEW buys (most breakouts fail in a weak tape). Managing stops is "
-                       "fine; think twice before submitting fresh entries.]")
+            st.caption(":orange[**⚠︎ CAUTION market** — the market check advises against "
+                       "NEW buys (most breakouts fail in a weak market). Managing stops is "
+                       "fine; think twice before submitting new buys.]")
         _weak = advisories.weak_market_advice(res.regime, stop_pct=DEFAULT_STOP_FROM_PIVOT,
                                               target_pct=0.25)
         if _weak:
@@ -765,34 +777,34 @@ with st.sidebar:
             _how = ("with breadth" if res.regime.get("spy_ok_breadth") else "SPY only")
             st.caption(f":orange[SPY has been in Stage 1–2 for only **{_stk}/"
                        f"{REGIME_CONFIRM_DAYS}** sessions ({_how}) — the rule is to wait "
-                       f"{REGIME_CONFIRM_DAYS} before adding again after a break. "
-                       "Don't add yet.]")
+                       f"{REGIME_CONFIRM_DAYS} trading days before buying again after the "
+                       "market breaks down. Don't buy yet.]")
         _mode_label = st.selectbox(
             "Size each buy by", ["% of portfolio", "$ per name", "# shares", "Risk % to stop"],
             key="trade_mode", on_change=_invalidate_trade_plan,
-            help="Applied to EACH watchlisted name. '% of portfolio' = that % of your Alpaca "
-                 "equity per name; '$ per name' = that many dollars each; '# shares' = exactly "
-                 "that many shares each; 'Risk % to stop' = size so a stop-out costs that % of "
-                 "equity — shares = (equity × risk%) / (price − stop), Minervini's position "
-                 "sizer. Needs a stop on the name.")
+            help="Applied to EACH watchlist stock. '% of portfolio' = that % of your Alpaca "
+                 "equity (account value) per stock; '$ per name' = that many dollars each; "
+                 "'# shares' = exactly that many shares each; 'Risk % to stop' = size so "
+                 "hitting the stop costs that % of equity — shares = (equity × risk%) / "
+                 "(price − stop), Minervini's sizing rule. Needs a stop on the stock.")
         if _mode_label == "% of portfolio":
             _mode = "pct"
-            _amount = st.number_input("% of equity per name", min_value=0.0, value=5.0,
+            _amount = st.number_input("% of equity per stock", min_value=0.0, value=5.0,
                                       step=0.5, key="trade_amt_pct",
                                       on_change=_invalidate_trade_plan)
-            _size_note = f"{_amount:.1f}% of equity per name"
+            _size_note = f"{_amount:.1f}% of equity per stock"
         elif _mode_label == "$ per name":
             _mode = "dollars"
             _amount = st.number_input("$ per name", min_value=0.0, value=5000.0,
                                       step=500.0, key="trade_amt_dol",
                                       on_change=_invalidate_trade_plan)
-            _size_note = f"~${_amount:,.0f} per name"
+            _size_note = f"~${_amount:,.0f} per stock"
         elif _mode_label == "# shares":
             _mode = "shares"
-            _amount = float(st.number_input("Shares per name", min_value=0, value=100,
+            _amount = float(st.number_input("Shares per stock", min_value=0, value=100,
                                             step=10, key="trade_amt_sh",
                                             on_change=_invalidate_trade_plan))
-            _size_note = f"{int(_amount)} shares per name"
+            _size_note = f"{int(_amount)} shares per stock"
         else:                                    # Risk % to stop (Minervini position sizer)
             _mode = "risk"
             # Seeded if absent, not via value=: the "Use suggested" callback writes this key,
@@ -802,16 +814,17 @@ with st.sidebar:
             _amount = st.number_input("Risk % of equity per trade", min_value=0.0,
                                       step=0.25, key="trade_amt_risk",
                                       on_change=_invalidate_trade_plan,
-                                      help="A stop-out costs about this % of equity. Note a "
-                                           "risk-sized position is roughly risk% ÷ stop-distance% "
-                                           "of equity — e.g. 1% risk with an 8% stop wants a "
-                                           "12.5% position, which the 10% single-order cap "
-                                           "clamps (realized risk then falls below target).")
+                                      help="Hitting the stop costs about this % of equity. A "
+                                           "position sized this way is roughly risk% ÷ "
+                                           "stop-distance% of equity — e.g. 1% risk with an 8% "
+                                           "stop wants a 12.5% position, which the 10%-per-order "
+                                           "limit cuts down (the actual risk then ends up below "
+                                           "target).")
             _size_note = f"{_amount:.2f}% of equity risked to each stop"
             # Guidance from recent results, risk mode only: the journal is read only here.
             _guide = _risk_guidance()
             if _guide is None:
-                st.caption("journal unavailable — no sizing guidance")
+                st.caption("trade journal unavailable — no sizing guidance")
             else:
                 st.caption(f"📒 {_guide['reason']}")
                 if abs(_guide["risk_pct"] - float(_amount)) > 1e-9:
@@ -821,17 +834,18 @@ with st.sidebar:
         _ot_label = st.radio(
             "Order type", ["Market", "Limit (no-chase cap)"], horizontal=True,
             key="trade_order_type", on_change=_invalidate_trade_plan,
-            help="**Market** fills at the next print, whatever it is — a gap can fill you "
-                 "past the 5% buy zone. **Limit** caps each buy at a max price, defaulting "
-                 "to its buy-zone top (pivot × 1.05, frozen 📌 pivot preferred): it never "
-                 "fills ABOVE the limit, so a gap past the zone can't fill you high. It "
-                 "CAN still fill below the zone — a below-pivot name fills immediately at "
-                 "~the market (watch the per-row ⚠ warnings) — and a RESTING GTC limit "
-                 "fills on any later pullback to it, even a failed breakout weeks on: "
-                 "cancel it (🗑 button below) if the setup breaks. Sizing, risk, and the "
-                 "10% cap use the worst-case fill. With a stop attached the order is GTC "
-                 "end-to-end and its stop arms whenever the fill happens; without "
-                 "a stop it's a DAY order that expires at the close.")
+            help="**Market** buys at the next trade price, whatever it is — a price jump "
+                 "can buy you in above the 5% buy zone. **Limit** caps each buy at a max "
+                 "price, defaulting to its buy-zone top (pivot × 1.05, frozen 📌 pivot "
+                 "preferred): it never fills ABOVE the limit, so a jump past the zone can't "
+                 "buy you in high. It CAN still fill below the zone — a stock below its "
+                 "pivot fills right away at about the market price (watch the per-row ⚠ "
+                 "warnings) — and an unfilled GTC limit stays open and fills on any later "
+                 "dip to it, even after a failed breakout weeks later: cancel it (🗑 button "
+                 "below) if the base breaks. Sizing, risk, and the 10% cap use the highest "
+                 "possible buy price. With a stop attached the order is GTC throughout and "
+                 "its stop goes live whenever the buy fills; without a stop it's a DAY "
+                 "order that expires at the close.")
         _order_type = "limit" if _ot_label.startswith("Limit") else "market"
         st.caption(f"{'Limit' if _order_type == 'limit' else 'Market'} BUYs: {_size_note}. "
                    "Paper account only; whole shares, each order still capped at 10% of "
@@ -861,11 +875,11 @@ with st.sidebar:
                 _derived = trade.derived_stop_pct(_gi["closed_episodes"])
             except Exception:
                 _gate = {"open": None,
-                         "reason": "gate unknown (account/journal unreachable) — "
-                                   "your judgment",
+                         "reason": "exposure gate unknown (can't reach the account or "
+                                   "trade journal) — use your judgment",
                          "probe_size_factor": 1.0, "consecutive_losses": 0}
                 _derived = {"stop_pct": None,
-                            "reason": "journal unreachable — default stop"}
+                            "reason": "trade journal unreachable — default stop"}
             # Sizing and stops use freshly downloaded daily prices, not the scan result's
             # older closes. STALE_PLAN_BARS skips a stock whose prices couldn't be updated. A
             # frozen judged_pivot overrides the scan pivot, which changes every scan, for the
@@ -903,8 +917,9 @@ with st.sidebar:
             _gate = _tp.get("gate") or {}
             _gate_closed = _gate.get("open") is False
             if _gate_closed:
-                st.caption(f":red[**Exposure gate closed** — {_gate.get('reason')}. "
-                           "New buys are blocked; stop re-arms and sells still work.]")
+                st.caption(f":red[**Exposure gate closed** (no new positions for now) — "
+                           f"{_gate.get('reason')}. "
+                           "New buys are blocked; re-placing stops and sells still work.]")
             elif _gate.get("open") is None and _gate.get("reason"):
                 st.caption(f":orange[⚠︎ {_gate.get('reason')}]")
             elif _gate.get("probe_size_factor", 1.0) < 1.0:
@@ -912,7 +927,7 @@ with st.sidebar:
             _dv = _tp.get("derived") or {}
             if _dv.get("reason"):
                 st.caption(f"🛑 Stops: {_dv['reason']}. Every buy's stop is at most "
-                           f"{MAX_LOSS_FROM_FILL * 100:.0f}% below its fill.")
+                           f"{MAX_LOSS_FROM_FILL * 100:.0f}% below its buy price.")
             if _plan:
                 # Submit sends no buy for a held stock, only a stop re-arm, so the est. total
                 # counts buyable stocks only.
@@ -945,19 +960,19 @@ with st.sidebar:
                                on_click=_set_all_buys, args=(False,))
                 # With the toggle off, buys go in with no stop and held stocks are skipped.
                 _attach = st.toggle(
-                    "Attach protective stop (sell-all, GTC)", value=True,
+                    "Attach protective stop (sells all, GTC)", value=True,
                     key="trade_attach_stop",
-                    help="Places a stop-loss under each buy via a GTC OTO order — the stop leg "
-                         "waits for the fill, then rests as a persistent GTC stop that survives "
-                         "the close. If a name is already held, no buy is sent — a GTC "
+                    help="Places a stop-loss under each buy as a GTC OTO order — the stop "
+                         "waits for the buy to fill, then stays open from day to day until "
+                         "it triggers. If a stock is already held, no buy is sent — a GTC "
                          "stop protects the whole position and, per Minervini, only ever "
-                         "RATCHETS UP: a re-arm that would lower the stop is ignored and the "
+                         "MOVES UP: a new stop that would be lower is ignored and the "
                          "existing higher stop kept (shown as 'stop_kept' 🔒). Edit each stop "
                          "below (defaults to the app-computed stop).")
                 _eq = (_tp.get("account") or {}).get("equity")
                 _is_lim = _tp.get("order_type") == "limit"
                 if _is_lim and any(_held.get(_o["ticker"], 0) <= 0 for _o in _plan):
-                    st.caption("each buy row: ☑ name · **limit** · stop")
+                    st.caption("each buy row: ☑ stock · **limit** · stop")
                 for _o in _plan:
                     _t = _o["ticker"]
                     _held_sh = _held.get(_t, 0)
@@ -968,7 +983,7 @@ with st.sidebar:
                         _cL = None
                     _on = True                       # held rows have no checkbox (re-arm only)
                     if _held_sh > 0:
-                        _act = "stop re-arm only, no buy" if _attach else "skipped (attach off)"
+                        _act = "stop placed again, no buy" if _attach else "skipped (stop off)"
                         _cA.caption(f"• **{_t}** — already held ({_held_sh} sh) · {_act}")
                     else:
                         _fl = " ⚠︎ extended" if _o["extended"] else ""
@@ -983,9 +998,9 @@ with st.sidebar:
                             f"**{_t}** {_o['shares']} sh @ ~${_o['price']:.2f} "
                             f"(~${_o['est_value']:,.0f}){_fl}" + (f" · {_ew}" if _ew else ""),
                             value=False, key=_buy_key(_t),
-                            help="Unchecked names are left out of the submit entirely. "
-                                 "Every name starts unchecked; earnings-soon names are "
-                                 "flagged (no-fly window).")
+                            help="Unchecked stocks are left out of the submit entirely. "
+                                 "Every stock starts unchecked; stocks with earnings soon "
+                                 "are flagged (too close to the report to buy).")
                     # Limit plans only; a held row has no buy to limit.
                     _edlim = _o.get("limit_price")
                     if _cL is not None and _held_sh <= 0:
@@ -994,8 +1009,8 @@ with st.sidebar:
                             value=float(_edlim) if _edlim else 0.0,
                             step=0.01, format="%.2f", key=f"lim_{_t}_{_nonce}",
                             label_visibility="collapsed", disabled=not _on,
-                            help=f"Max fill price for {_t} — defaults to its buy-zone top "
-                                 "(pivot × 1.05), the no-chase cap. The order fills at or "
+                            help=f"Highest price to pay for {_t} — defaults to the top of "
+                                 "its buy zone (pivot × 1.05). The order fills at or "
                                  "below this, never above.")
                         _edlim = st.session_state.get(f"lim_{_t}_{_nonce}", _edlim)
                     _cB.number_input(
@@ -1039,8 +1054,8 @@ with st.sidebar:
                     elif _o.get("stop_floored") and _on and _held_sh <= 0 and _attach:
                         _cA.caption(f"  ↳ default stop raised to {_o['stop_price']:,.2f} — "
                                     f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the "
-                                    f"{'limit' if _is_lim else 'price'}, the most a fill "
-                                    "up there may lose")
+                                    f"{'limit' if _is_lim else 'price'}, the most a buy "
+                                    "at that price may lose")
                     _adv = _o.get("adv_usd")
                     if (_adv and _on and _held_sh <= 0
                             and _o["shares"] * _paid > MAX_ORDER_ADV_PCT * _adv):
@@ -1056,36 +1071,37 @@ with st.sidebar:
                     if (_is_lim and _on and _held_sh <= 0 and _edlim
                             and _edlim < _o["price"]):
                         _cA.caption(f"  ↳ limit {_edlim:,.2f} < last close {_o['price']:,.2f} "
-                                    "— fills only on a pullback into the zone")
+                                    "— fills only if the price dips into the zone")
                     elif (_is_lim and _on and _held_sh <= 0 and _o.get("pivot")
                             and _o["price"] < _o["pivot"]):
                         _cA.caption(f"  ↳ ⚠ price {_o['price']:,.2f} is below the pivot "
-                                    f"{_o['pivot']:,.2f} — this limit is marketable and "
-                                    f"fills immediately at ~{_o['price']:,.2f}, below "
+                                    f"{_o['pivot']:,.2f} — this limit is above the price, so "
+                                    f"it fills right away at ~{_o['price']:,.2f}, below "
                                     "the buy zone")
                 if any(_o["extended"] for _o in _buys):      # footnotes describe the BUYs only
-                    st.caption("⚠︎ *extended* = >5% above the pivot; sized at pivot risk, so "
-                               "the real risk to your stop is larger.")
+                    st.caption("⚠︎ *extended* = >5% above the pivot; sized as if bought at the "
+                               "pivot, so the real risk to your stop is larger.")
                 if any(_o.get("capped") for _o in _buys):
-                    st.caption("⚠︎ *capped* = the risk-sized quantity hit the 10%-of-equity "
-                               "order cap and was clamped down, so the realized risk sits below "
-                               "your target. Lower the risk % or tighten the stop to fit.")
+                    st.caption("⚠︎ *capped* = the share count sized by risk hit the "
+                               "10%-of-equity order limit and was cut down, so the actual risk "
+                               "is below your target. Lower the risk % or tighten the stop to "
+                               "fit.")
                 if any(_o.get("adv_capped") for _o in _buys):
                     st.caption(f"⚠︎ *volume-capped* = the share count was reduced to "
-                               f"{MAX_ORDER_ADV_PCT * 100:.0f}% of the name's average daily $ "
+                               f"{MAX_ORDER_ADV_PCT * 100:.0f}% of the stock's average daily $ "
                                "volume. A bigger order moves the price against you; a full "
-                               "position needs a more liquid name.")
+                               "position needs a stock that trades more.")
                 if any(_earnings_flag(_o.get("earnings_in")) for _o in _buyable):
                     st.caption(f"⚠︎ *earnings in Nd* = a report is scheduled within "
-                               f"~{EARNINGS_SOON_DAYS} days. A fresh buy has no profit "
-                               "cushion to absorb an earnings gap. *Select all* ticks "
+                               f"~{EARNINGS_SOON_DAYS} days. A new buy has no profit built "
+                               "up to absorb a price jump at the report. *Select all* ticks "
                                "these too.")
                 # Name the account before submit: each paper account has its own keys. The
                 # error case renders above.
                 if not _account.get("error"):
-                    _src = ("Minervini Trader keys" if _account.get("using_dedicated")
-                            else "shared ALPACA_* keys — set ALPACA_API_KEY_MINERVINI / "
-                                 "ALPACA_API_KEY_SECRET_MINERVINI to target the Minervini account")
+                    _src = ("Minervini Trader API keys" if _account.get("using_dedicated")
+                            else "shared ALPACA_* API keys — set ALPACA_API_KEY_MINERVINI / "
+                                 "ALPACA_API_KEY_SECRET_MINERVINI to use the Minervini account")
                     st.caption(f"Target account **…{str(_account['account_number'])[-4:]}** "
                                f"({_src}) · equity ${_account['equity']:,.0f}")
                 _c1, _c2, _c3 = st.columns([2, 2, 1])
@@ -1111,7 +1127,7 @@ with st.sidebar:
                               for _o in _plan
                               if _held.get(_o["ticker"], 0) > 0
                               or st.session_state.get(_buy_key(_o["ticker"]), False)]
-                    with st.spinner("Submitting to Alpaca paper…"):
+                    with st.spinner("Sending to the Alpaca paper account…"):
                         try:
                             st.session_state["trade_result"] = submit_buy_plan(
                                 _final, attach_stop=_attach)
@@ -1127,10 +1143,11 @@ with st.sidebar:
                 if _c2.button(f"Arm {len(_buys)} for open", key="trade_arm",
                               width="stretch",
                               disabled=not _is_lim or not _attach or not _buys,
-                              help="Writes tonight's armed entry plan (no orders now). "
-                                   "The morning executor submits at most one still-"
-                                   "armed row; disarm below anytime before the open. "
-                                   "Needs the Limit order type + attached stop."):
+                              help="Arm = queue the ticked buys for the next open (no "
+                                   "orders now). At ~9:26 ET the morning job places at "
+                                   "most one still-armed buy; Disarm below takes one off "
+                                   "the queue anytime before then. Needs the Limit order "
+                                   "type + attached stop."):
                     _armed_rows = [{**_o,
                                     "stop_price": st.session_state.get(
                                         f"stop_{_o['ticker']}_{_nonce}",
@@ -1159,7 +1176,7 @@ with st.sidebar:
             else:
                 _act = [r for r in _tr["results"]
                         if r["status"] in ("submitted", "stop_only", "stop_kept")]
-                st.success(f"Actioned {len(_act)}/{len(_tr['results'])} order(s) on "
+                st.success(f"Placed {len(_act)}/{len(_tr['results'])} order(s) on "
                            f"account …{str(_tr['account_number'])[-4:]} · "
                            f"equity ${_tr['equity']:,.0f}")
                 for _r in _tr["results"]:
@@ -1167,7 +1184,7 @@ with st.sidebar:
                            "skipped": "—", "failed": "⚠️"}.get(_r["status"], "•")
                     st.caption(f"{_ic} {_r['ticker']}: {_r['status']} — {_r.get('detail', '')}")
     else:
-        st.caption("Empty — click ⭐ on a chart, or use the picker above.")
+        st.caption("Empty — click ⭐ next to a chart, or pick tickers above.")
 
     # --- Armed entries: tonight's plan and overnight disarm -------------------------- #
     # Outside the watchlist block: the morning-after check needs it with no plan built.
@@ -1178,12 +1195,13 @@ with st.sidebar:
         _ep = None
     if _ep and _ep.get("rows"):
         st.markdown("**Armed for next open**")
-        _armed_state = ("**ARMED** — executes ~9:26 ET"
+        _armed_state = ("**ON** — buys at ~9:26 ET"
                         if entries.autobuy_enabled()
-                        else "not armed (`AUTOBUY` unset) — plan only")
-        st.caption(f"Entry plan **{_ep.get('date')}** · morning submit {_armed_state}. "
-                   "At most ONE still-armed row buys (walk order = list order); the "
-                   "exposure gate is re-checked fresh at execution.")
+                        else "**OFF** (`AUTOBUY` not set) — plan only")
+        st.caption(f"Entry plan **{_ep.get('date')}** · morning auto-buy {_armed_state}. "
+                   "At most ONE still-armed row buys (the first in list order); the "
+                   "exposure gate is checked again just before buying. Disarm = take "
+                   "a row off the queue.")
         _EICON = {"armed": "🕘", "disarmed": "🚫", "submitted": "✅",
                   "failed": "⚠️", "skipped": "—"}
         for _r in _ep["rows"]:
@@ -1205,10 +1223,11 @@ with st.sidebar:
     # if the price ever dropped back to the limit.
     # Outside the watchlist block: a pending buy can outlive its watchlist entry.
     if st.button("🗑 Cancel pending cockpit buys", key="cancel_pending",
-                 help="Cancels every OPEN cockpit BUY order (SEPA-tagged only — queued "
-                      "market buys and resting GTC limits; an unfilled OTO stop leg dies "
-                      "with its parent, nothing was bought). Never touches sells, "
-                      "protective stops on held positions, or other tools' orders."):
+                 help="Cancels every OPEN BUY order this cockpit placed (market buys "
+                      "waiting for the open and unfilled GTC limits; the stop attached to "
+                      "an unfilled buy is cancelled with it, since nothing was bought). "
+                      "Never touches sells, protective stops on held positions, or other "
+                      "tools' orders."):
         try:
             _cx = cancel_pending_buys()
             if _cx["cancelled"]:
@@ -1233,9 +1252,9 @@ with st.sidebar:
         # missed. It MUST run before the report load below, so the new report renders in
         # this pass.
         if st.button("🔔 Check triggers now", key="trigger_check_now",
-                     help="Run the watchlist trigger check immediately — tops up the "
-                          "watchlist names' daily bars, freezes any missing pivots, and "
-                          "writes today's report (same as the scheduled half-hourly run)."):
+                     help="Run the watchlist trigger check now — downloads the missing "
+                          "recent days for the watchlist stocks, freezes any missing pivots, "
+                          "and writes today's report (same as the run every half hour)."):
             with st.spinner("Checking watchlist triggers…"):
                 try:
                     from src.stock_screener.cockpit.refresh_job import build_report
@@ -1244,24 +1263,24 @@ with st.sidebar:
                     st.warning(f"Trigger check failed: {_e}")
         _rep = load_latest_trigger_report(cache.TRIGGERS_DIR)
         if not _rep:
-            st.caption("No trigger report yet — click 🔔 Check triggers now, or schedule "
-                       "cockpit-refresh.timer (HANDOFF §8) for scheduled "
-                       "watchlist trigger checks.")
+            st.caption("No trigger report yet — click 🔔 Check triggers now, or set up "
+                       "cockpit-refresh.timer (HANDOFF §8) to run the watchlist trigger "
+                       "check on a schedule.")
             return
         _hm = str(_rep.get("generated_at", ""))[11:16]   # ISO -> HH:MM, not validated
         st.markdown(f"**🔔 Trigger check — {_rep.get('date', '?')}"
                     + (f" {_hm}" if _hm else "") + "**")
         if _rep.get("early_close"):
-            st.caption("🕐 early close (1pm ET) — half-day session; the volume gate is "
-                       "scaled ×1.86 for the short session (thin holiday tape — judge "
-                       "any trigger accordingly).")
+            st.caption("🕐 early close (1pm ET) — half-day; the volume test is scaled "
+                       "×1.86 for the short day (light holiday trading — judge any "
+                       "trigger with that in mind).")
         if _rep.get("intraday"):
             _settle = "~1pm" if _rep.get("early_close") else "~4pm"
-            st.caption(f"⏱ intraday — close/volume provisional until {_settle}; pace = "
-                       "volume so far vs expected by this time of day.")
+            st.caption(f"⏱ market still open — close/volume not final until {_settle}; "
+                       "pace = volume so far vs expected by this time of day.")
         if _rep.get("all_stale"):
-            st.caption("💤 No new bar on the report date (weekend/holiday?) — "
-                       "no trigger can fire from a stale bar.")
+            st.caption("💤 No new price data for the report date (weekend/holiday?) — "
+                       "no trigger can fire from old data.")
         _ticons = {"triggered": "🔔", "pullback": "↩", "crossed": "↗", "extended": "⬆",
                    "watch": "👀", "stale": "💤", "no_pivot": "⚠", "no_data": "⚠",
                    "untracked": "🚫"}
@@ -1297,20 +1316,21 @@ with st.sidebar:
                     st.rerun()
         if _rep.get("summary", {}).get("crossed"):
             st.caption("↗ crossed = above its frozen pivot but NOT volume-confirmed — a "
-                       "quiet drift is not a buy; wait for a ≥1.5× volume close, or plan "
-                       "a pullback/secondary entry off the pivot.")
+                       "quiet drift up is not a buy; wait for a close on ≥1.5× volume, or "
+                       "plan a buy on a dip back to the pivot.")
         if _rep.get("summary", {}).get("pullback"):
             st.caption("↩ pullback = crossed its frozen pivot earlier, now back within "
-                       "~2% of it on dry volume (≤0.8×) — the low-risk secondary entry; "
-                       "judge the chart, stop goes just below the pivot.")
+                       "~2% of it on low volume (≤0.8×) — the low-risk secondary entry "
+                       "(a second chance to buy); judge the chart, stop goes just below "
+                       "the pivot.")
         if _rep.get("summary", {}).get("untracked"):
-            st.caption("🚫 untracked = fell out of the 8/8 trend template — kept on the "
-                       "watchlist, but the trigger is not evaluated until it "
-                       "re-qualifies.")
+            st.caption("🚫 untracked = fell out of the 8/8 Trend Template — kept on the "
+                       "watchlist, but not checked for a trigger until it passes "
+                       "again.")
         if _rep.get("summary", {}).get("triggered"):
             st.caption("🔔 Triggered = closed above the frozen pivot on ≥1.5× 50-day "
-                       "volume — judge it (chart + fuel), then buy at/near the next "
-                       "open if it holds up.")
+                       "volume — judge it (chart + fundamentals), then buy at/near the "
+                       "next open if it holds up.")
 
     _trigger_report_panel()
 
@@ -1342,7 +1362,7 @@ scol.markdown(strip)
 with icol:
     info_btn(INFO_REGIME, label="ℹ️")
 if not buy_ok:
-    st.caption("⚠︎ Weak tape — most breakouts fail here. "
+    st.caption("⚠︎ Weak market — most breakouts fail here. "
                + "; ".join(reg.get("reasons", [])))
 _lead = leading_groups(res.candidates)
 if _lead:
@@ -1351,8 +1371,8 @@ if _lead:
         + (f" · {g['new_highs']} new high{'s' if g['new_highs'] != 1 else ''}"
            if g["new_highs"] else "") + ")" for g in _lead))
 
-st.caption(f"Scanned {res.n_scanned} names · {res.n_passed} pass the "
-           f"{min_criteria}/8 trend template · {len(cand_view)} after filters"
+st.caption(f"Scanned {res.n_scanned} stocks · {res.n_passed} pass the "
+           f"{min_criteria}/8 Trend Template · {len(cand_view)} after filters"
            + (f" · {len(res.errors)} errors" if res.errors else ""))
 
 # --------------------------------------------------------------------------- #
@@ -1361,7 +1381,7 @@ st.caption(f"Scanned {res.n_scanned} names · {res.n_passed} pass the "
 cand = cand_view
 if cand is None or len(cand) == 0:
     st.info("No candidates passed the current filters. "
-            "Loosen the RS / fundamental filters, or wait for a better tape.")
+            "Loosen the RS / fundamental filters, or wait for a stronger market.")
     st.stop()
 
 hcol, scol, icol = st.columns([0.5, 0.32, 0.18], vertical_alignment="center")
@@ -1450,21 +1470,21 @@ with colSide:
                                or (_ent or {}).get("pivot_source") == "auto"):
                 st.button(f"📌 Freeze pivot @ {_app_pivot:,.2f}", key="wl_freeze",
                           on_click=_wl_freeze, args=(pick, _app_pivot), width="stretch",
-                          help="Locks THIS level as the nightly trigger pivot for this name "
-                               "(the detected pivot drifts as new bars arrive; your judged "
-                               "level overrides an auto-frozen one). Freeze again anytime "
+                          help="Locks THIS level as the nightly trigger pivot for this stock "
+                               "(the detected pivot moves as new days arrive; your level "
+                               "overrides one frozen automatically). Freeze again anytime "
                                "to update it."
                           + (f" Currently frozen @ {_frozen:,.2f}"
                              f" ({(_ent or {}).get('pivot_source') or '?'})."
                              if _frozen else ""))
             elif _frozen:
                 st.caption(f"📌 pivot frozen @ {_frozen:,.2f} "
-                           f"({(_ent or {}).get('date_added') or '—'}, judged)")
+                           f"({(_ent or {}).get('date_added') or '—'}, set by you)")
         else:
             st.button(f"⭐ Add {pick} to watchlist", key="wl_toggle", type="primary",
                       on_click=_wl_add, args=(pick,),
                       kwargs={"judged_pivot": _app_pivot}, width="stretch",
-                      help="Adds the name AND freezes the current pivot as your judged "
+                      help="Adds the stock AND freezes the current pivot as your "
                            "trigger level (shown in Step 4).")
         # Freezing a pivot the price is already above sets a trigger whose crossing may have
         # already happened. Warn at freeze time, for ⭐ and 📌 alike.
@@ -1473,9 +1493,9 @@ with colSide:
                      if _wl_df is not None and len(_wl_df) else None)
         if _app_pivot and _wl_close is not None and _wl_close > _app_pivot:
             st.caption(f"⚠︎ post-breakout: {pick} already trades above this pivot "
-                       f"({_wl_close:,.2f} > {_app_pivot:,.2f}) — a freeze here arms a "
-                       "trigger that may never re-fire; plan a pullback/secondary entry "
-                       "instead (its report row will show ↗ crossed).")
+                       f"({_wl_close:,.2f} > {_app_pivot:,.2f}) — freezing here sets a "
+                       "trigger that may never fire again; plan a buy on a dip back to "
+                       "the pivot instead (its report row will show ↗ crossed).")
         st.markdown(step_badge("Step 3", "Judge the VCP"))
         info_btn(INFO_STEP3, label="ℹ️ How to read the chart")
         for _cap in (advisories.depth_vs_market_text(payload.get("depth")),
@@ -1484,12 +1504,12 @@ with colSide:
             if _cap:
                 st.caption(_cap)
         weekly = st.checkbox("Weekly view", value=False)
-        show_overlays = st.checkbox("VCP + entry overlays", value=True)
+        show_overlays = st.checkbox("VCP + entry markings", value=True)
         show_bollinger = st.checkbox(
             "Bollinger bands", value=False,
-            help="Overlay the 20-period / 2σ Bollinger envelope on the price row — the same "
-                 "bands the Step-4 squeeze (BBWP) read is built from. Narrowing bands = the "
-                 "compression a VCP base coils into.")
+            help="Draw the 20-day, 2-standard-deviation Bollinger bands on the price chart "
+                 "— the same bands the Step-4 squeeze (BBWP) measure uses. Narrowing bands "
+                 "= the tightening a VCP base forms.")
 
 with colChart:
     with st.container(border=True):
@@ -1529,16 +1549,16 @@ with st.container(border=True):
     # level; the tooltip says so.
     _fz_pivot = (_wl_entry(pick) or {}).get("judged_pivot")
     _pivot_help = ("The scan's **detected** pivot — recomputed from the price history on "
-                   "every scan, so it drifts as new bars arrive. The buy zone, stop, and "
-                   "target tiles derive from it. "
+                   "every scan, so it moves as new days arrive. The buy zone, stop, and "
+                   "target tiles come from it. "
                    + (f"Your **frozen 📌 pivot** for {pick} is **${_fz_pivot:,.2f}** (the "
-                      "sidebar's level) — triggers fire and trade-plan orders are priced "
-                      "off that frozen level, not this one. If you re-judge the base, "
-                      "re-📌 on the chart to update it."
+                      "sidebar's level) — triggers and trade-plan prices use that frozen "
+                      "level, not this one. If you judge the base again, click 📌 next to "
+                      "the chart to update it."
                       if _fz_pivot else
                       "⭐/📌 freezes the level you're judging as the watchlist trigger "
-                      "pivot; from then on the frozen level (sidebar), not this drifting "
-                      "one, is what triggers and trade plans act on."))
+                      "pivot; from then on triggers and trade plans use the frozen level "
+                      "(sidebar), not this moving one."))
     r1 = st.columns(3)
     r1[0].metric("Pivot", _usd(lv.get("pivot")), border=True, help=_pivot_help)
     r1[1].metric("Buy zone", buy_zone, border=True)
@@ -1548,22 +1568,24 @@ with st.container(border=True):
     r2[1].metric("To pivot", pct_s, border=True)
     spp = lv.get("stop_pct_from_pivot")
     if spp is not None:
-        _clamp = (" — capped at the 10% max (logical support sat lower; a base needing a wider "
-                  "stop is too loose to risk more than 10%)" if lv.get("stop_clamped") else "")
+        _clamp = (" — capped at the 10% max (the natural support level was lower; a base that "
+                  "needs a wider stop is too loose to risk more than 10%)"
+                  if lv.get("stop_clamped") else "")
         _mark = "✅" if spp <= 8.0 + 1e-9 else "⚠️"
         st.caption(f"{_mark} Risk pivot → stop: **{spp:.1f}%** "
                    f"(Minervini: 7–8% ideal, 10% hard max){_clamp}")
     _dr = (payload.get("vcp") or {}).get("median_tr_pct")
     _room = advisories.stop_room((_dr or 0) / 100.0, lv.get("stop"), lv.get("pivot"))
     if _room:
-        st.caption(("⚠️ " if _room["warn"] else "") + f"Typical day **{_dr:.1f}%** — the stop "
-                   f"is **{_room['room_days']:.1f}** ordinary days below the pivot"
-                   + (": inside normal noise, so an ordinary day can shake you out. Wider "
-                      "stop and a smaller position, or pass." if _room["warn"] else "."))
+        st.caption(("⚠️ " if _room["warn"] else "") + f"Typical daily move **{_dr:.1f}%** — "
+                   f"the stop is **{_room['room_days']:.1f}** typical daily moves below the "
+                   "pivot"
+                   + (": within normal daily swings, so an ordinary day can stop you out. "
+                      "Wider stop and a smaller position, or skip it." if _room["warn"] else "."))
     _mfs = lv.get("max_fill_for_stop")
     if _mfs and bz_hi and _mfs < bz_hi:
         # No '$' here: two in one markdown string parse as a LaTeX span.
-        st.caption(f"Fills above **{_mfs:,.2f}** raise the stop — the max loss is "
+        st.caption(f"Buying above **{_mfs:,.2f}** raises the stop — the max loss is "
                    f"{MAX_LOSS_FROM_FILL * 100:.0f}% below the price you pay, and the zone "
                    f"runs to {bz_hi:,.2f}.")
 
@@ -1582,7 +1604,7 @@ with st.container(border=True):
         rmv_note = "low volatility, a classic VCP contraction — tight stop, high-quality base."
     elif rmv < 50:
         rmv_disp, rmv_flag, rmv_label = f"{rmv:.0f}", "", "normal"
-        rmv_note = "middling volatility — the base isn't fully coiled yet."
+        rmv_note = "middling volatility — the base isn't fully tight yet."
     else:
         rmv_disp, rmv_flag, rmv_label = f"{rmv:.0f}", "⚠️", "loose"
         rmv_note = "still volatile — lower-quality base; consider waiting for it to tighten."
@@ -1598,33 +1620,34 @@ with st.container(border=True):
     if bbwp is None:
         bbwp_disp, bbwp_note = "n/a", "not enough history."
     elif bbwp < 25:
-        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band-width in its bottom quartile — a Bollinger squeeze (tight)."
+        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band width in its lowest 25% — a Bollinger squeeze (tight)."
     elif bbwp < 50:
-        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band-width mid-range — not yet a squeeze."
+        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band width mid-range — not yet a squeeze."
     else:
-        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band-width wide — volatility is expanded, not contracted."
+        bbwp_disp, bbwp_note = f"{bbwp:.0f}", "band width wide — volatility is expanded, not contracted."
     sq_flag = "✅ squeeze on" if squeeze_on else "— no squeeze"
     bc = st.columns([1, 2])
     bc[0].metric("BBWP", bbwp_disp, border=True,
                  help="Bollinger Band-Width Percentile (0–100): today's Bollinger band width "
-                      "vs its own trailing range. Low = a squeeze (bands tight). Cross-checks "
-                      "RMV from the Bollinger (close-based) side. Advisory only.\n\n"
-                      "**Rule of thumb:** prioritize RMV — it's the gate. BBWP is close-to-"
-                      "close, so a smooth uptrend inflates it: if RMV reads tight but BBWP "
-                      "isn't a squeeze (a low-range drift, e.g. IFF), that's usually the trend "
-                      "fooling BBWP — go with RMV. Only defer to BBWP when it's *more* cautious "
-                      "than RMV — RMV can read falsely tight after a recent volatility spike "
-                      "(its min-max scaling), and there BBWP's skepticism wins.")
+                      "vs its own recent range. Low = a squeeze (bands tight). A second check "
+                      "on RMV, built from closing prices only. Advisory only.\n\n"
+                      "**Rule of thumb:** trust RMV first — it's the main test. BBWP uses "
+                      "only closes, so a smooth uptrend pushes it up: if RMV reads tight but "
+                      "BBWP shows no squeeze (a slow, narrow-range climb, e.g. IFF), that's "
+                      "usually the trend fooling BBWP — go with RMV. Only side with BBWP when "
+                      "it's *more* cautious than RMV — RMV can read falsely tight after a "
+                      "recent jump in volatility (from how it scales to its recent range), "
+                      "and there BBWP's caution wins.")
     bc[1].markdown(f"**Squeeze:** {sq_flag} — {bbwp_note}")
 
     _rs_nh = payload.get("rs_nh")
     if _rs_nh is None:
         st.markdown("**RS line:** n/a — under ~6 months of overlapping SPY history.")
     elif _rs_nh:
-        st.markdown("**RS line:** ✅ **at a 52-wk high before price** — outperforming the "
-                    "market while still basing (accumulation tell; IBD blue dot).")
+        st.markdown("**RS line:** ✅ **at a 52-wk high before price** — beating the "
+                    "market while still forming the base (a sign big funds are buying).")
     else:
-        st.markdown("**RS line:** — not at a new high before price (no divergence signal; "
+        st.markdown("**RS line:** — not at a new high before price (no early-strength sign; "
                     "fine, just no extra confirmation).")
 
     # volume_quality: % of contractions whose volume was lower than during the rise just
@@ -1634,7 +1657,7 @@ with st.container(border=True):
         st.markdown("**Base volume:** n/a — no contractions detected.")
     else:
         vq_flag = "✅" if vq >= 60 else ("" if vq >= 30 else "⚠️")
-        vq_note = ("volume dried up through the base — supply withdrawing." if vq >= 60
+        vq_note = ("volume dried up through the base — sellers are leaving." if vq >= 60
                    else "only a partial dry-up — mixed." if vq >= 30
                    else "volume did NOT dry up — a weaker base.")
         st.markdown(f"**Base volume:** {vq_flag} drying up in **{vq:.0f}%** of contractions — {vq_note}")
@@ -1646,7 +1669,7 @@ with st.container(border=True):
     if bool(lv.get("squeeze_released")):
         volat_txt = "✅ squeeze released — volatility expanding out of the base"
     elif squeeze_on:
-        volat_txt = "— still coiled (squeeze on) — no expansion yet"
+        volat_txt = "— still tight (squeeze on) — no expansion yet"
     else:
         volat_txt = "— no active squeeze to release"
     st.markdown(f"- **Volatility:** {volat_txt}")

@@ -71,7 +71,8 @@ def build_entry_plan(final_rows: List[dict], today=None) -> dict:
         lim = o.get("limit_price")
         stop = o.get("stop_price")
         if not lim or float(lim) <= 0:
-            skipped.append(f"{t}: no limit price — market rows never arm")
+            skipped.append(f"{t}: no limit price — only limit orders arm for the next "
+                           "open")
             continue
         if not stop or not (0 < float(stop) < float(lim)):
             skipped.append(f"{t}: stop must sit below the limit")
@@ -194,18 +195,18 @@ def execute_entry_plan(plan: dict, *, submit: Callable[[dict], dict],
             continue
         if not gate_open:
             r["status"] = ROW_SKIPPED
-            r["detail"] = ("progressive-exposure gate closed"
-                           if gate else "gate unknown — unattended path fails closed")
+            r["detail"] = ("exposure gate closed — no new positions now"
+                           if gate else "exposure gate couldn't be read — no buy")
             summary["skipped"].append(t)
             continue
         if bullet_used:
             r["status"] = ROW_SKIPPED
-            r["detail"] = "one entry per day — bullet already used"
+            r["detail"] = "one entry per day — today's buy already sent"
             summary["skipped"].append(t)
             continue
         if int(held_by_symbol.get(t, 0)) > 0:
             r["status"] = ROW_SKIPPED
-            r["detail"] = "already held at execution"
+            r["detail"] = "already held this morning"
             summary["skipped"].append(t)
             continue
         try:
