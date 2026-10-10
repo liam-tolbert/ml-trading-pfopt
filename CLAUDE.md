@@ -21,6 +21,7 @@ RFC 2119.
 - A comment that states an obligation MUST use an RFC 2119 keyword.
 - Docstrings follow the same rules. A docstring SHOULD state the contract: inputs,
   return shape, and when it returns None or raises.
+- Write comments in plain language a new teammate would understand. Use the same names the code already uses for things. Do not introduce new terminology, acronyms, or pattern names (e.g. ‘orchestrator’, ‘idempotent’, ‘hydrate’, ‘sentinel’) that don’t appear elsewhere in the repo.
 
 ## Commits
 

@@ -1,8 +1,8 @@
-"""Cockpit-local technical indicators, kept out of the vendored screening package.
+"""Technical indicators used only by the cockpit.
 
-RMV (Relative Measured Volatility) is a decision-support metric for the SEPA cockpit, not
-part of the upstream Minervini screener. So it lives here, not in the vendored
-``minervini_screener/screening`` tree (see that package's PROVENANCE.md).
+RMV (Relative Measured Volatility) helps the user judge a SEPA setup but is not part of
+the original Minervini screener. So it lives here, not in ``minervini_screener/screening``,
+the copy of that package kept in this repo (see its PROVENANCE.md).
 """
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ import pandas as pd
 
 
 def prior_volume_average(vol: pd.Series, window: int) -> pd.Series:
-    """Rolling mean of the ``window`` bars before each bar: the series form of the
-    breakout-confirmation denominator.
+    """Rolling mean of the ``window`` bars before each bar: for every bar, the average
+    that a breakout day's volume is compared against.
 
     The ``shift(1)`` MUST stay. A breakout bar in its own average dilutes the spike it is
     measured against, and the bigger the spike, the more it dilutes. NaN until a full
@@ -27,8 +27,9 @@ def volume_ratio(df: pd.DataFrame, window: int) -> Optional[float]:
     """Last bar's volume over the mean of the ``window`` bars before it.
     None when there's no Volume column, too little history, or a non-positive mean.
 
-    The one breakout-confirmation read. The trigger job, the Positions heavy-volume flag
-    and the weekend hunt all call it, because they enforce one doctrine rule."""
+    The one place the breakout volume check is computed. The trigger job, the Positions
+    heavy-volume flag and the weekend hunt all call it, because they apply the same rule
+    from the ``doctrine`` module."""
     try:
         v = df["Volume"]
         if len(v) < window + 1:
@@ -63,24 +64,25 @@ def _true_range(df: pd.DataFrame) -> pd.Series:
 
 
 def true_range_pct(df: pd.DataFrame) -> pd.Series:
-    """True range as a fraction of the close, so a $10 and a $500 stock compare. RMV and
-    vcp.py's adaptive-threshold and dead-tape reads share it, so the TR% convention is
-    defined once. A zero close gives NaN, not inf."""
+    """True range as a fraction of the close, so a $10 and a $500 stock compare. RMV,
+    vcp.py's adaptive threshold and its check for a stock that has barely moved
+    (``DEAD_TAPE_BARS``) share it, so the TR% formula is defined once. A zero close gives
+    NaN, not inf."""
     return _true_range(df) / df["Close"].replace(0, np.nan)
 
 
 def relative_measured_volatility(df: pd.DataFrame, atr_period: int = 10,
                                  lookback: int = 50) -> pd.Series:
-    """Deepvue-style RMV: current volatility vs its own recent range, 0-100 (low = tight).
+    """RMV: current volatility vs its own recent range, 0-100 (low = tight).
 
     True range as a fraction of price is smoothed over ``atr_period`` bars, then min-max
     normalized over the trailing ``lookback`` bars. RMV near 0 means the stock is as quiet
-    as it has been all window: a tight VCP contraction. RMV near 100 is the loud end of its
-    recent range. Traders treat < ~25 as an ideal tight base.
+    as it has been all window: a tight VCP contraction. RMV near 100 is the most volatile
+    end of its recent range. Traders treat < ~25 as an ideal tight base.
 
-    RMV compares a stock with its own recent volatility. That is a different axis from the
-    breakout's volume surge, so the two don't conflict: you want a quiet base (low RMV)
-    that then breaks out on heavy volume.
+    RMV compares a stock with its own recent volatility. That measures something different
+    from the breakout's volume jump, so the two don't conflict: you want a quiet base (low
+    RMV) that then breaks out on heavy volume.
 
     Returns a Series aligned to ``df``: NaN until enough history exists, and where the
     window's volatility is flat.
@@ -100,9 +102,9 @@ def bollinger_bandwidth_percentile(df: pd.DataFrame, period: int = 20,
     BandWidth = (upper - lower) / middle = ``2 * num_std * sigma / sma``, the classic
     Bollinger squeeze measure. The current width is percentile-ranked within the trailing
     ``lookback`` bars, so the output is 0-100: **low = a squeeze** (bands as tight as they've
-    been all window), high = expanded. It is close-based, so it cross-checks RMV, which is
-    true-range based and sees gaps and wicks. The two agreeing is a stronger tight-base
-    signal than either alone.
+    been all window), high = wide. It uses closes only, so it is a second check on RMV,
+    which uses true range and so also sees the day's high, low and any jump from the prior
+    close. The two agreeing is a stronger sign of a tight base than either alone.
 
     Returns a Series aligned to ``df`` (NaN until enough history exists).
     """
@@ -124,9 +126,10 @@ def bollinger_bandwidth_percentile_last(df: pd.DataFrame, period: int = 20,
     """The final value of :func:`bollinger_bandwidth_percentile`, without its per-row
     Python rolling apply over the full history. The scan reads only the last value.
 
-    Bit-identical to the series' last row: ``rolling(lookback, min_periods=period)`` at the
+    Exactly equal to the series' last row: ``rolling(lookback, min_periods=period)`` at the
     final row sees exactly ``tail(min(len, lookback))``. Returns ``None`` when the tail holds
-    fewer than ``period`` band values or the final one is NaN; no older value stands in."""
+    fewer than ``period`` band values or the final one is NaN; no older value is used
+    instead."""
     upper, mid, lower = bollinger_bands(df, period, num_std)
     bandwidth = (upper - lower) / mid.replace(0, np.nan)
     w = bandwidth.tail(lookback).to_numpy()
@@ -140,8 +143,9 @@ def bollinger_bands(df: pd.DataFrame, period: int = 20, num_std: float = 2.0):
     """Classic Bollinger Bands: middle = SMA(``period``), upper/lower = middle ± ``num_std``·σ.
 
     Population std (``ddof=0``). ``ttm_squeeze`` and ``bollinger_bandwidth_percentile``
-    build on it, so the band the chart draws is the envelope those squeeze reads use.
-    Returns ``(upper, middle, lower)`` Series aligned to ``df`` (NaN during warm-up).
+    build on it, so the band the chart draws is the band those squeeze checks use.
+    Returns ``(upper, middle, lower)`` Series aligned to ``df`` (NaN for the first
+    ``period - 1`` rows).
     """
     close = df["Close"]
     mid = close.rolling(period, min_periods=period).mean()
@@ -157,15 +161,15 @@ def ttm_squeeze(df: pd.DataFrame, bb_period: int = 20, bb_std: float = 2.0,
     (true range). A squeeze means volatility is compressed on *both* measures at once.
     Bands = ``sma ± bb_std * sigma``; Keltner = ``ema ± kc_mult * ATR``.
 
-    Returns a boolean Series aligned to ``df`` (False during warm-up).
+    Returns a boolean Series aligned to ``df`` (False until there are enough rows).
     """
     close = df["Close"]
     bb_upper, _mid, bb_lower = bollinger_bands(df, bb_period, bb_std)
 
-    # Price units, not TR%: the Keltner band is an absolute envelope.
+    # Price units, not TR%: the Keltner band is measured in dollars around the price.
     atr = _true_range(df).rolling(kc_period, min_periods=kc_period).mean()
     ema = close.ewm(span=kc_period, adjust=False, min_periods=kc_period).mean()
     kc_upper, kc_lower = ema + kc_mult * atr, ema - kc_mult * atr
 
-    # NaN comparisons yield False, so the warm-up region is already un-squeezed.
+    # NaN comparisons yield False, so the first rows, before enough history, are False.
     return ((bb_lower > kc_lower) & (bb_upper < kc_upper)).fillna(False).astype(bool)

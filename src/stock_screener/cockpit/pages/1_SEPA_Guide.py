@@ -1,8 +1,8 @@
 """SEPA Guide page: renders the full Minervini method reference.
 
-Streamlit auto-discovers files in this ``pages/`` dir and adds them to the sidebar
-nav. Content is read live from ``minervini_sepa_system.md``, the single source of
-truth: edits MUST go to the markdown, not this page.
+Streamlit finds the files in this ``pages/`` folder and lists them in the sidebar. The
+text is read from ``minervini_sepa_system.md`` on every load. That file is the one place
+it is defined, so edits MUST go to the markdown, not this page.
 """
 import sys
 from pathlib import Path
@@ -17,8 +17,8 @@ if str(ROOT) not in sys.path:
 
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
 
-# Warm the universe scan in the background, so it is under way by the time the user opens
-# the scan page. Inert under AppTest.
+# Start the stock scan in the background, so it is already running when the user opens
+# the scan page. Does nothing under AppTest.
 scan_worker.autostart()
 
 st.set_page_config(page_title="SEPA Guide", page_icon="📖", layout="wide")

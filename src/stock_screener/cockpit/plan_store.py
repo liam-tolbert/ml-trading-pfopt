@@ -1,13 +1,14 @@
 """Shared storage for the dated entry and sell plans.
 
 ``entries.py`` and ``sells.py`` mirror each other: one arms buys for the next open, the
-other plans exits for it. Their storage MUST live here once: the day-file naming, the
-atomic write, the newest-first loader and the env gate. Copies drift. The trading logic
-stays in the two callers, where the rules differ.
+other plans exits for it. Their storage MUST live only here: the dated file names, the
+safe write (temp file, then rename), the newest-first loader and the on/off setting read
+from the environment. Two copies would drift apart. The trading logic stays in the two
+callers, where the rules differ.
 
 Both plan kinds live in ``cache.TRIGGERS_DIR`` beside the trigger reports. It MUST be
 read at call time, never captured at import: the test suite patches it to keep AppTests
-away from real state.
+away from the real files.
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ _TRUTHY = {"1", "true", "yes", "on"}
 
 
 def env_enabled(name: str, env: Optional[dict] = None) -> bool:
-    """True when env var ``name`` is truthy (1/true/yes/on). Both executors ship dark, so
-    anything unset or unparseable MUST read False."""
+    """True when env var ``name`` is 1/true/yes/on (any case). Both morning runs (sell
+    and buy) are off by default, so anything unset or unrecognised MUST read False."""
     e = os.environ if env is None else env
     return str(e.get(name, "")).strip().lower() in _TRUTHY
 
@@ -45,12 +46,14 @@ def plan_path(prefix: str, date_iso: str, dir_path=None) -> Path:
 
 
 def save_plan(prefix: str, plan: dict, dir_path=None) -> Path:
-    """Write ``plan`` to its day-file atomically (tmp + ``os.replace``); returns the path.
+    """Write ``plan`` to a temp file, then rename it over its dated file with
+    ``os.replace``; returns the path.
 
-    Three processes write one day-file: the building CLI, a page's disarm/veto click and
-    the morning executor. An in-place write can interleave into JSON the loader skips,
-    which reads as "no plan today": a silently missed exit. The ``finally`` removes the
-    temp file when serialization fails; the error still propagates."""
+    Three processes write one dated file: the one that builds the plan, a page's
+    disarm/veto click and the morning run. Two writes straight to the file can mix into
+    invalid JSON. The loader skips such a file, which reads as "no plan today": a
+    silently missed exit. The ``finally`` removes the temp file when the write fails;
+    the error is still raised."""
     path = plan_path(prefix, plan["date"], dir_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
@@ -73,8 +76,8 @@ def load_latest_plan(prefix: str, dir_path=None, *,
     ``before`` (ISO date) skips plans dated on or after it. The evening sell planner uses
     it to read an earlier day's plan for the P2 streak, not its own same-day output.
 
-    Never raises. The walk skips anything unreadable, so one corrupt file can't blind the
-    executor."""
+    Never raises. Unreadable files are skipped, so one corrupt file doesn't hide the older
+    plans from the morning run."""
     try:
         d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
         for path in sorted(d.glob(f"{prefix}_*.json"), reverse=True):
@@ -98,7 +101,7 @@ def flip_status(plan: dict, *, items_key: str, id_key: str, ident: str,
     anything changed.
 
     This is the overnight veto or disarm. Only a row still in ``from_status`` moves, so a
-    click can cancel a pending row but never resurrect a submitted or failed one."""
+    click can cancel a pending row but never bring back a submitted or failed one."""
     changed = False
     for item in plan.get(items_key, []):
         if item.get(id_key) == ident and item.get("status") == from_status:

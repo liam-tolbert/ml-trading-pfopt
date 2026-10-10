@@ -1,16 +1,17 @@
-"""Scan orchestration: wires the pure Minervini rule functions into a SEPA funnel.
+"""The scan: runs the Minervini rule functions in order, as a chain of SEPA filters.
 
-``screen_universe`` is dependency-injected (you pass it price frames + an optional
-fundamentals callable), so it runs deterministically offline in tests. ``run_scan``
-is the live convenience wrapper that pulls data via ``data_feed`` first.
+``minervini_screener`` is the copy of that package kept in this repo; its files MUST NOT
+be edited (PROVENANCE). ``screen_universe`` takes the price DataFrames and an optional
+fundamentals function as arguments, so tests run it offline on fixed data. ``run_scan`` is
+the live wrapper that downloads the data through ``data_feed`` first.
 
-Funnel:
-  Step 1  the book's eight criteria: the vendored template's seven price criteria
-          plus an RS rating >= RS_FLOOR       -> HARD gate (the candidate list)
+Steps:
+  Step 1  the book's eight criteria: the ``minervini_screener`` template's seven price
+          criteria plus an RS rating >= RS_FLOOR -> required (the candidate list)
   Step 2  fundamentals summary                 -> highlight (badges + pass-count)
-  Step 3  detect_vcp (cockpit ZigZag detector) -> hint for the chart (not a gate by default)
+  Step 3  detect_vcp (cockpit ZigZag detector) -> hint for the chart (not required by default)
   Step 4  detect_breakout + calculate_stop_loss-> advisory entry levels
-  Regime  analyze_spy_trend + market_breadth   -> environment banner
+  Regime  analyze_spy_trend + market_breadth   -> market-conditions banner
 """
 from __future__ import annotations
 
@@ -34,42 +35,43 @@ from .doctrine import (ADV_DAYS, DEFAULT_STOP_FROM_PIVOT, MAX_LOSS_FROM_FILL, NO
                        RS_FLOOR)
 from .indicators import (dollar_adv, relative_measured_volatility,
                          bollinger_bandwidth_percentile_last, ttm_squeeze)
-# Cockpit VCP detector, a drop-in with the same dict schema. The vendored
-# detect_vcp_pattern starves strong uptrends: cc=0 for ~84% of candidates on full_us.
+# The cockpit's VCP detector returns the same dict as ``minervini_screener``'s
+# detect_vcp_pattern. It replaces it because that one finds no contractions in strong
+# uptrends (contraction_count 0 for ~84% of full_us candidates).
 from .vcp import detect_vcp
 
 
 @dataclass
 class ScanConfig:
-    min_criteria: int = 8          # Step-1 gate: require all 8 of the book's criteria
+    min_criteria: int = 8          # Step 1: require all 8 of the book's criteria
     min_history_rows: int = 200    # classify_phase needs >= 200 rows
     rs_period: int = 126           # ~6 months, for the RS rating percentile
-    min_rs: float = 0.0            # 0 = off; an extra RS filter above the gate's RS_FLOOR
-    require_vcp: bool = False       # if True, only keep names with a valid VCP
-    min_fundamental_score: int = 0  # keep names with >= this many Step-2 checks passed
+    min_rs: float = 0.0            # 0 = off; an extra RS minimum above Step 1's RS_FLOOR
+    require_vcp: bool = False       # if True, only keep stocks with a valid VCP
+    min_fundamental_score: int = 0  # keep stocks with >= this many Step-2 checks passed
 
 
 @dataclass
 class ScanResult:
-    candidates: pd.DataFrame                       # one row per passer, sorted
+    candidates: pd.DataFrame                       # one row per stock that passed, sorted
     payloads: Dict[str, dict]                      # ticker -> chart/detail payload
     regime: dict                                   # banner: regime/breadth/should_buy
     n_scanned: int = 0
     n_passed: int = 0
     errors: List[str] = field(default_factory=list)
-    rs_ratings: Dict[str, int] = field(default_factory=dict)   # every rated name
+    rs_ratings: Dict[str, int] = field(default_factory=dict)   # every rated ticker
 
 
-# The vendored template's seven price criteria. Its eighth, ``confirmed_stage_2``, is not
-# in the book; the book's eighth is the RS rating.
+# The ``minervini_screener`` template's seven price criteria. Its eighth,
+# ``confirmed_stage_2``, is not in the book; the book's eighth is the RS rating.
 PRICE_CRITERIA = ("price_above_150_200", "sma_150_above_200", "sma_200_rising",
                   "sma_50_above_150", "price_above_50", "price_30pct_above_52w_low",
                   "price_near_52w_high")
 
 
 def price_criteria_passed(tmpl: Optional[dict]) -> Optional[int]:
-    """How many of the seven price criteria a vendored template dict passes. None
-    without a template."""
+    """How many of the seven price criteria a ``minervini_screener`` template dict
+    passes. None without a template."""
     if not tmpl:
         return None
     det = tmpl.get("criteria_details") or {}
@@ -96,23 +98,23 @@ def book_template(tmpl: Optional[dict], rs) -> dict:
 
 # --------------------------------------------------------------------------- #
 def _rs_ratings(prices: Dict[str, pd.DataFrame], period: int) -> Dict[str, int]:
-    """IBD-style RS rating, 1-99: percentile-rank a WEIGHTED multi-horizon return blend
-    across the whole scanned universe.
+    """RS rating as Investor's Business Daily computes it, 1-99: the percentile rank,
+    across every scanned ticker, of a WEIGHTED blend of returns over several horizons.
 
-    Horizons derive from ``period`` (the ~6-mo leg, 126 trading days by default): 3-mo =
-    period/2 at DOUBLE weight (IBD's recent-strength emphasis), then 6-mo, 9-mo, 12-mo at
-    single weight, the classic ``2·r3 + r6 + r9 + r12`` blend. The weighted MEAN, not the
-    raw sum, is ranked, so young listings compete on the legs they have instead of dropping
-    out. Inclusion still requires more than ``period`` bars. For full-history names the
-    mean is the IBD sum / 5 and ranks identically. Returns ``{ticker: rating}``; ``{}``
-    when no name qualifies."""
+    The horizons come from ``period`` (the ~6-month return, 126 trading days by default):
+    3 months (period/2) at DOUBLE weight, to favour recent strength, then 6, 9 and 12
+    months at single weight, the classic ``2·r3 + r6 + r9 + r12``. The weighted MEAN, not
+    the raw sum, is ranked, so a recently listed stock competes on the horizons it has
+    instead of dropping out. A stock still needs more than ``period`` bars. For a stock
+    with full history the mean is the classic sum / 5, so it ranks the same. Returns
+    ``{ticker: rating}``; ``{}`` when no stock qualifies."""
     horizons = ((max(1, period // 2), 2.0), (period, 1.0),
                 (period * 3 // 2, 1.0), (period * 2, 1.0))
     scores = {}
     for t, df in prices.items():
         c = df["Close"]
         if len(c) <= period or c.iloc[-1 - period] <= 0:
-            continue                                     # the 6-mo leg is mandatory
+            continue                                     # the 6-month return is required
         num = den = 0.0
         for look, w in horizons:
             if len(c) > look and c.iloc[-1 - look] > 0:
@@ -127,11 +129,11 @@ def _rs_ratings(prices: Dict[str, pd.DataFrame], period: int) -> Dict[str, int]:
 
 
 def _step2_summary(f: Optional[dict], reaction: Optional[dict] = None) -> dict:
-    """SEPA Step 2 as eight pass/fail checks and their pass count, F (0-8). YoY preferred,
-    QoQ used as a fallback when yfinance exposes too few quarters for YoY. ``reaction`` is
-    the ``advisories.earnings_reaction`` read; the last check fails without one. A missing
-    figure fails its check. Returns ``{score, checks, available}``; ``available`` is False
-    when ``f`` is empty."""
+    """SEPA Step 2 as eight pass/fail checks and their pass count, F (0-8). Year-over-year
+    growth is used; quarter-over-quarter when yfinance has too few quarters for it.
+    ``reaction`` is the ``advisories.earnings_reaction`` result; the last check fails
+    without one. A missing figure fails its check. Returns ``{score, checks,
+    available}``; ``available`` is False when ``f`` is empty."""
     if not f:
         return {"score": 0, "checks": {}, "available": False}
     rev = f.get("revenue_yoy")
@@ -155,15 +157,15 @@ def _step2_summary(f: Optional[dict], reaction: Optional[dict] = None) -> dict:
 
 
 # Inventory growing this many points faster than sales, quarter on quarter, is the books'
-# "inventory piling up" warning. The books give no number; this is an operating choice.
+# "inventory piling up" warning. The books give no number; this is this project's choice.
 INVENTORY_VS_SALES_PTS = 10.0
 # The guide's "upward estimate revisions >= 5% over the past 3 months".
 ESTIMATE_RAISE_MIN_PCT = 5.0
 
 
 def code33_parts(f: Optional[dict]) -> Optional[int]:
-    """How many of Code 33's three legs (EPS growth, sales growth, net margin) rose over
-    the last three quarters, 0-3; 3 is Code 33. None when a leg is unknown."""
+    """How many of Code 33's three parts (EPS growth, sales growth, net margin) rose over
+    the last three quarters, 0-3; 3 is Code 33. None when a part is unknown."""
     c = (f or {}).get("code33")
     if not isinstance(c, dict):
         return None
@@ -180,8 +182,8 @@ def inventory_flag(f: Optional[dict]) -> Optional[bool]:
 
 
 def step2_lines(f: Optional[dict]) -> List[str]:
-    """Markdown lines for the Step-2 panel's Code 33, annual-EPS and warning reads, in
-    display order. Empty when ``f`` has none of them (an older cache)."""
+    """Markdown lines for the Step-2 panel (Code 33, annual EPS, warnings), in display
+    order. Empty when ``f`` has none of them (an older cache)."""
     f = f or {}
     out = []
 
@@ -231,8 +233,8 @@ def _days_to_earnings(f: Optional[dict],
                       today: Optional[pd.Timestamp] = None) -> Optional[int]:
     """Calendar days until the next scheduled earnings report, from the fundamentals
     dict's ``next_earnings`` ('YYYY-MM-DD'). Negative = the (cached) date has passed,
-    i.e. the company just reported; None = no date known or unparseable. ``today`` is
-    overridable so tests stay deterministic."""
+    i.e. the company just reported; None = no date known or unparseable. ``today`` can be
+    passed in so tests get a fixed date."""
     d = (f or {}).get("next_earnings")
     if not d:
         return None
@@ -246,37 +248,38 @@ def _days_to_earnings(f: Optional[dict],
 def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
                   phase_info: dict) -> dict:
     """SEPA Step 4 advisory levels. Pivot = the breakout/base level if detected, else the
-    52-week high (the line a breakout would clear).
+    52-week high (the price a breakout would close above).
 
-    The stop is the engine's ``stop`` when it sits below the pivot, else
-    ``DEFAULT_STOP_FROM_PIVOT`` below the pivot. The engine's ``calculate_stop_loss``
-    anchors to the current price and swing-low/50-SMA support, which for a name below its
-    pivot can sit well past 10% below it. So the stop is floored at ``MAX_LOSS_FROM_FILL``
-    below the pivot, the lowest fill in the zone; ``stop_clamped`` says whether the floor
-    bound. ``max_fill_for_stop`` is the
-    highest fill this stop still covers. Advisory only — never moves a real order."""
+    The stop is the passed-in ``stop`` (from ``minervini_screener``'s
+    ``calculate_stop_loss``) when it sits below the pivot, else ``DEFAULT_STOP_FROM_PIVOT``
+    below the pivot. ``calculate_stop_loss`` works from the current price, recent lows and
+    the 50-day SMA, which for a stock below its pivot can sit well past 10% below it. So
+    the stop is never lower than ``MAX_LOSS_FROM_FILL`` below the pivot, the lowest buy
+    price in the zone; ``stop_clamped`` says whether that limit was used.
+    ``max_fill_for_stop`` is the highest buy price for which this stop still limits the
+    loss to ``MAX_LOSS_FROM_FILL``. Advisory only: it never moves a real order."""
     pivot = breakout.get("breakout_level")
-    # A '50 SMA Breakout' level IS the 50-day SMA (a routine pullback-to-50-day recovery), not
-    # a base pivot. The buy zone, stop, target and frozen trigger level MUST NOT anchor to it,
-    # so fall through to the 52-week high, the strategy's default pivot.
+    # A '50 SMA Breakout' level IS the 50-day SMA (the price dipped to it and came back), not
+    # a base pivot. The buy zone, stop, target and the watchlist's saved trigger level MUST
+    # NOT be based on it, so the 52-week high, the strategy's default pivot, is used.
     if breakout.get("breakout_type") == "50 SMA Breakout":
         pivot = None
     if not pivot or pivot <= 0:
         pivot = phase_info.get("week_52_high") or cp
     raw_stop = (stop if (stop and stop > 0 and stop < pivot)
                 else pivot * (1.0 - DEFAULT_STOP_FROM_PIVOT))
-    floor = pivot * (1.0 - MAX_LOSS_FROM_FILL)              # 10% below the lowest fill
+    floor = pivot * (1.0 - MAX_LOSS_FROM_FILL)              # 10% below the lowest buy price
     stop_price = max(raw_stop, floor)
     stop_clamped = raw_stop < floor
     pct_to_pivot = ((pivot - cp) / cp * 100.0) if cp else None
     return {
         "pivot": float(pivot),
-        "buy_zone": (float(pivot), float(pivot) * (1.0 + NO_CHASE_PCT)),   # no chasing
+        "buy_zone": (float(pivot), float(pivot) * (1.0 + NO_CHASE_PCT)),   # highest price to pay
         "stop": float(stop_price),                          # at most 10% below the pivot
         "stop_pct_from_pivot": ((pivot - stop_price) / pivot * 100.0) if pivot else None,
         "max_fill_for_stop": float(stop_price) / (1.0 - MAX_LOSS_FROM_FILL),
         "stop_clamped": bool(stop_clamped),
-        "target": float(pivot) * 1.25,                      # +25% objective (user-locked)
+        "target": float(pivot) * 1.25,                      # +25% target, fixed by the user
         "breakout_today": bool(breakout.get("is_breakout")),
         "volume_ratio": float(breakout.get("volume_ratio", 1.0) or 1.0),
         "volume_confirmed": bool(breakout.get("volume_confirmed", False)),  # vol >= 1.5x avg
@@ -287,13 +290,13 @@ def _entry_levels(cp: float, breakout: dict, stop: Optional[float],
 def filter_candidates(cand: Optional[pd.DataFrame], min_rs: float = 0.0,
                       require_vcp: bool = False,
                       min_fundamental_score: int = 0) -> pd.DataFrame:
-    """Post-scan row filters. They MUST mirror ``screen_universe``'s per-name gates EXACTLY:
-    min_rs (``rsr is None or rsr < min_rs``, with ``min_rs == 0`` as the off-switch),
-    require_vcp, and min_fundamental_score. These three settings only SUBSET computed rows,
-    so the app scans once with the loosest gates and applies slider tweaks as instant
-    boolean masks instead of re-running the multi-minute screen. Returns a NEW frame and
-    never mutates the memoized ScanResult, whose empty case is a columnless
-    ``pd.DataFrame()``."""
+    """Post-scan row filters. They MUST match ``screen_universe``'s per-stock filters
+    EXACTLY: min_rs (``rsr is None or rsr < min_rs``, with ``min_rs == 0`` meaning off),
+    require_vcp, and min_fundamental_score. These three settings only drop rows already
+    computed, so the app scans once with the loosest settings and applies the sliders as
+    instant boolean masks instead of re-running the multi-minute screen. Returns a NEW
+    frame and never changes the ScanResult that ``scan_worker`` keeps, whose empty case is
+    a columnless ``pd.DataFrame()``."""
     if cand is None or len(cand) == 0:
         return pd.DataFrame()
     mask = pd.Series(True, index=cand.index)
@@ -308,20 +311,22 @@ def filter_candidates(cand: Optional[pd.DataFrame], min_rs: float = 0.0,
 
 def detect_breakout_prior_high(df: pd.DataFrame, cp: float, phase_info: Dict,
                                vcp: Optional[Dict]) -> Dict:
-    """Cockpit wrapper around the vendored ``detect_breakout`` that makes its Base/Pivot
-    branches REACHABLE. The vendored ``find_base_high``/``find_pivot_high`` windows
-    INCLUDE the current bar, and every cockpit caller passes ``cp`` = that same bar's
-    close. So ``cp > high-including-cp`` can never fire there, and the only reachable
-    non-VCP branch is the 50-SMA reclaim. Here the 60/20-day highs are taken over the bars
-    BEFORE today. A genuine close above the prior base/pivot high fires with that level as
-    the breakout_level: a real base pivot for ``_entry_levels`` instead of its
-    52-week-high fallback. Precedence mirrors the vendored order (VCP > Base > Pivot >
-    50-SMA/none) and the phase-1/2 gate is respected. Volume fields ride through from the
-    vendored result. The vendored file MUST stay untouched (PROVENANCE)."""
+    """Cockpit wrapper around ``minervini_screener``'s ``detect_breakout`` so that its Base
+    and Pivot breakouts can actually be detected.
+
+    There, the ``find_base_high``/``find_pivot_high`` windows INCLUDE the current bar,
+    and every cockpit caller passes ``cp`` = that same bar's close. So ``cp >
+    high-including-cp`` can never be true there, and the only non-VCP breakout it can
+    report is a close back above the 50-day SMA. Here the 60/20-day highs are taken over
+    the bars BEFORE today. A close above the prior base/pivot high is a breakout with that
+    level as the breakout_level: a real base pivot for ``_entry_levels`` instead of its
+    52-week-high fallback. The order matches the original (VCP > Base > Pivot >
+    50-SMA/none), and so does the phase 1/2 check. Volume fields are copied from the
+    original result. The ``minervini_screener`` file MUST NOT be edited (PROVENANCE)."""
     res = detect_breakout(df, cp, phase_info, vcp)
     if res.get("is_breakout") and str(res.get("breakout_type") or "").startswith("VCP"):
-        return res                                       # top precedence, unchanged
-    if phase_info.get("phase") not in (1, 2):            # mirror the vendored phase gate
+        return res                                       # VCP comes first, unchanged
+    if phase_info.get("phase") not in (1, 2):            # same phase check as detect_breakout
         return res
     close = df["Close"]
     if len(close) < 21 or not cp:
@@ -340,11 +345,12 @@ def detect_breakout_prior_high(df: pd.DataFrame, cp: float, phase_info: Dict,
 def rs_line_at_high(df: pd.DataFrame, spy_close: pd.Series, window: int = 252,
                     tol: float = 0.002, min_days: int = 126) -> Optional[bool]:
     """Is the RS LINE (stock close ÷ SPY close, date-aligned) at its trailing-``window``
-    high? The IBD/MarketSmith "blue dot" ingredient: the line within ``tol`` (0.2%,
-    float-noise headroom) of its 52-week max. The caller combines this with "price still
-    below its own 52-week high" for the full *RS new high BEFORE price* accumulation tell:
-    outperformance while still basing. None (not False) when fewer than ``min_days``
-    overlapping sessions exist, or on error. Unknown MUST NOT render as a failed check."""
+    high? This is half of the *RS line at a new high before the price is* sign: the line
+    within ``tol`` (0.2%, room for float rounding) of its 52-week max. The caller adds
+    "price still below its own 52-week high" to complete the sign, which shows big buyers
+    at work: the stock beating the market while still in its base. None (not False) when
+    fewer than ``min_days`` overlapping sessions exist, or on error. Unknown MUST NOT be
+    shown as a failed check."""
     try:
         ratio = (df["Close"] / spy_close).dropna()
         if len(ratio) < min_days:
@@ -357,15 +363,16 @@ def rs_line_at_high(df: pd.DataFrame, spy_close: pd.Series, window: int = 252,
 
 RS_TREND_SHORT_BARS = 30       # ~6 weeks
 RS_TREND_LONG_BARS = 65        # ~13 weeks
-RS_TREND_FLAT_PCT = 0.1        # |slope| under this, in % of the line per week, reads flat
+RS_TREND_FLAT_PCT = 0.1        # |slope| under this, in % of the line per week, counts as flat
 
 
 def rs_line_trend(df: pd.DataFrame, spy_close: pd.Series) -> Optional[dict]:
     """The RS line's direction over the last ~6 and ~13 weeks. Returns ``{slope_6w,
-    slope_13w, label}``; the slopes are least squares, in % of the line's mean per week.
-    Labels: ``rising 13w`` (both up), ``rising 6w`` (only the short slope up),
+    slope_13w, label}``; the slopes are least-squares fits, in % of the line's mean per
+    week. Labels: ``rising 13w`` (both up), ``rising 6w`` (only the short slope up),
     ``rolling over`` (long up, short down), ``falling`` (both down), else ``flat``.
-    None under ``RS_TREND_LONG_BARS`` aligned sessions, or on error."""
+    None under ``RS_TREND_LONG_BARS`` sessions where both the stock and SPY have a close,
+    or on error."""
     try:
         ratio = (df["Close"] / spy_close).dropna().to_numpy(dtype=float)
     except Exception:
@@ -396,7 +403,7 @@ def rs_line_trend(df: pd.DataFrame, spy_close: pd.Series) -> Optional[dict]:
 def sma200_rising_months(df: pd.DataFrame) -> Optional[float]:
     """How long the 200-day SMA has been rising, in months of 21 sessions: consecutive
     sessions, newest first, where the SMA is above its value 19 sessions earlier, the
-    vendored template's own test. None under 219 rows."""
+    ``minervini_screener`` template's own test. None under 219 rows."""
     if df is None or len(df) < 219:
         return None
     sma = calculate_sma(df["Close"], 200).to_numpy(dtype=float)
@@ -411,11 +418,12 @@ def sma200_rising_months(df: pd.DataFrame) -> Optional[float]:
 def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
     """The Step-4 display RMV, reusing the value ``detect_vcp`` already computed. That is
     safe: the last-bar RMV depends on at most ~60 trailing bars (a 10-bar ATR inside a
-    50-bar min/max window), a subset of the detector's 325-bar base, so the two reads are
-    equal. The vcp copy is rounded to 1 dp, invisible at the app's whole-number display.
-    A ``_empty()`` result (dead tape / short frame) carries a sentinel ``rmv=100.0``
-    (``zz_threshold=None``). That sentinel MUST NOT surface, so the real value is computed
-    from ``df``. None when ``df`` is too short for any RMV."""
+    50-bar min/max window), a subset of the detector's 325-bar base, so the two values are
+    equal. The vcp copy is rounded to 1 decimal place, invisible at the app's whole-number
+    display. A ``_empty()`` result (a stock that has barely moved, or too few rows) carries
+    a placeholder ``rmv=100.0`` (``zz_threshold=None``). That placeholder MUST NOT be
+    shown, so the real value is computed from ``df``. None when ``df`` is too short for any
+    RMV."""
     if vcp.get("zz_threshold") is not None:
         return float(vcp["rmv"])
     rmv_series = relative_measured_volatility(df).dropna()
@@ -424,16 +432,18 @@ def _rmv_display(df: pd.DataFrame, vcp: dict) -> Optional[float]:
 
 def template_chain(df: pd.DataFrame, close: Optional[float] = None
                    ) -> Optional[Tuple[dict, dict]]:
-    """The trend-template chain on ONE ticker's daily frame: ``(template_dict,
-    phase_info)``, or None when the frame is too short for ``classify_phase`` (< 200
-    rows). Raises on chain errors, so each caller keeps its own failure policy (the scan
-    records, the trigger check fails open, the positions read degrades).
+    """``classify_phase`` then the trend template, on ONE ticker's daily DataFrame:
+    ``(template_dict, phase_info)``, or None when it is too short for ``classify_phase``
+    (< 200 rows). Raises on errors in either, so each caller decides what a failure means
+    (the scan records it in ``errors``, the trigger check still evaluates the trigger, the
+    Positions page leaves the criteria count blank).
 
-    Callers MUST pass the FULL frame. pandas' rolling mean is a sliding-sum kernel, so a
-    tail slice (e.g. ``Close.iloc[-220:]``) differs from the full series by ~1 ulp at the
-    consumed points, enough to flip a knife-edge template gate. Returns the full template
-    dict, not a bare count, because the scan stores it in payloads. A count-only helper
-    would force a second, expensive ``classify_phase``."""
+    Callers MUST pass the FULL DataFrame. pandas' rolling mean keeps a running sum, so on a
+    tail slice (e.g. ``Close.iloc[-220:]``) the SMAs differ from the full series' in the
+    last floating-point digit. That is enough to flip a template criterion sitting right at
+    its threshold. Returns the full template dict, not a bare count, because the scan
+    stores it in payloads. A count-only helper would force a second, expensive
+    ``classify_phase``."""
     if df is None or len(df) < 200:
         return None
     cp = float(close) if close is not None else float(df["Close"].iloc[-1])
@@ -443,8 +453,9 @@ def template_chain(df: pd.DataFrame, close: Optional[float] = None
 
 
 def _new_high_low(df: pd.DataFrame, phase_info: dict) -> Tuple[bool, bool]:
-    """Whether the last bar set a 52-week high, and a 52-week low, against the phase
-    read's 252-bar window. That window is rounded to 2 dp, hence the half-cent slack."""
+    """Whether the last bar set a 52-week high, and a 52-week low, against
+    ``classify_phase``'s 252-bar high and low. Those are rounded to 2 decimal places, hence
+    the half-cent allowance."""
     w52h, w52l = phase_info.get("week_52_high"), phase_info.get("week_52_low")
     hi = df["High"] if "High" in df.columns else df["Close"]
     lo = df["Low"] if "Low" in df.columns else df["Close"]
@@ -481,18 +492,22 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                     breadth_history: Optional[List[dict]] = None,
                     get_sector: Optional[Callable[[str], Optional[dict]]] = None
                     ) -> ScanResult:
-    """Run the SEPA funnel over already-fetched price frames (deterministic/offline).
+    """Run the SEPA filters over already-downloaded price DataFrames. Makes no network
+    calls of its own.
 
     ``prices``: {ticker -> daily OHLCV}. ``spy``: SPY daily OHLCV.
-    ``get_fundamentals``: optional callable run only on Step-1 passers (cheap).
-    ``progress``: optional ``(done, total, ticker)`` callback, called once per name. On a
-    warm cache this loop (phase/VCP detection) is the multi-minute part of a scan.
+    ``get_fundamentals``: optional callable, called only for stocks that pass Step 1, so
+    it runs rarely.
+    ``progress``: optional ``(done, total, ticker)`` callback, called once per ticker. When
+    the prices are already cached, this loop (phase/VCP detection) is the multi-minute
+    part of a scan.
     ``breadth_history``: :func:`breadth_store.load` rows; with them the regime's
-    ``nh_nl_expanding`` and the breadth-aware re-entry streak are filled in.
-    ``get_sector``: optional callable run only on Step-1 passers, returning
+    ``nh_nl_expanding`` and the breadth-aware wait before buying again
+    (``spy_confirm_streak``) are filled in.
+    ``get_sector``: optional callable, called only for stocks that pass Step 1, returning
     ``{sector, industry}`` (:func:`sectors.get_sector`).
-    Names with fewer than ``cfg.min_history_rows`` bars are skipped. A per-name error is
-    recorded in ``errors`` and never aborts the scan.
+    Tickers with fewer than ``cfg.min_history_rows`` bars are skipped. A per-ticker error
+    is recorded in ``errors`` and never aborts the scan.
     """
     from . import breadth_store
     from .advisories import (book_tightening, depth_vs_market, earnings_reaction,
@@ -558,9 +573,9 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             earnings_in = _days_to_earnings(fund)
 
             levels = _entry_levels(cp, breakout, stop, phase_info)
-            # RS line at new high BEFORE price (IBD blue dot): the ÷SPY line at its 52-wk
-            # high while price is still under its own, i.e. accumulation during the base.
-            # Advisory only; None = not enough overlapping history.
+            # RS line at a new high before the price is: the stock÷SPY line at its 52-week
+            # high while the price is still under its own, a sign of big buyers during the
+            # base. Advisory only; None = not enough overlapping history.
             _rs_at_high = rs_line_at_high(df, spy["Close"])
             _w52 = phase_info.get("week_52_high")
             rs_nh = (None if _rs_at_high is None
@@ -568,16 +583,16 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
             rs_trend = rs_line_trend(df, spy["Close"])
             sma200_m = sma200_rising_months(df)
             adv_usd = dollar_adv(df, ADV_DAYS)
-            # RMV: an advisory base-tightness read for Step 4. It does NOT feed the
+            # RMV: how tight the base is, shown in Step 4 as advice. It does NOT feed the
             # pivot/stop/target math.
             levels["rmv"] = _rmv_display(df, vcp)
-            # BBWP + TTM squeeze: an advisory Bollinger-side cross-check on RMV. Low BBWP =
-            # a Bollinger squeeze; squeeze True = bands inside the Keltner channel.
+            # BBWP + TTM squeeze: a second check on RMV from Bollinger Bands. Low BBWP =
+            # narrow bands (a squeeze); squeeze True = bands inside the Keltner channel.
             levels["bbwp"] = bollinger_bandwidth_percentile_last(df)
             sq = ttm_squeeze(df)
             levels["squeeze"] = bool(sq.iloc[-1]) if len(sq) else False
-            # "squeeze fired": coiled in any of the prior 5 bars but not now, the
-            # volatility-EXPANSION side of a breakout.
+            # squeeze_released: in a squeeze on any of the prior 5 bars but not now, i.e.
+            # price swings are widening again, as they do at a breakout.
             prior = sq.iloc[-6:-1] if len(sq) >= 2 else sq.iloc[:0]
             levels["squeeze_released"] = bool(len(prior) and bool(prior.any())
                                               and not levels["squeeze"])
@@ -626,7 +641,7 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
                 "earnings_in": earnings_in, "reaction": reaction, "dryup": dryup,
                 "book_tightening": btight,
             }
-        except Exception as e:                                  # never let one name kill the scan
+        except Exception as e:                                  # one stock MUST NOT stop the scan
             errors.append(f"{t}: {e}")
             continue
 
@@ -634,8 +649,9 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     sig = should_generate_signals(spy_analysis, breadth)
     p2_pct = float(breadth.get("phase_2_pct", 0.0) or 0.0)
     hist = breadth_history or []
-    # The re-entry lag. Today's breadth isn't in the history yet, so it is
-    # added for the current session; with no history at all the count is SPY only.
+    # The wait before buying again. Today's breadth (share of stocks in Stage 2) isn't in
+    # the history yet, so it is added for the current session; with no history at all the
+    # count is SPY only.
     from .advisories import spy_confirm_streak
     try:
         _p2map = ({**breadth_store.phase2_by_date(hist), session: p2_pct}
@@ -666,8 +682,9 @@ def screen_universe(tickers: List[str], prices: Dict[str, pd.DataFrame],
     }
 
     if rows:
-        # Review order: tier A first (the shortlist), then quality within a tier. The
-        # recall-first workflow is "walk the A block, glance at B, trust C's reasons".
+        # Review order: tier A first (the shortlist), then quality within a tier. The tiers
+        # let borderline stocks through rather than miss real ones, so the review is: check
+        # every A, glance at B, trust C's listed reasons.
         cand = pd.DataFrame(rows).sort_values(
             ["tier", "vcp_quality", "fund_score", "rs"],
             ascending=[True, False, False, False],
@@ -689,24 +706,25 @@ def _fmt(x) -> Optional[float]:
 def run_scan(universe: str, cfg: Optional[ScanConfig] = None,
              force: bool = False,
              progress: Optional[Callable[[int, int, str], None]] = None) -> ScanResult:
-    """Live wrapper: fetch via data_feed, then screen. Fundamentals are fetched lazily
-    inside the funnel (only for Step-1 passers). Raises RuntimeError when SPY can't be
-    fetched or has fewer than 200 rows.
+    """Live wrapper: download via data_feed, then screen. Fundamentals are downloaded only
+    when needed, for stocks that pass Step 1. Raises RuntimeError when SPY can't be
+    downloaded or has fewer than 200 rows.
 
     ``universe`` is REQUIRED (every caller passes ``scan_worker.DEFAULT_UNIVERSE``). A
     default would let a bare call quietly screen a narrower universe than the scheduled
     jobs do, and the scan table gives no hint of which one produced it.
 
-    Every scan ALWAYS tops up the latest bars (``max_age_days=0.0``, the same semantics
-    as refresh_job and freshen_prices). A cache with today's bar re-fetches just the
-    latest bars, an older cache fetches only its missing days, and only cold names (or a
-    genuine split/dividend re-baseline) pay the full 2y download. There is no freshness
-    window here. Scan RATE is governed entirely by the callers (the explicit Re-scan
-    buttons; the evening universe sweep is cockpit-eod's), so a scan that runs IS fresh
-    by construction. The price fetch skips the network when no market session has elapsed
-    since the cache was written (``data_feed._cache_settled``: evenings, weekends,
-    pre-open; no new bar can exist). ``force=True`` is the explicit full re-download (the
-    app's Advanced ⟳ button) and bypasses even that."""
+    Every scan ALWAYS downloads the missing recent bars (``max_age_days=0.0``, as
+    refresh_job and freshen_prices do). A cache with today's bar downloads just the latest
+    bars again, an older cache downloads only its missing days, and only tickers with no
+    cache (or whose history changed after a split or dividend) pay the full 2-year
+    download. There is no freshness window here. How often a scan runs is up to the
+    callers (the Re-scan buttons; the evening download of every ticker is run by
+    ``cockpit-eod``), so every scan that runs has fresh bars. The price download skips the
+    network when no market session has passed since the cache was written
+    (``data_feed._cache_settled``: evenings, weekends, before the open; no new bar can
+    exist). ``force=True`` is the full re-download (the app's Advanced ⟳ button) and skips
+    even that check."""
     from . import data_feed
     tickers = data_feed.get_universe(universe, force=force)
     spy = data_feed.get_spy(force=force, max_age_days=0.0)

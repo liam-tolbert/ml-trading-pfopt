@@ -1,9 +1,10 @@
-"""Daily market-breadth history: one row per settled session.
+"""Daily market-breadth history (how many stocks take part in a move): one row per
+settled session.
 
-The books read the market by the count of new 52-week highs against new lows, and by
-whether that spread widens. That needs history the scan pickle doesn't keep. ``append``
-MUST be called only by the scheduled screen, so each row is a settled close; an in-app
-scan mid-session would write a provisional one.
+Minervini's books judge the market by the count of new 52-week highs against new lows,
+and by whether that gap widens. That needs history the scan pickle doesn't keep.
+``append`` MUST be called only by the scheduled screen, so each row is a settled close;
+an in-app scan during the trading day would write a provisional one.
 """
 from __future__ import annotations
 
@@ -46,7 +47,8 @@ def load(path=None) -> List[dict]:
 
 def append(row: dict, path=None) -> Path:
     """Add the row for ``row["date"]``, replacing any row with that date, and rewrite the
-    file atomically (tmp + ``os.replace``). Returns the path. Raises on a malformed row."""
+    file through a temp file and ``os.replace``, so a reader never sees a half-written
+    file. Returns the path. Raises ValueError on a malformed row."""
     new = _parse(row)
     if new is None:
         raise ValueError(f"malformed breadth row: {row!r}")

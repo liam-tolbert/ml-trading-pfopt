@@ -2,9 +2,9 @@
 
 A hunt result is a folder ``data/cockpit/hunt/<date>/`` the hunt PC pushes to the Pi
 (diagnostics.csv, verdicts.csv, meta.json, narrative.md, catalyst.json, report.html,
-charts/). This module finds those folders, orders the PASS names for the click-through,
-leaves a request for the hunt PC and reads its status (``hunt_request``), and adds a
-name to the watchlist.
+charts/). This module finds those folders, orders the PASS stocks for the page to step
+through one at a time, leaves a request for the hunt PC and reads its status
+(``hunt_request``), and adds a stock to the watchlist.
 """
 from __future__ import annotations
 
@@ -42,8 +42,8 @@ FINISHED_FILES = ("diagnostics.csv", "meta.json", "report.html")
 
 def hunt_dirs(root: Optional[Path] = None) -> List[Path]:
     """Dated hunt folders holding a finished hunt (``FINISHED_FILES``), newest first.
-    The ``logs/`` sibling, a half-pushed folder and, on the hunt PC itself, a run still
-    in progress are skipped."""
+    The ``logs/`` folder beside them, a folder only partly copied over and, on the hunt
+    PC itself, a run still in progress are skipped."""
     root = root or hunt_root()
     if not root.is_dir():
         return []
@@ -59,20 +59,20 @@ def latest_hunt_dir(root: Optional[Path] = None) -> Optional[Path]:
 
 
 def load_state_safe(hunt_path: Path) -> Tuple[Optional[HuntState], str]:
-    """``(state, "")`` or ``(None, reason)``. Never raises: a page must not die on a
-    folder a crashed run left behind."""
+    """``(state, "")`` or ``(None, reason)``. Never raises, so a folder left behind by a
+    crashed run can't break the page."""
     try:
         return load_state(hunt_path), ""
     except Exception as e:                # the reason is shown to the user
         return None, f"{hunt_path.name}: {type(e).__name__}: {e}"
 
 
-# ---- the click-through ------------------------------------------------------ #
+# ---- stepping through the picks --------------------------------------------- #
 @dataclass
 class Pick:
     ticker: str
     bucket: str            # a BUCKET_ORDER key, or "earnings_blocked"
-    row: dict              # the diagnostics row (load_state's coercion)
+    row: dict              # the diagnostics row, as load_state converts it
     verdict: str
     notes: str
     blocked: bool
@@ -87,8 +87,9 @@ def _earnings_in(row: dict) -> Optional[int]:
 
 
 def ordered_picks(state: HuntState) -> List[Pick]:
-    """Every PASS name, bucket by bucket (the gates already sort each by quality), then
-    the earnings-blocked PASS names, soonest report first."""
+    """Every PASS stock, bucket by bucket in ``BUCKET_ORDER`` (the hunt already sorts
+    each bucket by quality), then the PASS stocks blocked by an upcoming earnings report,
+    soonest report first."""
     def pick(row, bucket, blocked):
         v = state.verdicts.get(row["ticker"]) or {}
         return Pick(row["ticker"], bucket, row, v.get("verdict", "PASS"),
@@ -101,8 +102,8 @@ def ordered_picks(state: HuntState) -> List[Pick]:
 
 def sheet_for(hunt_path: Path, state: HuntState,
               ticker: str) -> Optional[Tuple[Path, int, int, Optional[int]]]:
-    """``(png, sheet_no, n_sheets, panel_index)`` of the review sheet showing ``ticker``;
-    the panel index is None when the sheet's contents are unknown; None without a sheet."""
+    """``(png, sheet_no, n_sheets, panel_index)`` of the review sheet listing ``ticker``,
+    or None when no sheet lists it. A sheet whose ticker list is unknown never matches."""
     sheets = review_sheets(hunt_path, state.diag_rows)
     for i, (png, tickers) in enumerate(sheets, start=1):
         if tickers and ticker in tickers:
@@ -129,8 +130,8 @@ def sheet_panel(png: Path, j: Optional[int]) -> Optional[bytes]:
 
 
 def panel_name(j: Optional[int]) -> str:
-    """Where a name sits on its 2×2 review sheet (``charts.render_sheets`` fills it
-    row-major)."""
+    """Where a ticker sits on its 2×2 review sheet (``charts.render_sheets`` fills it left
+    to right, then top to bottom)."""
     if j is None:
         return "one of the panels"
     return _PANEL_NAMES[j] if j < len(_PANEL_NAMES) else f"panel {j + 1}"
@@ -158,10 +159,11 @@ PIVOT_DRIFT_PCT = 0.5        # a smaller move is rounding, not a new pivot
 
 def hunt_levels(row: dict, scan_levels: Optional[dict] = None) -> dict:
     """The chart's levels for a hunt pick: the pivot the hunt judged, with its stop, buy
-    zone and +25% target. The detector re-anchors the pivot as bars arrive (a new high
-    starts a new base), so the latest scan's levels can differ from what the verdict and
-    the watchlist entry refer to; the chart MUST show the hunt's. Keys the hunt does not
-    record (breakout flags, volume ratio) come from ``scan_levels`` when given."""
+    zone and +25% target. The pivot detector moves the pivot as new daily prices arrive
+    (a new high starts a new base), so the latest scan's levels can differ from what the
+    verdict and the watchlist entry refer to; the chart MUST show the hunt's. Keys the
+    hunt does not record (breakout flags, volume ratio) come from ``scan_levels`` when
+    given."""
     nums = entry_numbers(row)
     out = dict(scan_levels or {})
     piv = nums["pivot"]
@@ -188,7 +190,8 @@ def pivot_drift(row: dict, scan_levels: Optional[dict]) -> Optional[Tuple[float,
 
 def latest_payloads() -> Dict[str, dict]:
     """The latest scan's payloads by ticker, or ``{}``. Never raises and never waits: a
-    cold start, the test harness, or a worker error all read as "no scan"."""
+    scan worker with no result yet, the tests, or a worker error all read as "no
+    scan"."""
     try:
         from src.stock_screener.cockpit import scan_worker
         res = scan_worker.get_worker().latest()
@@ -207,7 +210,7 @@ def read_text(path: Path) -> str:
 def inline_report_images(html: str, hunt_path: Path, embed: bool = True) -> str:
     """``report.html`` for an iframe, which cannot resolve ``charts/…``: the sheet images
     become data URIs, or are dropped when ``embed`` is False (a dozen full-size sheets is
-    a heavy page on a Pi). A sheet missing on disk is dropped either way."""
+    a heavy page for the Raspberry Pi). A sheet missing on disk is dropped either way."""
     def sub(m):
         png = hunt_path / "charts" / m.group(1)
         if not embed or not png.exists():
@@ -233,8 +236,8 @@ def manual_links(ticker: str) -> List[Tuple[str, str]]:
 
 # ---- asking the hunt PC ----------------------------------------------------- #
 def request_hunt() -> Tuple[dict, bool]:
-    """Leave a request for the PC's poller; ``(request, created)``. Nothing connects to
-    the PC: it reads the file over ssh when it is awake."""
+    """Leave a request for the PC's polling script; ``(request, created)``. Nothing
+    connects to the PC: it reads the file over ssh when it is awake."""
     return hunt_request.write_request("cockpit")
 
 
@@ -252,10 +255,10 @@ def add_to_watchlist(session_entries: Optional[list], ticker: str, pivot, hunt_d
                      verdict: str, notes: str = "") -> Tuple[List[dict], bool]:
     """Add ``ticker`` with the hunt's pivot frozen as the judged pivot.
 
-    The session's copy, when the scan page has one, is authoritative for membership, so
-    the entry is added there and merged with the disk copy before saving, the way the
-    scan page persists. Returns ``(merged entries, added)``; ``added`` is False when the
-    name was already present, and nothing is written then."""
+    The session's copy, when the scan page has one, decides which tickers are on the
+    list, so the entry is added there and merged with the disk copy before saving, the
+    way the scan page saves. Returns ``(merged entries, added)``; ``added`` is False when
+    the ticker was already present, and nothing is written then."""
     import datetime as _dt
     base = list(session_entries) if session_entries is not None else load_watchlist(cache.WATCHLIST_JSON)
     if ticker in watchlist_tickers(base):

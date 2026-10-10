@@ -1,18 +1,19 @@
-"""Run logging for the cockpit: dated files under ``data/cockpit/logs/``, pruned at 14 days.
+"""Run logging for the cockpit: dated files under ``data/cockpit/logs/``, deleted at 14 days.
 
-Three kinds of process write here: the long-lived Streamlit app, the one-shot refresh and
-EOD containers, and the morning buy/sell CLIs. ``TimedRotatingFileHandler`` MUST NOT be
-used: its rename-on-rollover races between processes, and two containers rolling the same
-file silently lose records. A dated filename needs no rollover. Every process appends to
-``cockpit_<today>.log`` (``O_APPEND`` keeps interleaved line writes whole), and retention
-prunes files whose date has left the window. The trigger reports next door use the same
-convention, so the two read as one dated trail.
+Three kinds of process write here: the long-running Streamlit app, the refresh and
+end-of-day containers (each runs once and exits), and the morning buy/sell CLIs.
+``TimedRotatingFileHandler`` MUST NOT be used: it renames the file when the day changes,
+and two processes renaming the same file at once silently lose records. A dated filename
+needs no rename. Every process appends to ``cockpit_<today>.log`` (``O_APPEND`` keeps each
+line whole when processes write at the same time), and files whose date is older than the
+14-day window are deleted. The trigger reports (``triggers.py``) use the same naming, so
+the two read as one dated record.
 
 Records also go to stdout, so ``docker logs cockpit-app`` and journald see everything. The
-file is the durable copy, not the only one.
+file is the copy that is kept, not the only one.
 
-This module MUST NOT import pandas. It is on the import path of every cockpit process, and
-the handler is called from inside fetch loops.
+This module MUST NOT import pandas. Every cockpit process imports it, and the handler is
+called from inside download loops.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ RETENTION_DAYS = 14                 # a log this many days old is expired (today
 LOG_PREFIX = "cockpit_"
 LOG_SUFFIX = ".log"
 LOG_GLOB = f"{LOG_PREFIX}*{LOG_SUFFIX}"
-# The pruner deletes only files of this exact shape. A stray .log dropped in the
+# ``prune_logs`` deletes only files of this exact shape. A stray .log dropped in the
 # directory by hand is left alone.
 _NAME_RE = re.compile(rf"^{re.escape(LOG_PREFIX)}(\d{{4}}-\d{{2}}-\d{{2}})"
                       rf"{re.escape(LOG_SUFFIX)}$")
@@ -45,8 +46,8 @@ def _today() -> _dt.date:
 
 def _logs_dir(dir_path=None) -> Path:
     """``dir_path``, else ``cache.LOGS_DIR``. It MUST be resolved on every call, never
-    captured at import: the test suite patches ``cache.LOGS_DIR`` to keep runs away from
-    real state."""
+    read once at import: the test suite patches ``cache.LOGS_DIR`` to keep test runs away
+    from the real log files."""
     return Path(dir_path if dir_path is not None else cache.LOGS_DIR)
 
 
@@ -60,8 +61,8 @@ def prune_logs(retention_days: int = RETENTION_DAYS, today: Optional[_dt.date] =
 
     Age is in whole days with today at 0, so ``RETENTION_DAYS`` leaves exactly that many
     dated files: today plus the 13 before it. Never raises. A log that can't be parsed or
-    unlinked is skipped: pruning is a side effect of ordinary logging and MUST NOT take a
-    scan down with it."""
+    deleted is skipped: deleting old logs is a side effect of ordinary logging and MUST NOT
+    crash a scan."""
     t = today or _today()
     removed: List[Path] = []
     try:
@@ -89,23 +90,24 @@ class _Formatter(logging.Formatter):
 
     A person reads these lines, so the clock is 12-hour. The date stays ISO: it sorts and
     matches the log filenames. The containers set ``TZ=America/New_York`` (compose and
-    Dockerfile), so local time is market time. The zone stays on the line so a box whose
-    TZ has drifted shows it, instead of writing times that can't be placed."""
+    Dockerfile), so local time is market time. The zone stays on the line so a machine
+    whose TZ setting is wrong shows it, instead of writing times nobody can interpret."""
 
     def formatTime(self, record, datefmt=None):        # noqa: N802  (stdlib spelling)
         t = _dt.datetime.fromtimestamp(record.created).astimezone()
-        # %Z (EDT) is empty on a box with no tz database; fall back to the numeric offset.
+        # %Z (EDT) is empty without a tz database; fall back to the numeric offset.
         zone = t.strftime("%Z") or t.strftime("%z")
         return f"{t:%Y-%m-%d %I:%M:%S %p} {zone}".rstrip()
 
 
 class DatedFileHandler(logging.Handler):
     """Append to ``cockpit_<today>.log``, re-opening when the date (or the configured
-    directory) changes and pruning expired logs on each such roll.
+    directory) changes and deleting expired logs each time it switches files.
 
-    ``logging`` already serializes ``emit`` behind the handler lock, so the stream swap
-    needs no lock of its own. A file that can't be opened degrades to ``handleError``:
-    stdout still has the record, and a full or read-only card never costs a scan."""
+    ``logging`` already runs one ``emit`` at a time under the handler lock, so switching
+    files needs no lock of its own. A file that can't be opened falls back to
+    ``handleError``: stdout still has the record, and a full or read-only disk never costs
+    a scan."""
 
     def __init__(self, retention_days: int = RETENTION_DAYS) -> None:
         super().__init__()
@@ -114,8 +116,8 @@ class DatedFileHandler(logging.Handler):
         self._key = None                # (day, resolved dir) the open stream belongs to
 
     def release_file(self) -> None:
-        """Close the open file without tearing the handler down. It re-opens lazily on
-        the next record, so this is safe to call at any time.
+        """Close the open file without closing the handler. The file re-opens on the next
+        record, so this is safe to call at any time.
 
         Windows can't unlink an open file, so a test's ``TemporaryDirectory`` cleanup
         fails with ``WinError 32`` without this. POSIX allows the unlink.
@@ -147,7 +149,7 @@ class DatedFileHandler(logging.Handler):
         try:
             self._ensure_stream()
             self._stream.write(self.format(record) + "\n")
-            self._stream.flush()        # one-shot containers die without an atexit flush
+            self._stream.flush()        # a container that runs once may exit before flushing
         except Exception:               # noqa: BLE001  (logging MUST NOT raise upward)
             self.handleError(record)
 
@@ -187,7 +189,7 @@ def get_logger(name: Optional[str] = None) -> logging.Logger:
 
 
 def release_files() -> None:
-    """Close every open dated-log file; each re-opens lazily on the next record.
+    """Close every open dated-log file; each re-opens on the next record.
 
     Callers MUST call this before deleting a directory that holds a log. Windows can't
     unlink an open file, so a test's ``TemporaryDirectory`` cleanup raises ``WinError 32``

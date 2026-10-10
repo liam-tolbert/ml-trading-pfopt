@@ -2,23 +2,24 @@
 
     python src/stock_screener/cockpit/screen_job.py [--universe full_us] [--min-criteria 8]
 
-Runs the full SEPA funnel over the scan universe: the 8/8 trend template, RS percentile,
-Step-2 fundamentals for passers, VCP tiers and entry levels. The result is published
-through the process-wide store, which persists it to ``last_scan.pkl``. That file is the
-scan table: the app renders it and rewrites it only on an explicit Re-scan.
+Runs the full chain of SEPA filters over the scan universe: all 8 Trend Template checks,
+RS percentile, Step-2 fundamentals for the stocks that pass, VCP tiers and entry levels.
+The result goes into the store shared by the whole process (``scan_worker._STORE``),
+which saves it to ``last_scan.pkl``. That file is the scan table: the app shows it and
+rewrites it only on an explicit Re-scan.
 
 Screening runs under systemd, not on a thread inside the Streamlit container. Such a
 thread is invisible to ``systemctl list-timers`` and dies with the container, so a deploy
-landing after its slot costs that day's screen. ``refresh_job.py`` advances the price
-cache; this job advances the candidate list.
+that restarts the container after the scheduled time loses that day's screen.
+``refresh_job.py`` updates the saved prices; this job updates the candidate list.
 
 This is the second ``ExecStart`` of the ``cockpit-eod`` oneshot unit. systemd starts it
 only after step 1 (``refresh_job.py --scope universe``) exits 0, however long that takes,
-and skips it if the sweep failed. After the sweep every read here is served from cache
-(``_cache_settled``: no session has elapsed, so no new bar can exist), so the run costs
-CPU only. It MUST NOT run before or during the sweep. Before, it screens yesterday's bars.
-During, it re-fetches what the sweep has not reached yet while both containers hit
-yfinance.
+and skips it if step 1 failed. After step 1 every read here comes from the saved files
+(``_cache_settled``: no trading day has passed, so no new daily bar can exist), so the
+run uses CPU only. It MUST NOT run before or during step 1. Before, it screens
+yesterday's bars. During, it re-downloads what step 1 has not reached yet while both
+containers call yfinance at once.
 
 Screening only: this places no orders and touches no watchlist state.
 """
@@ -48,25 +49,28 @@ def run_screen(universe: str = DEFAULT_UNIVERSE,
     errors, elapsed}``; a scan failure raises.
 
     The key MUST be the one the app reads, ``(universe, min_criteria)``, or the app never
-    sees the result. ``store.put`` persists atomically (tmp + ``os.replace``). The app's
-    ResultStore re-reads ``last_scan.pkl`` when its mtime advances: that is how a result
-    from this one-shot container reaches the long-running Streamlit process."""
+    sees the result. ``store.put`` writes a temp file and renames it with
+    ``os.replace``, so no reader sees a half-written file. The app's ResultStore
+    re-reads ``last_scan.pkl`` when the file's modified time changes: that is how a
+    result from this short-lived container reaches the Streamlit process, which keeps
+    running."""
     store = _STORE if store is None else store
     _LOG.info("screen starting: %s, min_criteria=%d", universe, min_criteria)
     t0 = time.time()
     res = scan.run_scan(universe=universe, cfg=scan.ScanConfig(min_criteria=min_criteria))
     store.put((universe, min_criteria), res)
-    # `candidates` is a DataFrame and MUST NOT be `or []`-ed: it has no truth value, so
-    # that raises ValueError. The unit would then fail after store.put had already
-    # persisted a good scan.
+    # `candidates` is a DataFrame and MUST NOT go through `or []`: it has no truth value,
+    # so that raises ValueError. The unit would then fail after store.put already
+    # saved a good scan.
     cand = getattr(res, "candidates", None)
     out = {"scanned": getattr(res, "n_scanned", None),
            "passed": getattr(res, "n_passed", None),
            "candidates": 0 if cand is None else int(len(cand)),
            "errors": len(getattr(res, "errors", None) or []),
            "elapsed": round(time.time() - t0, 1)}
-    # The breadth history gets one settled row per scheduled screen. Only this job
-    # appends: an in-app scan mid-session would write a provisional row.
+    # The breadth history (the share of stocks in stage 2, new highs, new lows) gets one
+    # row per scheduled screen, from settled closes. Only this job adds rows: an in-app
+    # scan during market hours would write a row from prices that may still change.
     reg = getattr(res, "regime", None) or {}
     if reg.get("session"):
         try:

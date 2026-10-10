@@ -3,16 +3,16 @@
     python src/stock_screener/cockpit/sell_job.py plan    [--date YYYY-MM-DD] [--no-write]
     python src/stock_screener/cockpit/sell_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
-``plan`` runs after the settled close (16:15 ET). It reads the paper account, evaluates
-the sell pillars per holding as the Positions page does (journal entry dates, watchlist
-frozen pivots, trigger-report SPY note) and writes the dated sell plan the page renders
-for the overnight veto.
+``plan`` runs after the settled close (16:15 ET). It reads the paper account, runs the
+four sell checks (the pillars) on each holding as the Positions page does (journal entry
+dates, the pivots saved on the watchlist, the trigger report's SPY note) and writes the
+dated sell plan the page shows for the overnight veto.
 
-``execute`` runs pre-open (~09:25 ET). It submits a market SELL for every still-planned
-order via the stop-aware flow; pre-open orders queue for the opening print. Execution
-requires ``AUTOSELL=1`` in the environment (.env). Without it the run leaves the plan
-untouched and exits 0, so the timer can ship before the feature is armed. Paper account
-only.
+``execute`` runs before the open (~09:25 ET). It submits a market SELL for every
+still-planned order through the stop-aware sell; orders placed before the open wait for
+the opening trade. Execution requires ``AUTOSELL=1`` in the environment (.env). Without
+it the run leaves the plan untouched and exits 0, so the timer can be installed before
+the feature is turned on. Paper account only.
 """
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ from src.stock_screener.cockpit import (cache, export, plan_store, sells,  # noq
 
 
 def _rs_ratings() -> dict:
-    """The last scan's RS ratings from the persisted pickle, cache only. ``{}`` without
-    a scan or on any error."""
+    """The last scan's RS ratings from the saved pickle; nothing is downloaded. ``{}``
+    without a scan or on any error."""
     try:
         from src.stock_screener.cockpit import scan_worker
         ent = scan_worker._STORE.get((scan_worker.DEFAULT_UNIVERSE,
@@ -43,14 +43,15 @@ def _rs_ratings() -> dict:
 
 
 def _positions_and_pillars(today=None):
-    """The Positions page's pillar wiring, headless. Returns ``(data, positions, pillars,
-    spy_note)``; ``data["open_by_sym"]`` holds the journal's open episodes. A failed
-    positions read raises.
+    """The Positions page's pillar inputs, built without the page. Returns ``(data,
+    positions, pillars, spy_note)``; ``data["open_by_sym"]`` holds the journal's open
+    episodes (one per trade still held), by symbol. A failed positions read raises.
 
-    Every side input is best effort: a missing journal, watchlist or report degrades
-    pillars to unknown, and unknown never trades. P2's RS rating comes from the persisted
-    last scan. The scan-store regime isn't available in a fresh process, so P3 falls back
-    to the trigger report's SPY note. P3 is report-only in the plan."""
+    Every other input is optional: a missing journal, watchlist or report leaves the
+    affected pillars ``unknown``, and unknown never trades. P2's RS rating comes from the
+    saved last scan. The scan store's market read (``regime``) isn't available in a fresh
+    process, so P3 falls back to the trigger report's SPY note. P3 is report-only in the
+    plan."""
     data = trade.fetch_positions()
     positions = data["positions"]
     rs_map = _rs_ratings()
@@ -78,9 +79,10 @@ def _positions_and_pillars(today=None):
 
 
 def _strength(positions, open_by_sym, today=None) -> dict:
-    """Selling-into-strength reads for the plan: ``{symbol: {signs, avg_entry, trimmed}}``
-    for each holding with signs. ``trimmed`` is a realized P&L on the open episode: part
-    of it was already sold. Best effort; a holding without a read is left out."""
+    """Selling-into-strength checks for the plan: ``{symbol: {signs, avg_entry,
+    trimmed}}`` for each holding with signs. ``trimmed`` is True when the open episode
+    has realized P&L, meaning part of it was already sold. A holding whose check fails or
+    has no signs is left out."""
     from src.stock_screener.cockpit import advisories
     out = {}
     for p in positions:
@@ -97,9 +99,10 @@ def _strength(positions, open_by_sym, today=None) -> dict:
 
 
 def _market(spy_note) -> dict:
-    """The plan's market read: the trigger report's SPY note and the re-entry streak.
-    The note is the 16:10 settled close, fresher than the scan. The streak MUST read
-    cached bars only: this job never downloads."""
+    """The plan's market inputs: the trigger report's SPY note and the streak of settled
+    closes with SPY back in Stage 1 or 2. The note is from the 16:10 settled close, newer
+    than the scan. The streak MUST read saved daily prices only: this job never
+    downloads."""
     streak = None
     try:
         from src.stock_screener.cockpit import advisories, breadth_store, data_feed
@@ -154,19 +157,19 @@ def cmd_execute(date: Optional[str], dry_run: bool) -> int:
           f"vetoed={summary['vetoed']}  skipped={summary['skipped']}  "
           f"failed={summary['failed']}")
     print(sells.format_plan(plan))
-    # A disabled or stale run returns before touching the plan; saving it would only
-    # move the file's mtime.
+    # A ``disabled`` or ``stale`` run returns before changing the plan; saving it would
+    # only update the file's modified time.
     if not dry_run and summary["status"] not in ("disabled", "stale"):
         sells.save_sell_plan(plan)
     # "stale" is normal: a holiday, or a morning with no plan from the night before.
-    # Exit 1 MUST be reserved for real failures. A red systemd unit on an ordinary skip
-    # trains you to ignore the one that matters.
+    # Exit 1 MUST be reserved for real failures. A systemd unit marked failed on an
+    # ordinary skip teaches you to ignore the one that matters.
     return 1 if summary["status"] in ("failed", "partial") else 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    # AUTOSELL lives in .env. The compose service passes it, but a hand run on the
-    # laptop needs it loaded here.
+    # AUTOSELL lives in .env. The Docker Compose service passes it, but a run by hand on
+    # the laptop needs it loaded here.
     try:
         from dotenv import load_dotenv
         load_dotenv()

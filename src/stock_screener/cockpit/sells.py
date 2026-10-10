@@ -1,25 +1,27 @@
 """Automated sell planning and execution from the P1-P4 sell pillars.
 
-Two phases, matching the operating rules: decide at the settled close, order at the
-next open.
+The pillars are the four sell checks :func:`trade.sell_pillars` runs on each held
+position. Two phases, matching the operating rules: decide at the settled close, order
+at the next open.
 
-* **Evening** (``sell_job.py plan`` at 16:15 ET, after the 16:10 settled trigger run):
-  :func:`build_sell_plan` turns each held position's pillars into a *plan* of
-  full-exit orders for name-specific hard fails (P1, P2, P4). P3 (the tape) and every
-  warn are recorded but never traded automatically. P2 MUST fail on two consecutive
-  settled closes before it plans a sell: the strict template flips for a day on
-  knife-edge SMA noise. The streak is read from the prior day's plan snapshot.
-* **Overnight veto**: the Positions page renders the plan's JSON file with a Veto button
-  per order. A vetoed order stays in the file as an audit trail but is never submitted.
+* **Evening** (``sell_job.py plan`` at 16:15 ET, after the 16:10 trigger run on the
+  settled close): :func:`build_sell_plan` turns each held position's pillars into a
+  *plan* of full-exit orders for fails specific to that stock (P1, P2, P4). P3 (the
+  whole market) and every warn are recorded but never traded automatically. P2 MUST
+  fail on two settled closes in a row before it plans a sell: the strict Trend Template
+  can fail for a single day when price sits right on an SMA. The streak is read from
+  the prior day's plan snapshot.
+* **Overnight veto**: the Positions page shows the plan's JSON file with a Veto button
+  per order. A vetoed order stays in the file as a record but is never submitted.
 * **Morning** (``sell_job.py execute``, ~09:25 ET): :func:`execute_sell_plan` submits a
-  market SELL for every still-planned order via the stop-aware sell flow (cancel the
-  covering GTC stop, sell, re-arm any remainder). Placed pre-open, the order queues for
-  the opening print. It refuses stale plans and requires the ``AUTOSELL`` env var; the
-  feature ships dark until armed in ``.env``.
+  market SELL for every still-planned order through the stop-aware sell (cancel the GTC
+  stop on those shares, sell, place a new stop on any shares left). Placed before the
+  open, the order waits for the opening trade. It refuses out-of-date plans and does
+  nothing unless ``AUTOSELL`` is set in ``.env``; the feature is off by default.
 
 Plan files live beside the trigger reports (``sell_plan_YYYY-MM-DD.json`` in
-``cache.TRIGGERS_DIR``), so the test suite's TRIGGERS_DIR patching keeps AppTests away
-from real state. Paper account only, like every trade path.
+``cache.TRIGGERS_DIR``), so when the test suite patches TRIGGERS_DIR, AppTests never
+touch the real files. Paper account only, like every trade path.
 """
 from __future__ import annotations
 
@@ -31,11 +33,12 @@ from src.stock_screener.cockpit import plan_store
 AUTOSELL_ENV = "AUTOSELL"
 _PREFIX = "sell_plan"
 
-# Pillars whose hard fail plans an automatic full exit. P3 is market-wide and MUST stay
-# report-only: a regime flip would liquidate the whole book.
+# Pillars whose fail plans an automatic full exit. P3 reads the whole market and MUST
+# stay report-only: one market-wide turn would sell every position at once.
 ACTIONABLE_PILLARS = ("P1", "P2", "P4")
-# Pillars that act on their first failing settled close. P2 needs a 2-close streak: the
-# strict template flips for a day on knife-edge SMA noise.
+# Pillars that act on their first failing settled close. P2 needs two failing closes in a
+# row: the strict Trend Template can fail for a single day when price sits right on an
+# SMA.
 IMMEDIATE_PILLARS = ("P1", "P4")
 
 ORDER_PLANNED = "planned"
@@ -49,35 +52,38 @@ def build_sell_plan(positions: List[dict], pillars: Dict[str, dict], *,
                     prior_plan: Optional[dict] = None, today=None,
                     market: Optional[dict] = None,
                     strength: Optional[Dict[str, dict]] = None) -> dict:
-    """Turn per-position pillar reads into the evening sell plan. Pure apart from the
-    wall-clock ``generated_at``. Returns ``{date, generated_at, orders, snapshot, notes,
-    executed_at}``, plus ``market`` when ``market`` is given.
+    """Turn per-position pillar reads into the evening sell plan. No file or network
+    access; only ``generated_at`` reads the clock. Returns ``{date, generated_at, orders,
+    snapshot, notes, executed_at}``, plus ``market`` when ``market`` is given.
 
-    ``positions``: :func:`trade.fetch_positions`-shaped dicts (``symbol``/``qty`` used).
-    ``pillars``: ``{symbol: sell_pillars(...) result}``. ``prior_plan``: the previous
-    trading day's plan; its pillar snapshot supplies the P2 streak. With None, a first
-    P2 fail only starts the streak and never sells.
+    ``positions``: dicts shaped like :func:`trade.fetch_positions` returns
+    (``symbol``/``qty`` used). ``pillars``: ``{symbol: sell_pillars(...) result}``.
+    ``prior_plan``: the previous trading day's plan; its pillar snapshot supplies the P2
+    streak. With None, a first P2 fail only starts the streak and never sells.
 
     Every position gets a snapshot row: tomorrow's streak needs today's statuses even
-    for names with no order. Unknown pillars never trade; missing data is not a
-    signal. Pillar orders are full exits (``exit: "full"``); qty is re-read at execution.
+    for stocks with no order. Unknown pillars never trade; missing data never causes a
+    sale. Pillar orders sell the whole position (``exit: "full"``); qty is re-read at
+    execution.
 
     ``market`` is ``{spy_note, streak}``: the trigger report's SPY note and
     :func:`advisories.spy_confirm_streak`. It adds a ``plan["market"]`` record, which the
-    next plan dates the turn from, and a note when the tape needs one. On the evening SPY
-    first closes in Stage 4 (:func:`advisories.market_turn`), the note says to reduce.
-    With ``doctrine.MARKET_TURN_CAN_TRADE`` on, the plan also sells
+    next plan uses to tell which evening the market turned, and a note when the market
+    calls for one. On the evening SPY first closes in Stage 4
+    (:func:`advisories.market_turn`), the note says to reduce. With
+    ``doctrine.MARKET_TURN_CAN_TRADE`` on, the plan also sells
     ``MARKET_TURN_REDUCE_FRACTION`` of each position without a full exit. A single share
     gets a note only.
 
     ``strength`` is ``{symbol: {signs, avg_entry, trimmed}}`` from
     :func:`advisories.strength_signs`; ``trimmed`` means part of the position was already
     sold. Every holding with signs gets a note. With ``doctrine.STRENGTH_CAN_TRADE`` on,
-    ``STRENGTH_SIGNS_TO_SELL`` signs plan a partial sale of ``STRENGTH_SELL_FRACTION`` with
-    ``remainder_stop`` at ``avg_entry``, unless the position was already trimmed.
+    ``STRENGTH_SIGNS_TO_SELL`` signs plan a partial sale of ``STRENGTH_SELL_FRACTION``.
+    Its ``remainder_stop``, the stop for the shares kept, is ``avg_entry``. A position
+    already trimmed gets no second sale.
 
     A plan MUST hold at most one order per symbol, and a full exit wins, so a Veto still
-    means "don't sell this name tomorrow"."""
+    means "don't sell this stock tomorrow"."""
     from src.stock_screener.cockpit import advisories, doctrine
     prior_snap = (prior_plan or {}).get("snapshot", {})
     snapshot: Dict[str, dict] = {}
@@ -209,17 +215,18 @@ def sell_plan_path(date_iso: str, dir_path=None) -> Path:
 
 
 def save_sell_plan(plan: dict, dir_path=None) -> Path:
-    """Atomic write; returns the path. The evening CLI, the morning executor and a page
-    Veto click write the same day-file from separate processes."""
+    """Write the plan to a temp file, then rename it over the dated file, so a reader
+    never sees a half-written file. Returns the path. The evening CLI, the morning
+    execute run and a page Veto click write the same file from separate processes."""
     return plan_store.save_plan(_PREFIX, plan, dir_path)
 
 
 def load_latest_sell_plan(dir_path=None, *, before: Optional[str] = None
                           ) -> Optional[dict]:
-    """Newest parseable ``sell_plan_*.json``, or None. Never raises. ``before`` (ISO date)
+    """Newest readable ``sell_plan_*.json``, or None. Never raises. ``before`` (ISO date)
     skips plans dated on or after it. The evening planner passes ``before=today``, so a
-    same-day rerun reads the previous plan's snapshot for the P2 streak, not its own
-    output."""
+    second run on the same day reads the previous plan's snapshot for the P2 streak, not
+    its own output."""
     return plan_store.load_latest_plan(_PREFIX, dir_path, before=before)
 
 
@@ -232,9 +239,9 @@ def veto_order(plan: dict, symbol: str) -> bool:
 
 def plan_is_current(plan: dict, today=None) -> bool:
     """True when ``today`` is the next business day after a weekday plan's date; False
-    on any error. Monday morning executes Friday evening's plan. Anything older is
-    stale: its pillars describe a market two sessions gone. Same-day execution is
-    refused: orders are for the next open. Holidays count as business days."""
+    on any error. Monday morning executes Friday evening's plan. Anything older is out
+    of date: its pillars describe the market two trading days back. Same-day execution
+    is refused: orders are for the next open. Holidays count as business days."""
     import pandas as pd
     try:
         d = pd.Timestamp(str(plan.get("date"))).normalize()
@@ -261,15 +268,15 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
     ``disabled``, ``stale``, ``partial`` or ``failed``.
 
     ``submit(symbol, qty)`` is the stop-aware sell (``trade.submit_position_sell``),
-    injected so the logic tests offline. An order's ``remainder_stop`` is passed as a
-    keyword. ``held_by_symbol`` is the account's CURRENT holdings: qty is clamped to it
-    (the plan's count may be a day old) and a no-longer-held name is skipped, never
-    shorted. A ``partial`` order sells its clamped quantity, or is skipped at 0; it MUST
-    NOT widen to a full exit. Guards, in order: the ``AUTOSELL`` env gate
-    (ships dark), then plan freshness (:func:`plan_is_current`). Idempotent: only
-    ``planned`` orders act, so a double-fire submits nothing twice. A failed order MUST
-    stay failed for a human: an ambiguous broker failure may have partly acted, and a
-    blind retry could double-sell."""
+    passed in so tests run offline. An order's ``remainder_stop`` is passed as a
+    keyword. ``held_by_symbol`` is the account's CURRENT holdings: qty is capped at it
+    (the plan's count may be a day old) and a stock no longer held is skipped, never
+    sold short. A ``partial`` order sells its capped quantity, or is skipped at 0; it
+    MUST NOT become a full exit. Checks, in order: the ``AUTOSELL`` setting (off by
+    default), then whether the plan is current (:func:`plan_is_current`). Running it
+    twice is safe: only ``planned`` orders act, so a second run submits nothing again. A
+    failed order MUST stay failed until a person looks at it: an unclear broker failure
+    may have partly gone through, and an automatic retry could sell twice."""
     if enabled is None:
         enabled = autosell_enabled()
     summary = {"status": "ok", "submitted": [], "vetoed": [], "skipped": [],
@@ -311,7 +318,7 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
               if o.get("remainder_stop") is not None else {})
         try:
             res = submit(sym, qty, **kw)
-        except Exception as e:            # a raise mid-loop MUST NOT strand the rest
+        except Exception as e:            # one order's error MUST NOT stop the rest
             res = {"status": "failed", "detail": str(e)}
         if res.get("status") == "submitted":
             o["status"] = ORDER_SUBMITTED
@@ -328,7 +335,8 @@ def execute_sell_plan(plan: dict, *, submit: Callable[[str, int], dict],
 
 
 def format_plan(plan: dict) -> str:
-    """ASCII-only console rendering (journald/log-safe, same convention as triggers)."""
+    """The plan as ASCII-only console text, safe for the systemd journal (same
+    convention as triggers)."""
     lines = [f"SELL PLAN  {plan.get('date', '?')}  "
              f"orders={len(plan.get('orders', []))}"]
     for o in plan.get("orders", []):

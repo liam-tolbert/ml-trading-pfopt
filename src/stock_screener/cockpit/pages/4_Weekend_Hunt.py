@@ -1,11 +1,12 @@
-"""Weekend Hunt page: start a hunt on the hunt PC and review its picks one at a time.
+"""Weekend Hunt page: start a hunt (the weekend review of the scan's candidate charts) on
+the hunt PC and review its picks one at a time.
 
-The hunt itself runs on the Windows PC (scripts/hunt/), which pushes each result folder
-to ``data/cockpit/hunt/<date>/`` on the Pi. Start leaves a request file the PC's poller
-picks up over ssh (``hunt_request``). This page reads those folders. For every
-PASS name, bucket by bucket, it shows the chart, the verdict, the Step-2 fundamentals,
-the entry numbers and the catalyst read, with an Add-to-watchlist button. Step 4 stays
-with the user: nothing here arms or submits an order.
+The hunt itself runs on the Windows PC (scripts/hunt/), which copies each result folder
+to ``data/cockpit/hunt/<date>/`` on the Raspberry Pi. Start writes a request file
+(``hunt_request``) that a script on the PC checks for over ssh. This page reads those
+folders. For every PASS ticker, group by group, it shows the chart, the verdict, the
+Step-2 fundamentals, the entry numbers and the catalyst summary, with an Add-to-watchlist
+button. Step 4 stays with the user: nothing here places or submits an order.
 
 Run the app from the project root: ``streamlit run src/stock_screener/cockpit/app.py`` and
 pick "Weekend Hunt" from the page nav.
@@ -26,7 +27,7 @@ import streamlit.components.v1 as components  # noqa: E402
 from streamlit.errors import StreamlitAPIException  # noqa: E402
 
 from src.stock_screener.cockpit import advisories  # noqa: E402 (chart marks)
-from src.stock_screener.cockpit import hunt_view  # noqa: E402 (module import → patchable)
+from src.stock_screener.cockpit import hunt_view  # noqa: E402 (module import: tests can replace it)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit.charts import build_chart  # noqa: E402
 from src.stock_screener.cockpit.export import load_watchlist, watchlist_tickers  # noqa: E402
@@ -34,12 +35,12 @@ from src.stock_screener.cockpit import cache  # noqa: E402
 from src.stock_screener.cockpit.panels import (render_step2_from_hunt_row,  # noqa: E402
                                                render_step2_panel, step_badge)
 
-# Warm the universe scan in the background, so the charts here come from the latest
-# scan. Inert under AppTest.
+# Start the stock scan in the background, so the charts here come from the latest
+# scan. Does nothing under AppTest.
 scan_worker.autostart()
 
 st.set_page_config(page_title="Weekend Hunt", page_icon="🔭", layout="wide")
-# Mirror app.py's padding trim so the first row isn't buried under Streamlit's header.
+# Same reduced padding as app.py, so the first row isn't hidden under Streamlit's header.
 # Tighter gaps and slightly smaller body text than the other pages: this one is read a
 # ticker at a time and MUST show the most per screen.
 st.markdown(
@@ -53,13 +54,13 @@ _VERDICT_COLOR = {"PASS": "green", "PASS-": "orange", "FAIL": "red"}
 # The page MUST fit a ticker's chart, verdict and entry numbers on one laptop screen
 # without scrolling; the scan page keeps the full 720 px chart.
 CHART_HEIGHT = 500
-SHEET_WIDTH = 560          # the hunt's own panel, for a name the latest scan dropped
+SHEET_WIDTH = 560          # the hunt's own chart image, for a ticker not in the latest scan
 REPORT_HEIGHT = 820        # the iframe scrolls itself; the page does not
 
 
 def _rerun_app() -> None:
-    """Rerun the whole app from inside a fragment; AppTest runs fragments inline and
-    rejects the scope, so fall back to a plain rerun there."""
+    """Rerun the whole app from inside an ``st.fragment``. AppTest runs fragments as part
+    of the page and rejects ``scope="app"``, so fall back to a plain rerun there."""
     try:
         st.rerun(scope="app")
     except StreamlitAPIException:
@@ -88,7 +89,8 @@ def _wl_add_cb(pick: hunt_view.Pick, hunt_date: str) -> None:
         hunt_date, pick.verdict, pick.notes)
     if "watchlist" in st.session_state:
         st.session_state["watchlist"] = merged
-    # A plan built for the old list is stale once the list changes (app.py does the same).
+    # A trade plan built for the old list is out of date once the list changes (app.py
+    # does the same).
     st.session_state.pop("trade_plan", None)
     st.session_state.pop("trade_result", None)
     st.session_state["hunt_wl_msg"] = (f"{pick.ticker} added with the pivot frozen at "
@@ -123,8 +125,8 @@ _iv = "10s" if _active else None
 
 @st.fragment(run_every=_iv)
 def _hunt_status_line() -> None:
-    """The request's progress, re-read every 10 s while one is pending. The first sight
-    of a finished run reloads the page so its folder shows."""
+    """The request's progress, re-read every 10 s while one is pending. The first time it
+    sees a finished or failed run, it reruns the app so the new folder shows."""
     p = hunt_view.hunt_progress()
     state = p["state"]
     if state == "requested":
@@ -162,7 +164,7 @@ st.caption(f"Scan of **{str(meta.get('scan_time', ''))[:10]}** · regime **{regi
 
 tab_review, tab_narr, tab_report = st.tabs(["Review", "Narrative", "Report"])
 
-# ---- Review: one PASS name at a time ------------------------------------------------- #
+# ---- Review: one PASS ticker at a time ----------------------------------------------- #
 with tab_review:
     picks = hunt_view.ordered_picks(state)
     if not picks:
@@ -184,8 +186,8 @@ with tab_review:
         on_list = pick.ticker in watchlist_tickers(
             wl_now if wl_now is not None else load_watchlist(cache.WATCHLIST_JSON))
 
-        # One strip: where you are, the verdict, and every control, so nothing below the
-        # chart has to be reached for.
+        # One row: where you are, the verdict, and every control, so no control sits below
+        # the chart.
         pcol, hcol2, wcol, ncol = st.columns([1, 6, 2.6, 1], vertical_alignment="center")
         pcol.button("◀ Prev", key="hunt_prev", on_click=_go, args=(-1, n), width="stretch")
         ncol.button("Next ▶", key="hunt_next", on_click=_go, args=(1, n), width="stretch")
@@ -271,7 +273,8 @@ with tab_review:
                 render_step2_panel(payload, help_popover=False)
             else:
                 render_step2_from_hunt_row(pick.row, help_popover=False)
-        # The catalyst: the books' third element, read from the hunt's headlines.
+        # The catalyst (the news reason buyers might want the stock), the books' third
+        # element, summarised from the hunt's headlines.
         with colCat, st.container(border=True):
             st.markdown(step_badge("Catalyst", "why would institutions want it now?"),
                         help="A label, never a gate: the catalyst does not change a verdict.")

@@ -1,22 +1,24 @@
-"""Watchlist trigger check. Pure logic: no Streamlit, no network; data comes in as arguments.
+"""Watchlist trigger check. No Streamlit and no network; price data comes in as arguments.
 
-The weekend hunt builds the watchlist. The scheduled job (every 30 minutes during market
-hours) answers ONE question per name: **is it above its frozen pivot on ≥1.5× average
-volume?** Intraday runs read the live provisional bar (flagged ``intraday``; ``volume_pace``
-says whether volume is running hot for the time of day). The last run of the day (16:10)
-sees the settled close. :func:`check_triggers` answers from already-fetched frames; the CLI
-wrapper (``refresh_job.py``) does the fetching, report persistence, and scheduling glue.
+The weekend hunt (the weekly search for setups) builds the watchlist. The scheduled job
+(every 30 minutes during market hours) answers ONE question per stock: **is it above its
+frozen pivot on ≥1.5× average volume?** Runs during the trading day read today's unfinished
+bar (flagged ``intraday``; ``volume_pace`` says whether volume is high for the time of day).
+The last run of the day (16:10) sees the settled close. :func:`check_triggers` answers from
+already-downloaded frames; the CLI wrapper (``refresh_job.py``) does the downloading, report
+saving, and scheduling.
 
-Pivots are FROZEN on the watchlist entry (``judged_pivot``, see ``export.py``). The
-detected pivot drifts with every scan, so a trigger against a recomputed level would move
-under your feet. An entry that arrives unfrozen is frozen ON FIRST SIGHT here
-(:func:`freeze_missing_pivots`, ``pivot_source="auto"``) and checked in the same run. The
-📌 button in the app overrides it with the level you judged (``pivot_source="judged"``).
+Pivots are FROZEN on the watchlist entry (``judged_pivot``, see ``export.py``): stored once
+and not recomputed. The detected pivot shifts with every scan, so a trigger against a
+recomputed level would keep moving. An entry that arrives without a frozen pivot gets one the
+first time this check sees it (:func:`freeze_missing_pivots`, ``pivot_source="auto"``) and is
+checked in the same run. The 📌 button in the app replaces it with the level you judged
+(``pivot_source="judged"``).
 
-Volume gate: last volume / prior 50-day average ≥ 1.5, Minervini's confirmation standard.
-It is the same 50-day read the positions page uses (``trade.HEAVY_VOL_RATIO``). The scan's
-"Vol OK" badge is a 20-day read (``detect_breakout``); it is reported as context
-(``volume_ratio_20``) but never gates.
+Volume rule: last volume / prior 50-day average ≥ 1.5, Minervini's confirmation standard.
+It is the same 50-day ratio the positions page uses (``trade.HEAVY_VOL_RATIO``). The scan's
+"Vol OK" badge is a 20-day ratio (``detect_breakout``); it is reported as context
+(``volume_ratio_20``) but never decides the trigger.
 """
 from __future__ import annotations
 
@@ -39,34 +41,34 @@ from .vcp import detect_vcp
 
 TRIGGER_VOL_RATIO = VOL_CONFIRM_RATIO   # breakout confirmation, vs the average of the
                                         # prior VOL_AVG_DAYS bars (today's bar excluded)
-VOL_CONTEXT_DAYS = 20       # the scan's window: reported as context, never the gate
-EXTENDED_PCT = NO_CHASE_PCT  # close > pivot * 1.05 = past the buy zone ("don't chase")
-PULLBACK_BAND = 0.02        # +/-2% of pivot = the low-risk secondary-entry zone; below
-                            # -2% the base is failing, not pulling back
+VOL_CONTEXT_DAYS = 20       # the scan's window: reported as context, never decides
+EXTENDED_PCT = NO_CHASE_PCT  # close > pivot * 1.05 = past the buy zone, too late to buy
+PULLBACK_BAND = 0.02        # +/-2% of pivot = the lower-risk zone for a second chance to
+                            # buy; below -2% the base is failing, not pulling back
 DRY_VOL_RATIO = 0.8         # "dry" = clearly below the 50-day average volume -- the
-                            # quiet-side mirror of the 1.5x confirmation gate
+                            # low-volume counterpart of the 1.5x confirmation rule
 MIN_ROWS_FOR_PIVOT = 200    # classify_phase needs >= 200 rows to compute a pivot
-TEMPLATE_CRITERIA = 8       # MUST mirror ScanConfig.min_criteria, the scan table's hard gate
+TEMPLATE_CRITERIA = 8       # MUST match ScanConfig.min_criteria (the scan table's minimum)
 
-# Intraday half-hourly runs: the session clock for the volume-pace read and the
-# provisional-bar flag.
+# Half-hourly runs during the trading day: the session clock for the volume pace and the
+# unfinished-bar flag.
 SESSION_OPEN_MIN = 9 * 60 + 30    # 09:30 ET, in minutes-of-day
 SESSION_LEN_MIN = 390             # 09:30 -> 16:00
-PACE_MIN_ELAPSED = 0.1            # clip: dividing by the first few minutes explodes the pace
+PACE_MIN_ELAPSED = 0.1            # floor: the first few minutes alone make the pace huge
 INTRADAY_CUTOFF_MIN = 16 * 60 + 5  # runs before ~16:05 ET see a provisional bar
 EARLY_CLOSE_LEN_MIN = 210         # NYSE half days close 13:00 -> a 09:30-13:00 session
 EARLY_CLOSE_CUTOFF_MIN = 13 * 60 + 5  # ...and the bar settles ~13:05 on those days
 
 REPORT_SCHEMA = 1
-# The full per-name status vocabulary, pinned by the test suite: a new status MUST be
-# registered here or the report test fails.
-# "untracked": the name fails the 8/8 trend template (it left the scan table).
-#   Kept on the watchlist, but its trigger is NOT evaluated until it re-qualifies.
-# "crossed": above the frozen pivot WITHOUT volume confirmation, the quiet drift the
-#   volume gate never fires on. Rendered loud so "it left without me" doesn't look like
-#   "still basing". NOT a buy signal.
-# "pullback": a name that crossed earlier is back within the band of its frozen pivot on
-#   dry volume, the low-risk secondary-entry setup. An alert to judge the chart, still
+# Every per-stock status, checked by the test suite: a new status MUST be added here or
+# the report test fails.
+# "untracked": the stock fails the 8/8 trend template (it left the scan table).
+#   Kept on the watchlist, but its trigger is NOT evaluated until it passes again.
+# "crossed": above the frozen pivot WITHOUT volume confirmation, a slow rise the volume
+#   rule never triggers on. Shown prominently so a stock that rose without triggering
+#   doesn't look like one still forming its base. NOT a buy signal.
+# "pullback": a stock that crossed earlier is back within the band of its frozen pivot on
+#   dry volume, a lower-risk second chance to buy. An alert to judge the chart, still
 #   not a buy signal.
 STATUSES = ("no_data", "untracked", "no_pivot", "stale", "extended", "triggered",
             "pullback", "crossed", "watch")
@@ -80,7 +82,7 @@ def _today_et(today=None) -> pd.Timestamp:
 
 
 def _now_et(now=None) -> pd.Timestamp:
-    """The run's wall clock in New York, tz-naive — pinned in tests like ``today``."""
+    """The run's wall clock in New York, tz-naive. Tests pass a fixed value, as with ``today``."""
     if now is not None:
         return pd.Timestamp(now)
     return pd.Timestamp.now(tz="America/New_York").tz_localize(None)
@@ -113,8 +115,8 @@ def _intraday_cutoff_min(date) -> int:
 def _session_elapsed(now: pd.Timestamp) -> float:
     """Fraction of the trading session elapsed at ``now`` (09:30-16:00, or 09:30-13:00 on
     an early-close half day): 0.0 pre-open, 1.0 at/after the close, clipped to
-    >= PACE_MIN_ELAPSED once trading has begun (the first minutes would otherwise explode
-    the pace ratio)."""
+    >= PACE_MIN_ELAPSED once trading has begun (the first minutes would otherwise make the
+    pace ratio huge)."""
     mins = now.hour * 60 + now.minute - SESSION_OPEN_MIN
     if mins <= 0:
         return 0.0
@@ -128,10 +130,10 @@ def no_session_since(mtime_epoch: float, now=None) -> bool:
     ET; ~13:05 on an early close), it stays good all evening, over the weekend, and
     through Monday pre-open. Sessions run weekday 09:30 to the settled-bar cutoff. The
     16:00-16:05 settle window counts as session time, so a cache written at 16:02
-    (possibly provisional volume) reads stale. Full-market holidays are NOT modeled (as
-    in ``_early_close``): a holiday weekday counts as a session, which fails SAFE, a
-    needless cheap top-up and never a stale serve. False when ``mtime_epoch`` is
-    unreadable."""
+    (volume possibly not final) reads stale. Full-market holidays are NOT modeled (as in
+    ``_early_close``): a holiday weekday counts as a session. That errs on the safe side:
+    at worst a needless small download of the missing recent days, never out-of-date data
+    shown as current. False when ``mtime_epoch`` is unreadable."""
     try:
         m = (pd.Timestamp(mtime_epoch, unit="s", tz="UTC")
              .tz_convert("America/New_York").tz_localize(None))
@@ -153,8 +155,8 @@ def no_session_since(mtime_epoch: float, now=None) -> bool:
 
 def bar_is_provisional(last_bar_date, now=None) -> bool:
     """True when ``last_bar_date`` is today's bar and the session hasn't settled (before
-    ~16:05 ET, ~13:05 on an early close). Its close is only the latest print. A read that
-    judges closes MUST drop it. Never raises; an unreadable date reads as settled."""
+    ~16:05 ET, ~13:05 on an early close). Its close is only the latest trade price. Code
+    that judges closes MUST drop it. Never raises; an unreadable date reads as settled."""
     try:
         n = _now_et(now)
         day = pd.Timestamp(last_bar_date).normalize()
@@ -167,12 +169,12 @@ def bar_is_provisional(last_bar_date, now=None) -> bool:
 def frame_settled_current(last_bar_date, now=None) -> bool:
     """True when a frame ENDING at ``last_bar_date`` already contains every bar that can
     exist: that bar's session has settled and no later session has started (evenings /
-    weekends / pre-open). The settled-close gate's content-side companion. The file mtime
-    says WHEN it was written; this says whether what's INSIDE is the latest settled data.
-    Without it, a lagging provider response persisted after the cutoff would serve a short
-    frame as "settled" for the whole no-session window. It MUST route through the
-    module-global ``no_session_since``: tests patch it there. Never raises; any error
-    reads as not current (the cheap top-up decides)."""
+    weekends / pre-open). The file mtime says WHEN a cache was written; this says whether
+    what's INSIDE is the latest settled data. Without it, a late data-provider response
+    saved after the cutoff would pass off a frame missing bars as "settled" until the next
+    session. It MUST call the module-global ``no_session_since``: tests patch it there.
+    Never raises; any error reads as not current (a small download of the missing recent
+    days then decides)."""
     try:
         day = pd.Timestamp(last_bar_date).normalize()
         end = day + pd.Timedelta(minutes=_intraday_cutoff_min(day))
@@ -206,11 +208,11 @@ def compute_scan_pivot(df: Optional[pd.DataFrame]) -> Optional[float]:
 
 def freeze_missing_pivots(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
                           today=None) -> Tuple[List[dict], List[str]]:
-    """Freeze on first sight: every unfrozen entry with a computable pivot gets it
-    recorded (``pivot_source="auto"``, ``date_added`` = the run date), so its trigger
-    level stops drifting. Pure: returns (updated entry COPIES, tickers frozen this run);
-    the caller persists. Entries that can't be computed (no or short frame, chain error)
-    come back unchanged and retry next run."""
+    """Freeze missing pivots: every entry without a frozen pivot that has a computable one
+    gets it recorded (``pivot_source="auto"``, ``date_added`` = the run date), so its
+    trigger level stops shifting. No file access: returns (updated entry COPIES, tickers
+    frozen this run); the caller saves them. Entries that can't be computed (no or short
+    frame, chain error) come back unchanged and are tried again next run."""
     run_date = _today_et(today).strftime("%Y-%m-%d")
     out: List[dict] = []
     frozen: List[str] = []
@@ -233,25 +235,27 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
               today=None, now=None) -> dict:
     """Evaluate ONE watchlist entry against its (already-refreshed) daily frame.
 
-    Returns the per-name report dict (see ``check_triggers``). ``status`` is a display
-    convenience with precedence no_data -> untracked -> no_pivot -> stale -> extended ->
-    triggered -> pullback -> crossed -> watch; the booleans stay authoritative.
-    Evaluation errors are recorded in ``error``, not raised.
+    Returns the per-stock report dict (see ``check_triggers``). ``status`` is for display,
+    with precedence no_data -> untracked -> no_pivot -> stale -> extended -> triggered ->
+    pullback -> crossed -> watch; the booleans are the values to trust. Evaluation errors
+    are recorded in ``error``, not raised.
 
-    * ``triggered``: close above the frozen pivot AND the 50-day volume gate AND a bar
-      dated today, so a Friday bar can't re-fire on a Monday-holiday run.
-    * ``crossed``: close above the pivot WITHOUT the volume confirm, the quiet drift the
-      trigger can't fire on. A name frozen after its breakout may sit here forever.
-      Informational, never a buy signal.
-    * ``pullback``: a prior settled close beat the band top (pivot × (1+PULLBACK_BAND))
-      on or after ``date_added``, and today's close is back within ±PULLBACK_BAND of the
-      pivot on dry volume. Extended (+5%) and triggered (≥1.5×) can't co-occur with it,
-      so only the pullback-over-crossed ordering matters. Stateless, so a
-      triggered-then-retraced name alerts whether or not the user bought it.
+    * ``triggered``: close above the frozen pivot AND the 50-day volume rule AND a bar
+      dated today, so a Friday bar can't trigger again on a Monday-holiday run.
+    * ``crossed``: close above the pivot WITHOUT volume confirmation, a slow rise the
+      trigger can't fire on. A stock frozen after its breakout may stay here forever.
+      For information, never a buy signal.
+    * ``pullback``: a prior settled close was above the band top (pivot ×
+      (1+PULLBACK_BAND)) on or after ``date_added``, and today's close is back within
+      ±PULLBACK_BAND of the pivot on dry volume. Extended (+5%) and triggered (≥1.5×)
+      can't happen at the same time as it, so only the pullback-over-crossed ordering
+      matters. It reads no positions or past reports, so a stock that triggered and then
+      fell back alerts whether or not the user bought it.
     * ``volume_pace``: the 50-day ratio divided by the fraction of the session elapsed
-      at ``now``. Is volume running hot for this time of day? Equals the plain ratio
-      after the close. Intraday context, NEVER the ``triggered`` gate. Pullback's DRY
-      read does use it, so a morning's mechanically low raw ratio can't read as dry."""
+      at ``now``. Is volume high for this time of day? Equals the plain ratio after the
+      close. Context during the day, NEVER part of the ``triggered`` test. Pullback's dry
+      check does use it, so a morning's raw ratio, low only because the day is young,
+      can't read as dry."""
     t = _today_et(today)
     out = {
         "ticker": entry.get("ticker"), "status": "no_data",
@@ -286,12 +290,13 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
             if frac > 0:                                  # pre-open -> no pace read
                 out["volume_pace"] = round(out["volume_ratio_50"] / frac, 2)
 
-        # A name that fails the trend template has LEFT the scan table. It stays on the
-        # watchlist, but its trigger isn't evaluated: a "breakout" on a broken-down base is
-        # noise, not a Minervini entry. Judged on the name's own frame, so the
-        # headless half-hourly job needs no universe scan. A frame too short to judge
-        # (< MIN_ROWS_FOR_PIVOT; the scan couldn't table it either) and any template-chain
-        # error MUST fail OPEN: keep evaluating, never blind the check.
+        # A stock that fails the trend template has LEFT the scan table. It stays on the
+        # watchlist, but its trigger isn't evaluated: a "breakout" from a broken-down base
+        # means nothing, it is not a Minervini entry. It is judged on the stock's own
+        # frame, so the half-hourly job doesn't need to scan every stock. A frame too short
+        # to judge (< MIN_ROWS_FOR_PIVOT; the scan couldn't list it either) and any
+        # ``template_chain`` error MUST NOT mark the stock untracked: the trigger is still
+        # evaluated.
         if len(df) >= MIN_ROWS_FOR_PIVOT:
             try:
                 chain = template_chain(df, close)
@@ -312,8 +317,8 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         vr = out["volume_ratio_50"]
         gate = vr
         if vr is not None and out["stale"] is False and out["early_close"]:
-            # A half session's volume against full-day averages understates by ~1.86x. The
-            # GATE is scaled so a genuinely heavy half day can still confirm (user
+            # A half session's volume against full-day averages reads ~1.86x too low. The
+            # value TESTED is scaled so a genuinely heavy half day can still confirm (user
             # decision). The displayed ratio stays RAW; the scaled value is reported too.
             gate = vr * (SESSION_LEN_MIN / _session_len_min(t))
             out["volume_ratio_50_scaled"] = round(gate, 2)
@@ -323,22 +328,23 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
         out["pct_from_pivot"] = round((close / pivot - 1.0) * 100.0, 2)
         out["triggered"] = bool(out["close_above_pivot"] and out["volume_confirmed"]
                                 and not out["stale"])
-        # A stale bar above the pivot is no more a live cross than a live trigger, and
-        # the raw boolean is authoritative.
+        # A stale bar above the pivot is not a live cross, just as it is not a live
+        # trigger. Callers trust the raw boolean, so it excludes stale bars too.
         out["crossed"] = bool(out["close_above_pivot"] and not out["volume_confirmed"]
                               and not out["stale"])
 
         prior = df["Close"].iloc[:-1]
         da = pd.to_datetime(entry.get("date_added"), errors="coerce")
         if pd.notna(da):
-            # Bars before the pivot decision don't count. After a re-freeze, a cross of
-            # the OLD level is not a cross of this one.
+            # Bars before the pivot was set don't count. After the pivot is frozen again, a
+            # cross of the OLD level is not a cross of this one.
             prior = prior[prior.index >= da.normalize()]
         out["crossed_earlier"] = bool((prior > pivot * (1.0 + PULLBACK_BAND)).any())
         dry = out["volume_pace"]
         if dry is not None and out["early_close"]:
-            # Pace normalizes within the short session only. Rescale it to full-day terms,
-            # by the same factor as the gate, so a normal half day isn't read as dry.
+            # Pace adjusts for time within the short session only. Rescale it to full-day
+            # terms, by the same factor as the volume test, so a normal half day isn't read
+            # as dry.
             dry = dry * (SESSION_LEN_MIN / _session_len_min(t))
         out["pullback"] = bool(out["crossed_earlier"] and out["stale"] is False
                                and abs(close / pivot - 1.0) <= PULLBACK_BAND
@@ -350,7 +356,7 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
                          else "pullback" if out["pullback"]
                          else "crossed" if out["crossed"]
                          else "watch")
-    except Exception as e:                                # per-name failures never abort the run
+    except Exception as e:                                # one stock failing never aborts the run
         out["error"] = str(e)
     return out
 
@@ -358,17 +364,17 @@ def check_one(entry: dict, df: Optional[pd.DataFrame], fund: Optional[dict], *,
 def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
                    fundamentals: Optional[Callable[[str], Optional[dict]]] = None,
                    spy: Optional[pd.DataFrame] = None, today=None, now=None) -> dict:
-    """Build the full report. Pure; deterministic under pinned ``today``/``now`` except
-    ``generated_at``, which is always the wall clock.
+    """Build the full report. No file or network access; for fixed ``today``/``now`` the
+    output is always the same except ``generated_at``, which is always the wall clock.
 
     Returns ``{schema, date, generated_at, spy, all_stale, early_close, intraday, names,
     summary}``. Entries that aren't dicts with a ticker are skipped. ``fundamentals`` is
     an optional per-ticker callable (the CLI passes a cached
     ``data_feed.get_fundamentals``); its failures count as "no earnings info", never
-    fatal. ``spy`` (if given, >= 200 rows) yields an ``analyze_spy_trend`` note. SPY-only
-    by design: the app banner's full regime needs universe breadth a scheduled check
-    shouldn't pay for. The ``intraday`` flag marks runs made on a live session bar (fresh
-    bar, before ~16:05 ET); close and volume are then provisional."""
+    fatal. ``spy`` (if given, >= 200 rows) yields an ``analyze_spy_trend`` note. SPY only,
+    on purpose: the app banner's full market view needs data on every stock, too slow for
+    a scheduled check. The ``intraday`` flag marks runs made on today's unfinished bar
+    (bar dated today, before ~16:05 ET); close and volume are then not final."""
     t = _today_et(today)
     now_t = _now_et(now)
     names: List[dict] = []
@@ -395,8 +401,8 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
     with_bars = [n for n in names if n["status"] != "no_data"]
     summary = {
         "n": len(names),
-        # by STATUS, not the raw booleans: an extended name that also cleared price+volume
-        # keeps triggered=True in its row, but the summary files it under "don't chase".
+        # by STATUS, not the raw booleans: an extended stock that also passed price+volume
+        # keeps triggered=True in its row, but the summary lists it as extended.
         "triggered": [n["ticker"] for n in names if n["status"] == "triggered"],
         "pullback": [n["ticker"] for n in names if n["status"] == "pullback"],
         "crossed": [n["ticker"] for n in names if n["status"] == "crossed"],
@@ -416,7 +422,7 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
         "spy": spy_note,
         "all_stale": bool(with_bars) and all(n["stale"] for n in with_bars),
         "early_close": bool(_early_close(t)),
-        # A live session bar: close/volume are provisional until ~16:05 ET (~13:05 on an
+        # Today's unfinished bar: close/volume are not final until ~16:05 ET (~13:05 on an
         # early-close half day).
         "intraday": bool(fresh
                          and now_t.hour * 60 + now_t.minute < _intraday_cutoff_min(t)),
@@ -426,18 +432,19 @@ def check_triggers(entries: Sequence[dict], prices: Dict[str, pd.DataFrame],
 
 
 # --------------------------------------------------------------------------- #
-# Report persistence: dated JSON files, newest wins.
+# Saving and loading reports: dated JSON files, newest wins.
 # --------------------------------------------------------------------------- #
 def save_trigger_report(report: dict, dir_path=None) -> Path:
     """Write ``triggers_YYYY-MM-DD.json`` and return its path. A same-day rerun
-    overwrites, so it is idempotent. ``dir_path`` defaults to ``cache.TRIGGERS_DIR``, read
+    overwrites the same file. ``dir_path`` defaults to ``cache.TRIGGERS_DIR``, read
     at CALL time so tests can patch it. A write failure raises; the temp file is removed.
 
-    The write MUST stay atomic (tmp + ``os.replace``, like data_feed's
-    ``_atomic_to_parquet``). The app's 🔔 button and the half-hourly job run in SEPARATE
-    processes and can hit the same day-file. An in-place write could interleave into
-    invalid JSON, which the loader skips. If that hit the 16:10 settled report, the
-    PREVIOUS day would serve all weekend."""
+    The write MUST go to a temp file that is then renamed (``os.replace``, like
+    data_feed's ``_atomic_to_parquet``), so a reader never sees a half-written file. The
+    app's 🔔 button and the half-hourly job run in SEPARATE processes and can write the
+    same day-file. Writing in place, the two could mix into invalid JSON, which the loader
+    skips. If that hit the 16:10 settled report, the PREVIOUS day's report would show all
+    weekend."""
     d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
     d.mkdir(parents=True, exist_ok=True)
     path = d / f"triggers_{report.get('date', 'undated')}.json"
@@ -457,8 +464,8 @@ def save_trigger_report(report: dict, dir_path=None) -> Path:
 
 def load_latest_trigger_report(dir_path=None) -> Optional[dict]:
     """Newest parseable ``triggers_*.json`` in the directory, or None (missing dir, no
-    files, all corrupt). It walks newest-first, so one corrupt file can't blind the app.
-    Never raises."""
+    files, all corrupt). It goes newest-first, so one corrupt file can't hide every report
+    from the app. Never raises."""
     try:
         d = Path(dir_path if dir_path is not None else cache.TRIGGERS_DIR)
         for path in sorted(d.glob("triggers_*.json"), reverse=True):
@@ -490,8 +497,8 @@ def _clock12(iso) -> str:
 
 
 def format_report(report: dict) -> str:
-    """ASCII-only console rendering. Trigger stdout lands in journald on the Pi, so this
-    MUST NOT emit emoji; icons live in the Streamlit surface."""
+    """The report as ASCII-only console text. The trigger job's stdout goes to journald on
+    the Raspberry Pi, so this MUST NOT emit emoji; icons belong in the Streamlit app."""
     lines: List[str] = []
     spy = report.get("spy") or {}
     spy_s = (f"SPY: {spy.get('trend', '?')} (phase {spy.get('phase', '?')})"

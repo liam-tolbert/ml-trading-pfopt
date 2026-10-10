@@ -1,10 +1,12 @@
-"""Trade journal page: "know your numbers" for the Minervini Trader Alpaca paper account.
+"""Trade journal page: "know your numbers" for the Minervini Trader Alpaca paper account
+(simulated money, no real trades).
 
-A page of its own, so it loads instantly. Closed round trips are rebuilt from the
-account's order history. Every cockpit order is tagged via client_order_id
-(SEPAoto-/SEPAstop-/SEPAcockpit-), so no separate bookkeeping is needed. The page shows the
-numbers Minervini says drive progressive exposure (*Think & Trade Like a Champion*): batting
-average, average win vs average loss, and per-trade expectancy.
+A page of its own, so it loads instantly. Closed trades (a buy and its matching sells) are
+rebuilt from the account's order history. Every cockpit order is tagged in its
+client_order_id (SEPAoto-/SEPAstop-/SEPAcockpit-), so no separate record is needed. The
+page shows the numbers Minervini uses to decide when to trade bigger (*Think & Trade Like a
+Champion*): batting average (the share of trades that win), average win vs average loss,
+and expectancy (the average return per trade).
 
 Run the app from the project root: ``streamlit run src/stock_screener/cockpit/app.py`` and
 pick "Journal" from the page nav.
@@ -22,16 +24,16 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
-from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
+from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared filled-orders cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
-from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
+from src.stock_screener.cockpit import trade  # noqa: E402 (module import: tests can replace it)
 
-# Warm the universe scan in the background, so it is under way by the time the user opens
-# the scan page. Inert under AppTest.
+# Start the stock scan in the background, so it is already running when the user opens
+# the scan page. Does nothing under AppTest.
 scan_worker.autostart()
 
 st.set_page_config(page_title="Journal", page_icon="🧾", layout="wide")
-# Mirror app.py's padding trim so the first row isn't buried under Streamlit's header.
+# Same reduced padding as app.py, so the first row isn't hidden under Streamlit's header.
 st.markdown(
     "<style>.block-container{padding-top:4rem;padding-bottom:2rem;}"
     'div[data-testid="stVerticalBlock"]{gap:0.6rem;}</style>',
@@ -86,7 +88,8 @@ open_eps = [t for t in journal["open"] if t["tagged"] or not only_tagged]
 stats = trade.journal_stats(closed)
 
 # --- Headline stats -------------------------------------------------------------------------- #
-# A metric value MUST hold at most one '$': two render as a LaTeX math span.
+# A metric value MUST hold at most one '$': with two, the text between them renders as
+# LaTeX math.
 m = st.columns(5)
 m[0].metric("Closed trades", str(stats["n"]), border=True)
 m[1].metric("Batting avg", _pct(stats["batting_avg"], digits=0), border=True,

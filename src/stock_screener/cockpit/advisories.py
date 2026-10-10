@@ -1,11 +1,12 @@
-"""Display-only SEPA reads, shown beside the numbers the cockpit acts on.
+"""Display-only SEPA checks, shown beside the numbers the cockpit acts on.
 
-Nothing here places, sizes or blocks an order. Each function returns a small verdict
-for a page caption or an evening-plan note. A read promoted to act MUST be gated by a
-doctrine switch read at call time, not changed here.
+Nothing here places, sizes or blocks an order. Each function returns a short result for a
+page caption or a note in the evening plan. A check that is later allowed to trade MUST be
+turned on by an on/off constant in the ``doctrine`` module, read at call time, not by
+changing this file.
 
 pandas and the indicator helpers are imported inside functions: ``trade.py`` imports
-this module and must not pull in the scan stack.
+this module, and importing it MUST NOT load pandas or the scan modules.
 """
 from __future__ import annotations
 
@@ -14,13 +15,13 @@ from typing import Optional
 from . import doctrine
 
 TYPICAL_DAY_BARS = 42       # MUST equal vcp.DEAD_TAPE_BARS, so the Scan and Positions
-                            # pages quote the same typical day
+                            # pages show the same typical day
 
 
 def typical_day_range(df, bars: int = TYPICAL_DAY_BARS) -> Optional[float]:
     """Median daily true range over the last ``bars`` sessions, as a fraction of price.
-    The median, so one gap day can't make a quiet stock look wild. None without enough
-    bars."""
+    The median, so one unusually wide day can't make a quiet stock look volatile. None
+    with fewer than ``bars + 1`` rows."""
     if df is None or len(df) < bars + 1:
         return None
     import numpy as np
@@ -31,7 +32,8 @@ def typical_day_range(df, bars: int = TYPICAL_DAY_BARS) -> Optional[float]:
 
 
 def stop_room(day_range, stop, fill) -> Optional[dict]:
-    """Typical days of movement between ``fill`` and ``stop``.
+    """How many typical days of movement lie between ``fill`` (the buy price) and
+    ``stop``.
 
     ``day_range`` is a fraction, as from :func:`typical_day_range`. Returns ``{loss_pct,
     room_days, warn}``; ``warn`` is set under ``STOP_ROOM_MIN_DAYS``. None when an input is
@@ -48,10 +50,10 @@ def stop_room(day_range, stop, fill) -> Optional[dict]:
             "warn": room < doctrine.STOP_ROOM_MIN_DAYS}
 
 
-POST_BREAKOUT_DAYS = 20     # a close under the 20-day line counts only in this window
+POST_BREAKOUT_DAYS = 20     # a close under the 20-day average counts only in this window
 SMA_SHORT = 20
 GIVEBACK_GAIN = 0.05        # a post-entry gain this big, fully given back, is a violation
-LOWER_LOWS_RUN = 3          # consecutive lower lows with no buying support
+LOWER_LOWS_RUN = 3          # days in a row with a lower low, and no heavy-volume up close
 
 
 def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
@@ -60,21 +62,21 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
 
     Violations are reasons to doubt the breakout:
 
-    * a close under the 20-day line within ``POST_BREAKOUT_DAYS``;
+    * a close under the 20-day average within ``POST_BREAKOUT_DAYS``;
     * a light-volume breakout day, then a heavy down day;
     * ``LOWER_LOWS_RUN`` lower lows in a row with no above-average-volume up close;
     * more down closes than up (3+ sessions);
     * more lower-half closes than upper-half;
-    * a close under the 50-day on heavy volume;
+    * a close under the 50-day average on heavy volume;
     * a ``GIVEBACK_GAIN`` gain fully given back.
 
     Follow-through is evidence it works: up closes on rising volume, 3 of the first 4 or 6
     of the first 8 sessions up, more upper-half closes, every dip recovered within 2
     sessions.
 
-    A live read (``today`` None) drops today's bar while the session is open: its close is
-    only the latest print. Returns ``{day_n, violations, follow_through, sma20,
-    provisional_dropped}``, or None without a frame or an entry date."""
+    With ``today`` None, today's bar is dropped while the market is open: its close is
+    only the latest trade price. Returns ``{day_n, violations, follow_through, sma20,
+    provisional_dropped}``, or None without a DataFrame or an entry date."""
     if df is None or not len(df) or entry_date is None:
         return None
     import numpy as np
@@ -118,7 +120,7 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
 
     violations, follow = [], []
 
-    # Strict "<", so a flat tape never trips it.
+    # Strict "<", so a close exactly on the average (a stock that hasn't moved) doesn't count.
     under = [d for d in range(1, min(n, POST_BREAKOUT_DAYS) + 1)
              if np.isfinite(s20[d]) and c[d] < s20[d]]
     sma20_note = None
@@ -138,7 +140,7 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
             violations.append(f"light-volume breakout ({vr[0]:.1f}×) then a heavy down "
                               f"day (day {hd[0]}, {vr[hd[0]]:.1f}×)")
 
-    # An up close on above-average volume is support: it resets the run.
+    # An up close on above-average volume shows buyers stepping in: it resets the count.
     run = 0
     for d in range(1, n + 1):
         support = d in ups and np.isfinite(vr[d]) and vr[d] >= 1.0
@@ -185,17 +187,18 @@ def post_breakout_read(df, entry_date, *, avg_entry=None, below_sma50=False,
 
 
 STRENGTH_CLIMAX_PCT = 0.25  # a rise this steep ...
-STRENGTH_CLIMAX_BARS = 15   # ... within about three weeks is a climax run
+STRENGTH_CLIMAX_BARS = 15   # ... within ~3 weeks is a climax run: a late, very steep rise
 STRENGTH_UP_DAYS = 7        # up closes out of
 STRENGTH_UP_WINDOW = 10     # the last this many sessions
-STRENGTH_GAP_BARS = 3       # a gap up this recent is "late in the run"
-STRENGTH_STALL_PCT = 0.01   # a heavy day closing within this of the prior close stalled
+STRENGTH_GAP_BARS = 3       # a gap up (low > prior high) this recent is "late in the run"
+STRENGTH_STALL_PCT = 0.01   # heavy volume, yet the close is within this of the prior close
 STRENGTH_MIN_DAYS = 5       # "biggest day of the run" needs a run to compare against
 
 
 def strength_signs(df, entry_date, *, avg_entry, today=None, now=None,
                    min_gain=None) -> Optional[dict]:
-    """The books' sell-into-strength signs on the latest settled close since the entry:
+    """The books' signs to sell part of a rising position, on the latest settled close
+    since the entry:
 
     * a ``STRENGTH_CLIMAX_PCT`` rise within ``STRENGTH_CLIMAX_BARS`` sessions;
     * ``STRENGTH_UP_DAYS`` of the last ``STRENGTH_UP_WINDOW`` sessions up;
@@ -207,9 +210,9 @@ def strength_signs(df, entry_date, *, avg_entry, today=None, now=None,
 
     The signs are read only at a gain of ``min_gain`` (default
     ``doctrine.STRENGTH_MIN_GAIN``) or more from ``avg_entry``; below it ``signs`` is [].
-    A live read (``today`` None) drops today's bar while the session is open. Returns
-    ``{signs, gain, day_n, provisional_dropped}``, or None without a frame, an entry date,
-    ``avg_entry`` or a bar on or after the entry."""
+    With ``today`` None, today's bar is dropped while the market is open. Returns
+    ``{signs, gain, day_n, provisional_dropped}``, or None without a DataFrame, an entry
+    date, ``avg_entry`` or a bar on or after the entry."""
     if df is None or not len(df) or entry_date is None or not avg_entry:
         return None
     import numpy as np
@@ -273,7 +276,8 @@ def strength_signs(df, entry_date, *, avg_entry, today=None, now=None,
 
 
 def regime_tier(label) -> str:
-    """The scan regime label's tier: ``strong``, ``weak``, ``off`` or ``unknown``.
+    """The tier of the scan's market-regime label: ``strong``, ``weak``, ``off`` or
+    ``unknown``.
     Matched by prefix. A substring test is wrong: "TRANSITIONAL" contains "on"."""
     s = str(label or "").strip().upper()
     if s.startswith("RISK-ON (STRONG)") or s.startswith("RISK-ON (MODERATE)"):
@@ -299,8 +303,8 @@ def _tape_tier(regime=None, spy_note=None):
 
 def weak_market_advice(regime=None, spy_note=None, *, stop_pct=None, target_pct=None,
                        risk_pct=None) -> Optional[str]:
-    """The book's weak-tape numbers beside the plan's own, as one caption. None in a
-    strong or unknown tape. Advice only."""
+    """Minervini's weak-market numbers beside the plan's own, as one caption. None when the
+    market is strong or unknown. Advice only."""
     tier, label = _tape_tier(regime, spy_note)
     if tier not in ("weak", "off"):
         return None
@@ -315,7 +319,7 @@ def weak_market_advice(regime=None, spy_note=None, *, stop_pct=None, target_pct=
 
 
 def in_weak_take_profit_band(gain_pct) -> bool:
-    """A gain inside the book's weak-market take-profit band (``WEAK_TAPE_TARGET_PCT``)."""
+    """A gain inside Minervini's weak-market take-profit band (``WEAK_TAPE_TARGET_PCT``)."""
     lo, hi = doctrine.WEAK_TAPE_TARGET_PCT
     # +0.5 pt: a gain that rounds to 12% is in the band.
     return gain_pct is not None and lo <= float(gain_pct) <= hi + 0.005
@@ -325,11 +329,12 @@ def spy_confirm_streak(spy_df, max_days: Optional[int] = None,
                        phase2_by_date: Optional[dict] = None) -> Optional[dict]:
     """Consecutive settled sessions, newest first, with SPY in Stage 1 or 2.
 
-    This is the re-entry lag after a market break. With ``phase2_by_date``
-    (``{'YYYY-MM-DD': phase2_pct}``) a session also needs breadth of at least
-    ``BREADTH_MIN_PHASE2``; a session missing from the map counts on SPY alone and sets
-    ``partial``. Without the map the count is SPY only. Counting stops at ``max_days``
-    (default ``REGIME_CONFIRM_DAYS``): older bars can't change the answer. Returns
+    This is the wait before buying again after the market turns down. With
+    ``phase2_by_date`` (``{'YYYY-MM-DD': phase2_pct}``) a session also needs at least
+    ``BREADTH_MIN_PHASE2`` percent of scanned stocks in Stage 2 (breadth); a session
+    missing from the map counts on SPY alone and sets ``partial``. Without the map the
+    count is SPY only. Counting stops at ``max_days`` (default ``REGIME_CONFIRM_DAYS``):
+    older bars can't change the answer. Returns
     ``{streak, satisfied, phase_now, breadth, partial}``; None under 200 bars."""
     if spy_df is None or len(spy_df) < 200:
         return None
@@ -362,8 +367,9 @@ def market_turn(spy_note, prior_market: Optional[dict] = None,
                 has_prior_plan: bool = True) -> dict:
     """Whether SPY entered Stage 4 since the previous plan.
 
-    ``turn`` fires on the entering evening only. Firing every evening in Stage 4 would
-    halve the book night after night. ``prior_market`` is the previous plan's ``market``
+    ``turn`` is True on the first evening in Stage 4 only. True every evening in Stage 4
+    would halve the positions night after night. ``prior_market`` is the previous plan's
+    ``market``
     record. Without one the turn can't be dated, so Stage 4 reads ``unconfirmed``.
     Returns ``{spy_phase, stage4, turn, unconfirmed}``."""
     ph = (spy_note or {}).get("phase") if isinstance(spy_note, dict) else None
@@ -374,7 +380,7 @@ def market_turn(spy_note, prior_market: Optional[dict] = None,
     return {"spy_phase": ph, "stage4": stage4, "turn": turn, "unconfirmed": unconfirmed}
 
 
-DEPTH_VS_MARKET_MAX = 3.0   # the books: avoid a name that fell more than ~2.5-3x the market
+DEPTH_VS_MARKET_MAX = 3.0   # the books: avoid a stock that fell more than ~2.5-3x the market
 
 
 def _naive_index(frame):
@@ -403,10 +409,10 @@ def depth_vs_market(df, spy, contractions) -> Optional[dict]:
 
     The window runs from the first selected contraction's ``peak_date`` to the last
     bar. Both depths are the deepest fall from a running high inside it. Returns
-    ``{depth_pct, spy_depth_pct, ratio, flag}`` (percent, ratio to 1 dp; ``flag`` at
-    ``DEPTH_VS_MARKET_MAX``). None without contractions, without two bars of either
-    frame in the window, or when the market fell under 1%: a ratio to a flat market
-    means nothing."""
+    ``{depth_pct, spy_depth_pct, ratio, flag}`` (percent, ratio to 1 decimal place;
+    ``flag`` at ``DEPTH_VS_MARKET_MAX``). None without contractions, without two bars of
+    either DataFrame in the window, or when the market fell under 1%: a ratio to a flat
+    market means nothing."""
     if df is None or spy is None or not contractions:
         return None
     import pandas as pd
@@ -440,14 +446,14 @@ def depth_vs_market_text(depth: Optional[dict]) -> str:
     return body + "."
 
 
-CONCENTRATION_NAMES = 3     # this many held names in one industry is a concentration
-CONCENTRATION_SHARE = 0.5   # ...or this share of the book, once there are two or more
-GROUP_LEADERS = 3           # the industry's top names by RS, whose breakdown is a warning
+CONCENTRATION_NAMES = 3     # this many held stocks in one industry is too many
+CONCENTRATION_SHARE = 0.5   # ...or this share of the positions, once there are two or more
+GROUP_LEADERS = 3           # the industry's top stocks by RS; one breaking down is a warning
 
 
 def industry_concentration(positions) -> Optional[str]:
-    """A warning when the book leans on one industry: ``CONCENTRATION_NAMES`` names in it,
-    or ``CONCENTRATION_SHARE`` of two or more positions. Counts names, not dollars.
+    """A warning when the positions lean on one industry: ``CONCENTRATION_NAMES`` stocks in
+    it, or ``CONCENTRATION_SHARE`` of two or more positions. Counts stocks, not dollars.
     Positions without an industry are left out of both counts. None otherwise."""
     from collections import Counter
     inds = [p.get("industry") for p in positions or [] if p.get("industry")]
@@ -462,10 +468,10 @@ def industry_concentration(positions) -> Optional[str]:
 
 
 def group_leader_break(industry, candidates, payloads, exclude=None) -> Optional[str]:
-    """A warning when one of the industry's top ``GROUP_LEADERS`` scan names by RS (other
-    than ``exclude``) closed below its 50-day on heavy volume. ``candidates`` is the scan
-    table (``ticker``, ``rs``, ``industry``); ``payloads`` holds each name's frame. None
-    without an industry, a scan, or a break."""
+    """A warning when one of the industry's top ``GROUP_LEADERS`` scanned stocks by RS
+    (other than ``exclude``) closed below its 50-day average on heavy volume.
+    ``candidates`` is the scan table (``ticker``, ``rs``, ``industry``); ``payloads`` holds
+    each stock's price DataFrame. None without an industry, a scan, or such a close."""
     if not industry or candidates is None or not len(candidates) \
             or "industry" not in candidates.columns:
         return None
@@ -510,8 +516,8 @@ def earnings_reaction(df, report_date, report_time=None) -> Optional[dict]:
     ``VOL_AVG_DAYS`` bars before it; ``since_pct`` is the last close against the reaction
     close. ``flag`` is ``"hard_drop"`` for a fall of ``EARNINGS_REACTION_PCT`` or more on
     ``VOL_CONFIRM_RATIO`` volume, ``"strong"`` for the same rise, else None. None when the
-    date is missing, outside ``df``, its reaction bar hasn't printed, or the release is more
-    than ``REPORT_MAX_AGE_DAYS`` before the last bar."""
+    date is missing, outside ``df``, its reaction bar isn't in ``df`` yet, or the release
+    is more than ``REPORT_MAX_AGE_DAYS`` before the last bar."""
     if df is None or not report_date or len(df) < 2:
         return None
     import pandas as pd
@@ -600,10 +606,11 @@ def volume_dryup(df, contractions) -> Optional[dict]:
     quiet_dates}``; ``quiet_dates`` is ``[(Timestamp, ratio)]`` for the chart.
 
     The window runs from the final contraction's peak to the last bar, stopping before the
-    first close above that peak, so a name that has broken out is judged on its tight area,
-    not on the breakout. The baseline is the ``VOL_AVG_DAYS`` average before that peak.
-    ``quiet_days`` counts window bars at or under ``DRYUP_QUIET_RATIO`` of it. No verdict:
-    on the benchmark the read doesn't separate good bases from bad (HANDOFF §6.91, §6.100).
+    first close above that peak, so a stock that has broken out is judged on its tight
+    area, not on the breakout. The baseline is the ``VOL_AVG_DAYS`` average before that
+    peak. ``quiet_days`` counts window bars at or under ``DRYUP_QUIET_RATIO`` of it. No
+    verdict: on the 200-chart benchmark this measure doesn't separate good bases from bad
+    (HANDOFF §6.91, §6.100).
     Zero-volume bars are data gaps and are ignored. None without contractions, a Volume
     column, a baseline, or 3 window bars."""
     if df is None or not contractions or "Volume" not in df:
@@ -638,7 +645,7 @@ def volume_dryup_text(read: Optional[dict]) -> str:
 
 
 def step3_marks(payload: Optional[dict]) -> list:
-    """Chart markers for a scan payload's Step-3 reads, in ``charts.build_chart``'s
+    """Chart markers for a scan payload's Step-3 checks, in ``charts.build_chart``'s
     ``marks`` shape. Empty for a payload without them (an older scan)."""
     marks = []
     for ts, r in ((payload or {}).get("dryup") or {}).get("quiet_dates") or []:
@@ -650,8 +657,8 @@ def step3_marks(payload: Optional[dict]) -> list:
 def book_tightening(contractions, base_weeks=None) -> Optional[dict]:
     """Each contraction's depth over the one before, for comparison with the books' rule
     of thumb (each dip about half the last): ``{depths, ratios, base_weeks}``. No verdict:
-    on the benchmark it doesn't separate good bases from bad (HANDOFF §6.94, §6.100). None
-    with fewer than 2 contractions."""
+    on the 200-chart benchmark it doesn't separate good bases from bad (HANDOFF §6.94,
+    §6.100). None with fewer than 2 contractions."""
     if not contractions or len(contractions) < 2:
         return None
     depths = [float(c["drawdown_pct"]) for c in contractions]
@@ -663,7 +670,7 @@ def book_tightening(contractions, base_weeks=None) -> Optional[dict]:
 
 def book_tightening_text(read: Optional[dict]) -> str:
     """A Step-3 caption for a :func:`book_tightening` result; empty when unknown. The
-    base length is shown, not judged: the detector's measure under-reads (§10)."""
+    base length is shown, not judged: the detector measures it too short (§10)."""
     if not read:
         return ""
     dips = " → ".join(f"{d:.0f}%" for d in read["depths"])

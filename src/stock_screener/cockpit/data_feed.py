@@ -1,14 +1,18 @@
-"""Market data for the cockpit: universes, daily prices and fundamentals.
+"""Market data for the cockpit: universes (lists of tickers to screen), daily prices and
+fundamentals.
 
-Built on yfinance, requests and the SEC EDGAR API. The vendored screener has no data
-layer of its own (see ``minervini_screener/PROVENANCE.md``).
+Built on yfinance, requests and the SEC EDGAR API. The copy of ``minervini_screener``
+kept in this repo has no data code of its own (see ``minervini_screener/PROVENANCE.md``).
 
-Public surface:
-- ``get_universe(name)``         -> list[str] of yfinance-normalized symbols
-- ``get_prices(ticker)``         -> daily OHLCV DataFrame (cached parquet, age-refreshed)
-- ``get_many_prices(tickers)``   -> {ticker: DataFrame}, threaded
+Public functions:
+- ``get_universe(name)``         -> list[str] of symbols in yfinance's spelling
+- ``get_prices(ticker)``         -> daily OHLCV (open, high, low, close, volume)
+                                    DataFrame, cached as parquet, re-downloaded when old
+- ``get_many_prices(tickers)``   -> {ticker: DataFrame}, cache reads in parallel threads
 - ``get_spy()``                  -> SPY daily OHLCV
 - ``get_fundamentals(ticker)``   -> dict of growth/margin metrics (or None)
+
+A "bar" is one day's OHLCV row.
 """
 from __future__ import annotations
 
@@ -27,9 +31,10 @@ from .cache import (CACHE_DIR, EDGAR_DIR, FUNDAMENTALS_DIR, PRICES_DIR,
                     age_days, ensure_dirs)
 from .runlog import get_logger
 
-# get_many_prices MUST log one summary line per call, never one per ticker. A full-US
-# sweep touches ~4,200 names, and per-name records would cost more writes than the price
-# cache itself. Failed symbols are named, up to _FAILED_SAMPLE: they are what to act on.
+# get_many_prices MUST log one summary line per call, never one per ticker. One download
+# pass over the full US list covers ~4,200 tickers, and a line per ticker would cost more
+# writes than the price cache itself. Failed symbols are named, up to _FAILED_SAMPLE:
+# they are what to act on.
 _LOG = get_logger("prices")
 _FAILED_SAMPLE = 12
 
@@ -44,25 +49,28 @@ SP500_CSV_URL = (
 NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
 OTHER_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 US_COMMON_CSV = "us_common_universe.csv"
-# Names that betray a fund/ETF/note rather than an operating company.
+# Security names that mark a fund, ETF or note rather than an operating company.
 _ETF_NAME_RE = r"ETF|FUND|TRUST|INDEX|PORTFOLIO|SHARES|NOTES|BOND|TREASURY"
-# Max relative Close divergence on overlapping settled bars. Above it, yfinance has
-# re-adjusted the history for a split or dividend. Appending would splice two adjustment
-# bases, so the name is refetched in full.
+# Largest allowed relative Close difference on settled bars present in both the cache and
+# the new download. Above it, yfinance has re-adjusted the history for a split or
+# dividend. Appending would mix prices on two different adjustment scales, so the ticker
+# is downloaded again in full.
 SPLIT_TOL = 0.005
 _OHLCV = ["Open", "High", "Low", "Close", "Volume"]
-# Pool size for the cache-read pre-pass. It does local parquet reads only, and pyarrow
-# releases the GIL: ~1.7x over serial on a 4,200-name warm scan. yf.download stays serial.
+# Thread count for the first pass, which reads the cached parquets. It does local reads
+# only, and pyarrow lets threads read in parallel: ~1.7x faster than one thread on a
+# 4,200-ticker scan with every file already saved. yf.download still runs one call at a
+# time.
 _CACHE_READ_WORKERS = 16
-# Serializes yf.download across the process. yfinance resets a module-global result dict
-# at the top of every download() and spin-waits on its length with no timeout. Two
-# concurrent calls wipe each other's frames, and the loser can hang forever.
-# scan_worker's _SCAN_SERIAL orders scans only against each other. Every fetch in the
+# Lets only one yf.download run at a time in this process. yfinance resets a module-global
+# result dict at the top of every download() and loops until its length is right, with no
+# timeout. Two calls at once wipe each other's frames, and one of them can hang forever.
+# scan_worker's _SCAN_SERIAL only stops two scans running at once. Every fetch in the
 # process MUST take this lock: freshen_prices, the Check-triggers button and the Positions
 # page run beside the background scan thread. It is held per attempt and released during
-# retry backoff, so a waiting fetch blocks for about one attempt, not a retry cycle.
-# Another process, such as the scheduled refresh job, has its own yfinance globals; shared
-# cache files are protected by _atomic_to_parquet.
+# the wait between retries, so a waiting fetch waits about one attempt, not a whole series
+# of retries. Another process, such as the scheduled refresh job, has its own yfinance
+# globals; _atomic_to_parquet keeps the shared cache files from being read half-written.
 _YF_LOCK = threading.Lock()
 
 
@@ -70,8 +78,8 @@ def network_busy() -> bool:
     """True while a thread holds ``_YF_LOCK`` inside ``yf.download``.
 
     Interactive pages check it and read cache-only (``allow_network=False``) rather than
-    queue behind a multi-minute bulk sweep. Selling a position MUST NOT wait on a
-    4,000-name download."""
+    wait behind a download of every ticker, which can take minutes. Selling a position
+    MUST NOT wait on a 4,000-ticker download."""
     return _YF_LOCK.locked()
 
 
@@ -109,12 +117,12 @@ def _get_sp500(force: bool, max_age_days: float) -> List[str]:
         ensure_dirs()
         pd.Series(sorted(set(syms)), name="Symbol").to_csv(path, index=False)
         return [normalize(s) for s in sorted(set(syms))]
-    if path.exists():                       # stale-but-present beats nothing
+    if path.exists():                       # an old file beats nothing
         cached = _syms_from_csv(path)
         if cached:
             return cached
-    return []                               # empty is LOUD: callers report "no tickers"
-                                            # rather than screening a silent subset
+    return []                               # empty on purpose: callers report "no tickers"
+                                            # rather than quietly screening fewer
 
 
 def _syms_from_csv(path) -> List[str]:
@@ -158,9 +166,9 @@ def _fetch_sp500_wikipedia() -> Optional[List[str]]:
 
 
 def _get_us_common(force: bool, max_age_days: float) -> List[str]:
-    """US common stocks (~3-4.5k), cached like sp500. Listings churn, so the cache age is
-    capped at 1 day. The fallbacks MUST NOT touch the network: the stale full_us cache,
-    then the sp500 cache, then empty."""
+    """US common stocks (~3-4.5k), cached like sp500. Listings change often, so the cache
+    age is capped at 1 day. The fallbacks MUST NOT touch the network: the old full_us
+    cache, then the sp500 cache, then empty."""
     path = CACHE_DIR / US_COMMON_CSV
     max_age_days = min(max_age_days, 1.0)
     if not force and path.exists() and age_days(path) <= max_age_days:
@@ -172,7 +180,7 @@ def _get_us_common(force: bool, max_age_days: float) -> List[str]:
         ensure_dirs()
         pd.Series(sorted(set(syms)), name="Symbol").to_csv(path, index=False)
         return [normalize(s) for s in sorted(set(syms))]
-    if path.exists():                              # stale-but-present beats nothing
+    if path.exists():                              # an old file beats nothing
         cached = _syms_from_csv(path)
         if cached:
             return cached
@@ -181,12 +189,13 @@ def _get_us_common(force: bool, max_age_days: float) -> List[str]:
         cached = _syms_from_csv(sp)
         if cached:
             return cached
-    return []                                      # empty is LOUD; see _get_sp500
+    return []                                      # empty on purpose; see _get_sp500
 
 
 def _fetch_us_common_nasdaqtrader() -> Optional[List[str]]:
-    """NASDAQ + NYSE/AMEX common stocks from the nasdaqtrader SymDir over HTTPS.
-    Returns raw (pre-normalize) symbols, or None if nothing could be fetched."""
+    """NASDAQ + NYSE/AMEX common stocks from the nasdaqtrader symbol directory files over
+    HTTPS. Returns symbols as listed, before ``normalize``, or None if nothing could be
+    fetched."""
     try:
         import requests
         frames = []
@@ -198,7 +207,7 @@ def _fetch_us_common_nasdaqtrader() -> Optional[List[str]]:
             # Test Issue == 'N' also drops the trailing "File Creation Time" footer row:
             # its Test Issue is NaN.
             df = df[df["Test Issue"] == "N"]
-            if "ETF" in df.columns:                 # exchange ETF flag: stronger than a name guess
+            if "ETF" in df.columns:                 # the exchange's ETF flag beats guessing by name
                 df = df[df["ETF"] != "Y"]
             df = df.rename(columns={sym_col: "symbol", "Security Name": "name"})
             frames.append(df[["symbol", "name"]])
@@ -215,9 +224,10 @@ def _filter_us_symbols(df: pd.DataFrame) -> pd.DataFrame:
     """The rows of ``df`` that look like common stock: 1-5 uppercase letters, none of
     $ ^ . -, not a warrant/right/unit, not a fund/ETF/note name.
 
-    Warrants, rights and units are matched by the SymDir shape: a 4-letter base plus W, R
-    or U. A plain ``(?:W|R|U)$`` would drop ordinary names such as PLTR, SNOW, UBER and U.
-    A 3-letter base plus W still passes; such a warrant just fails the trend template.
+    Warrants, rights and units are matched by how the symbol directory spells them: a
+    4-letter base plus W, R or U. A plain ``(?:W|R|U)$`` would drop ordinary tickers such
+    as PLTR, SNOW, UBER and U. A 3-letter base plus W still passes; such a warrant just
+    fails the Trend Template.
     Dotted class shares (BRK.B, BF.B) are dropped."""
     if df.empty:
         return df
@@ -239,7 +249,7 @@ def _clean_prices(df: pd.DataFrame) -> Optional[pd.DataFrame]:
     df = df.copy()
     if isinstance(df.columns, pd.MultiIndex):          # single-ticker download
         df.columns = df.columns.get_level_values(0)
-    df = df.loc[:, ~df.columns.duplicated()]            # yfinance can double columns under threads
+    df = df.loc[:, ~df.columns.duplicated()]            # yfinance can repeat columns when threaded
     cols = [c for c in _OHLCV if c in df.columns]
     if "Close" not in cols:
         return None
@@ -254,10 +264,12 @@ def _clean_prices(df: pd.DataFrame) -> Optional[pd.DataFrame]:
 
 def _download_batch(yf, part, retries: int, pause: float, **dl):
     """``yf.download(part, **dl)``, retried up to ``retries`` times on an empty or failed
-    result, with backoff doubling from ``pause`` seconds. Returns the first non-empty
-    frame, else the last attempt's result: an empty frame, or None if it raised.
+    result. The wait before a retry starts at ``pause`` seconds and doubles each time.
+    Returns the first non-empty frame, else the last attempt's result: an empty frame, or
+    None if it raised.
 
-    ``**dl`` carries ``period=`` for a full fetch or ``start=`` for a top-up."""
+    ``**dl`` carries ``period=`` for a full download or ``start=`` for a download of only
+    the missing recent days."""
     raw = None
     for attempt in range(retries + 1):
         try:
@@ -294,22 +306,24 @@ def _merge_incremental(cached: pd.DataFrame, new: Optional[pd.DataFrame],
     """Merge ``new`` bars into ``cached``, trimmed to ``lookback``. Returns
     ``(df, needs_full)``.
 
-    Where the two overlap, ``new`` wins. ``needs_full`` is True, with ``cached`` returned
-    as is, when settled overlap diverges beyond ``SPLIT_TOL``: yfinance has re-adjusted
-    the history, and the caller SHOULD refetch it in full. An empty or None ``new`` returns
-    ``(cached, False)``."""
+    On dates in both, ``new`` wins. ``needs_full`` is True, with ``cached`` returned as
+    is, when the settled closes on those dates differ by more than ``SPLIT_TOL``: yfinance
+    has re-adjusted the history, and the caller SHOULD download it again in full. An empty
+    or None ``new`` returns ``(cached, False)``."""
     if new is None or not len(new):
         return cached, False
     common = cached.index.intersection(new.index)
-    # Today's bar is provisional: its close moves between intraday fetches. Only settled
-    # overlap is compared, or every intraday refresh would read as a re-adjustment.
+    # Today's bar is provisional: its close moves between downloads during the trading
+    # day. Only settled bars are compared, or every such refresh would look like a
+    # re-adjustment.
     common = common[common < pd.Timestamp.today().normalize()]
-    # The cache's last bar can be provisional too: an intraday scan persists a mid-session
-    # close. Compared next day with the settled close, it would read as a split and force a
-    # full refetch of every name that moved. The merge overwrites that bar anyway, so it is
-    # left out when older overlap exists; a real re-adjustment rescales those bars too. As
-    # the only overlap it stays in: some evidence beats none, and a rare false full refetch
-    # on a near-empty cache is cheap.
+    # The cache's last bar can be provisional too: a scan during the trading day saves a
+    # close from mid-session. Compared next day with the settled close, it would look like
+    # a split and force a full download of every ticker that moved. The merge overwrites
+    # that bar anyway, so it is left out when older shared dates exist; a real
+    # re-adjustment rescales those bars too. As the only shared date it stays in: some
+    # evidence beats none, and a rare needless full download on a near-empty cache is
+    # cheap.
     if len(common) > 1:
         common = common[common < cached.index[-1]]
     if len(common):
@@ -328,8 +342,8 @@ def get_prices(ticker: str, lookback: str = "2y", force: bool = False,
                max_age_days: float = 1.0, incremental: bool = True,
                overlap_days: int = 5, max_gap_days: int = 10) -> Optional[pd.DataFrame]:
     """Daily auto-adjusted OHLCV for one ticker, or None when there is neither data nor a
-    cache. A wrapper over :func:`get_many_prices`, so it shares that function's cache,
-    top-up, re-baseline, retry and stale-cache fallback."""
+    cache. A wrapper over :func:`get_many_prices`, so it shares that function's cache rules,
+    retries and fallback to an old cache."""
     sym = normalize(ticker)
     return get_many_prices([sym], lookback=lookback, force=force,
                            max_age_days=max_age_days, incremental=incremental,
@@ -343,7 +357,8 @@ def _fmt_us(ts) -> str:
 
 
 def _incr_detail(last, today) -> str:
-    """Progress text for a top-up: the missing-day range, e.g. ``'7/20/2026 - 7/22/2026'``.
+    """Progress text for a download of only the missing recent days: their date range,
+    e.g. ``'7/20/2026 - 7/22/2026'``.
     Just today's date when ``last`` is today or yesterday. The overlap days refetched for
     split detection are left out on purpose."""
     start = pd.Timestamp(last).normalize() + pd.Timedelta(days=1)
@@ -366,7 +381,7 @@ def _extract_ticker(raw: pd.DataFrame, sym: str) -> Optional[pd.DataFrame]:
     return raw
 
 
-_TRIGGERS = None                    # lazily-cached triggers MODULE (see _cache_settled)
+_TRIGGERS = None                    # triggers MODULE, imported on first use (see _cache_settled)
 
 
 def _cache_settled(path) -> bool:
@@ -375,8 +390,9 @@ def _cache_settled(path) -> bool:
     calendar is ``triggers.no_session_since``. Never raises; a missing file or any error
     reads False.
 
-    The triggers module is cached, since this runs once per name in the pre-pass.
-    ``no_session_since`` MUST be looked up per call: tests patch it on the module."""
+    The triggers module is kept in ``_TRIGGERS`` after the first import, since this runs
+    once per ticker in the first pass over the cache. ``no_session_since`` MUST be looked up per call: tests
+    patch it on the module."""
     global _TRIGGERS
     try:
         if _TRIGGERS is None:
@@ -388,8 +404,8 @@ def _cache_settled(path) -> bool:
 
 
 def _frame_settled_current(last_bar_date) -> bool:
-    """``triggers.frame_settled_current(last_bar_date)``, with the module cached as in
-    :func:`_cache_settled`. Never raises; errors read False."""
+    """``triggers.frame_settled_current(last_bar_date)``, with the module kept in
+    ``_TRIGGERS`` as in :func:`_cache_settled`. Never raises; errors read False."""
     global _TRIGGERS
     try:
         if _TRIGGERS is None:
@@ -402,8 +418,9 @@ def _frame_settled_current(last_bar_date) -> bool:
 
 def _atomic_to_parquet(df: pd.DataFrame, path: Path) -> None:
     """Write ``df`` to ``path`` through a temp file and ``os.replace``, so a reader never
-    sees a torn file. The app and the refresh jobs are separate processes that share these
-    files, and the pre-pass treats a torn parquet as missing: a full refetch.
+    sees a half-written file. The app and the refresh jobs are separate processes that
+    share these files, and the first pass over the cache treats a half-written parquet as
+    missing, which means a full download.
 
     Raises on failure and leaves the old file intact. On Windows the replace can raise
     PermissionError while another process holds the file open."""
@@ -421,12 +438,12 @@ def _atomic_to_parquet(df: pd.DataFrame, path: Path) -> None:
 
 def _log_fetch(kind: str, requested: int, cached: int, topup: int, full: int,
                wrote: int, failed: List[str], t0: float) -> None:
-    """Log one summary line for a sweep, plus a warning naming up to ``_FAILED_SAMPLE``
-    failed symbols. The line MUST stay ASCII, for journald and grep.
+    """Log one summary line for one ``get_many_prices`` call, plus a warning naming up to
+    ``_FAILED_SAMPLE`` failed symbols. The line MUST stay ASCII, for journald and grep.
 
-    ``cached`` names never touched the network. An all-cached line records that the box
-    chose not to download. Parquet mtimes can't show that: an unchanged mtime looks the
-    same as a sweep that never ran."""
+    ``cached`` tickers never touched the network. An all-cached line records that the
+    Raspberry Pi chose not to download. Parquet mtimes can't show that: an unchanged mtime
+    looks the same as a call that never ran."""
     _LOG.info("%s: %d requested  cached %d  topup %d  full %d  wrote %d  failed %d  %.1fs",
               kind, requested, cached, topup, full, wrote, len(failed), time.time() - t0)
     if failed:
@@ -445,55 +462,55 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                     allow_network: bool = True
                     ) -> Dict[str, pd.DataFrame]:
     """Daily auto-adjusted OHLCV for ``tickers``, as ``{normalized symbol: DataFrame}``. A
-    name with neither data nor a cache is absent.
+    ticker with neither data nor a cache is absent.
 
     Downloads use yfinance's batch call (``group_by='ticker'``) in chunks of ``chunk``,
-    with ``pause`` seconds between batches and ``retries`` with backoff, so a large
-    universe isn't rate-limited into dropped batches. Concurrent single-ticker
-    ``yf.download`` calls race on yfinance's global state and return the wrong ticker's
-    data.
+    with ``pause`` seconds between batches and ``retries`` with growing waits, so
+    yfinance's rate limit doesn't drop batches on a large universe. Single-ticker
+    ``yf.download`` calls run at the same time overwrite each other in yfinance's global
+    state and return the wrong ticker's data.
 
-    Each name's parquet cache decides its fetch:
+    Each ticker's parquet cache decides its download:
 
-    * age within ``max_age_days``: served as is;
-    * written with no market session since, and its last bar current: served as is, even
-      at ``max_age_days=0``, since no new bar can exist;
-    * a gap of at most ``max_gap_days``: topped up from one shared ``start``,
-      ``overlap_days`` before the oldest last bar;
+    * age within ``max_age_days``: returned as is;
+    * written with no market session since, and its last bar current: returned as is,
+      even at ``max_age_days=0``, since no new bar can exist;
+    * a gap of at most ``max_gap_days``: only the missing recent days are downloaded,
+      from one shared ``start``, ``overlap_days`` before the oldest last bar;
     * no cache, a longer gap, ``incremental=False`` or a split/dividend re-adjustment: a
-      full ``lookback`` refetch, which re-baselines the adjusted history.
+      full ``lookback`` download, which replaces the whole adjusted history.
 
-    With ``max_age_days=0`` only the settled-close rule serves a cache as is. The EOD
-    sweep uses it to take the settled close with a top-up, not a full refetch. A
-    negative ``max_age_days`` also skips the settled-close serve; it is the tests'
-    sentinel. ``force=True`` refetches everything. A failed full fetch serves the stale
-    parquet when one exists.
+    With ``max_age_days=0`` only the settled-close rule returns a cache as is. The
+    end-of-day download uses it to get the settled close by downloading only the missing
+    days, not the full history. A negative ``max_age_days`` also skips the settled-close
+    rule; tests pass it to reach the missing-days code. ``force=True`` downloads
+    everything in full. A failed full download returns the old parquet when one exists.
 
-    ``allow_network=False`` is cache-only: every name comes from its parquet as is, with
-    no fetch and no wait on ``_YF_LOCK``. Interactive pages pair it with
+    ``allow_network=False`` is cache-only: every ticker comes from its parquet as is, with
+    no download and no wait on ``_YF_LOCK``. Interactive pages pair it with
     :func:`network_busy`.
 
-    ``progress(done, total, text)`` is called once per name. Logs one summary line.
+    ``progress(done, total, text)`` is called once per ticker. Logs one summary line.
     """
     ensure_dirs()
     syms = [normalize(t) for t in tickers]
     out: Dict[str, pd.DataFrame] = {}
-    full_fetch: List[str] = []                 # need full period=lookback (cold / re-baseline)
+    full_fetch: List[str] = []                 # need full period=lookback (no cache / re-adjusted)
     incr: Dict[str, tuple] = {}                # sym -> (cached_df, last_date)
     today = pd.Timestamp.today().normalize()
     total = len(syms)
     done = 0
 
     _t0 = time.time()
-    _wrote = 0                                 # parquets actually rewritten this sweep
-    _rebaselined = 0                           # top-ups that fell back to a full refetch
-    _failed: List[str] = []                    # names the provider returned nothing for
+    _wrote = 0                                 # parquets actually rewritten this call
+    _rebaselined = 0                           # missing-days tickers moved to full
+    _failed: List[str] = []                    # tickers yfinance returned nothing for
 
     _emit_lock = threading.Lock()
 
     def _emit(sym: str, detail: str = "") -> None:
-        # ``detail`` says what was fetched for this name, for the UI's per-ticker line.
-        # Locked: pool workers in the cache pre-pass emit concurrently.
+        # ``detail`` says what was downloaded, for the UI's per-ticker line.
+        # Locked: the threads of the first pass over the cache call it at the same time.
         nonlocal done
         with _emit_lock:
             done += 1
@@ -501,8 +518,8 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 progress(done, total, f"{sym}: {detail}" if detail else sym)
 
     def _classify_cached(sym: str):
-        """One name's cache verdict: ``('served', df, detail)``, ``('incr', cached_df,
-        last_date)`` or ``('full', None, None)``. It runs on pool workers and MUST NOT
+        """One ticker's cache decision: ``('served', df, detail)``, ``('incr', cached_df,
+        last_date)`` or ``('full', None, None)``. It runs on worker threads and MUST NOT
         write."""
         path = PRICES_DIR / f"{sym}.parquet"
         if not force and age_days(path) <= max_age_days:
@@ -512,13 +529,13 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 pass
         elif not force and max_age_days >= 0 and _cache_settled(path):
             # No session since the write, so the cache is current whatever its age. A
-            # negative max_age_days, the tests' sentinel, skips this serve too, so the
-            # top-up paths stay reachable.
+            # negative max_age_days skips this check too, so tests can reach the
+            # missing-days code.
             try:
                 df = pd.read_parquet(path)
-                # The mtime dates the file, not its bars. A lagging provider response,
-                # persisted by the ungated full fetch, can end before the latest settled
-                # session. Such a frame falls through to the top-up.
+                # The mtime dates the file, not its bars. The full download saves whatever
+                # yfinance returns, so a response that is behind can end before the latest
+                # settled session. Such a DataFrame goes on to the ``topup`` download.
                 if len(df) and _frame_settled_current(df.index[-1]):
                     return "served", df, "cached (settled close)"
             except Exception:
@@ -534,19 +551,20 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
             gap = (today - last).days
             if 0 <= gap <= max_gap_days:
                 return "incr", cached, last
-        return "full", None, None              # cold, or too-stale -> full re-baseline
+        return "full", None, None              # no cache, or too old -> full download
 
     def _classify_and_emit(sym: str):
         kind, frame, extra = _classify_cached(sym)
         if kind == "served":
-            _emit(sym, extra)                  # progress moves while reads stream in
+            _emit(sym, extra)                  # progress moves as each read finishes
         return kind, frame, extra
 
-    # Reading thousands of warm parquets takes real time; the pool roughly halves it.
-    # Served names emit from the workers, so progress order is interleaved; consumers treat
-    # the log as an unordered tail. out, incr and full_fetch MUST be built in syms order
-    # after the join, so dict order and batch chunking stay deterministic. yf.download
-    # below MUST stay serial: concurrent calls race yfinance's shared state.
+    # Reading thousands of saved parquets takes real time; the threads roughly halve it.
+    # Tickers returned from cache report progress from the threads, so progress lines
+    # arrive out of order, and whatever reads them does not expect an order. out, incr and
+    # full_fetch MUST be built in syms order after all threads finish, so dict order and
+    # batch chunking are the same on every run. yf.download below MUST run one call at a
+    # time: calls at the same time overwrite yfinance's shared state.
     if syms:
         with ThreadPoolExecutor(max_workers=min(_CACHE_READ_WORKERS, len(syms))) as _pool:
             verdicts = list(_pool.map(_classify_and_emit, syms))
@@ -561,9 +579,9 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     _served0, _incr0, _full0 = len(out), len(incr), len(full_fetch)
 
     if not allow_network and (full_fetch or incr):
-        # Cache-only. Top-up names already hold their frames from the pre-pass. Other
-        # names get their parquet when one exists and are absent otherwise; callers
-        # degrade per name.
+        # Cache-only. Tickers marked for ``topup`` already hold their
+        # frames from the first pass. Other tickers get their parquet when one exists and
+        # are absent otherwise; callers cope with each missing ticker on its own.
         for sym in syms:
             if sym in out:
                 continue
@@ -582,7 +600,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
     if full_fetch or incr:
         import yfinance as yf
 
-        # ---- Incremental top-up, one shared start ----
+        # ---- Download only the missing recent days, from one shared start ----
         if incr:
             start = (min(last for _c, last in incr.values())
                      - pd.Timedelta(days=overlap_days)).strftime("%Y-%m-%d")
@@ -600,17 +618,17 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                         new = _clean_prices(sub) if sub is not None else None
                     merged, needs_full = _merge_incremental(cached, new, lookback)
                     if needs_full:
-                        full_fetch.append(sym)        # re-baseline in the full pass below
+                        full_fetch.append(sym)        # downloaded in full in the loop below
                         _rebaselined += 1
                         continue
                     out[sym] = merged
-                    # Persist only when the fetch reached the cache's newest bar. An
-                    # overlap-only response (provider lag) MUST NOT re-stamp the mtime.
-                    # A rewrite after the close would arm the settled-close serve on a
-                    # frame missing the settled bar, and nothing would refetch it all
-                    # weekend. ``>=``, not ``>``: the ~16:30 settle of today's bar has
-                    # max == last and MUST persist. ``index.max()``, not ``[-1]``:
-                    # _clean_prices does not sort.
+                    # Save only when the download reached the cache's newest bar. A
+                    # response holding only the overlap days (yfinance running behind)
+                    # MUST NOT update the mtime. A rewrite after the close would let the
+                    # settled-close rule accept a frame missing the settled bar, and
+                    # nothing would download it again all weekend. ``>=``, not ``>``: the
+                    # ~16:30 settle of today's bar has max == last and MUST be saved.
+                    # ``index.max()``, not ``[-1]``: _clean_prices does not sort.
                     if (new is not None and len(new)
                             and pd.Timestamp(new.index.max()).normalize() >= _last):
                         try:
@@ -622,7 +640,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                 if i + chunk < len(incr_syms):
                     time.sleep(pause)
 
-        # ---- Full: cold caches + incremental re-baselines ----
+        # ---- Full download: no cache yet, or a re-adjusted history ----
         if full_fetch:
             for i in range(0, len(full_fetch), chunk):
                 part = full_fetch[i:i + chunk]
@@ -636,7 +654,7 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                         df = _clean_prices(sub) if sub is not None else None
                         if df is not None and len(df):
                             got[sym] = df
-                # One retry for the names the batch missed. _download_batch returns once
+                # One retry for the tickers the batch missed. _download_batch returns once
                 # any rows exist, so its own retry never covers a partial failure. An
                 # all-empty batch was already retried there.
                 missing = [s for s in part if s not in got]
@@ -661,11 +679,11 @@ def get_many_prices(tickers: List[str], lookback: str = "2y", force: bool = Fals
                             pass
                         _emit(sym, f"full history ({lookback})")
                         continue
-                    _failed.append(sym)       # counted even when a stale cache is served
-                                              # below: the provider returned nothing
-                    # Serve the stale parquet when one exists (long-gap and re-baseline
-                    # names have one) rather than drop the name. It MUST NOT be
-                    # re-persisted: that would stamp known-stale data as fresh.
+                    _failed.append(sym)       # counted even when an old cache is returned
+                                              # below: yfinance returned nothing
+                    # Return the old parquet when one exists (tickers with a long gap or a
+                    # re-adjusted history have one) rather than drop the ticker. It MUST
+                    # NOT be saved again: that would mark known-old data as fresh.
                     path = PRICES_DIR / f"{sym}.parquet"
                     if path.exists():
                         try:
@@ -713,10 +731,10 @@ def _pct(curr, prev) -> Optional[float]:
 
 
 def _yoy_at(s: Optional[pd.Series], back: int = 0) -> Optional[float]:
-    """YoY % for the quarter ``back`` steps before the latest (0 = latest), against the
-    most recent entry 330-400 days earlier. Matching by date, as ``_edgar_yoy_series``
-    does, keeps a missing or extra quarter from shifting a fixed 4-step lag. None when
-    ``s`` is too short or no such entry exists."""
+    """Year-over-year (YoY) % for the quarter ``back`` steps before the latest (0 =
+    latest), against the most recent entry 330-400 days earlier. Matching by date, as
+    ``_edgar_yoy_series`` does, keeps a missing or extra quarter from shifting a fixed
+    4-step lag. None when ``s`` is too short or no such entry exists."""
     if s is None or back < 0 or len(s) < back + 2:
         return None
     i = len(s) - 1 - back                        # absolute position of the anchor quarter
@@ -727,11 +745,11 @@ def _yoy_at(s: Optional[pd.Series], back: int = 0) -> Optional[float]:
     return None
 
 
-def _yoy(s: Optional[pd.Series], lag: int = 4) -> Optional[float]:
+def _yoy(s: Optional[pd.Series]) -> Optional[float]:
     return _yoy_at(s, 0)
 
 
-def _yoy_prev(s: Optional[pd.Series], lag: int = 4) -> Optional[float]:
+def _yoy_prev(s: Optional[pd.Series]) -> Optional[float]:
     return _yoy_at(s, 1)
 
 
@@ -747,7 +765,8 @@ def _aligned(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optional[pd.
 
     A margin MUST NOT divide figures from different quarters. ``_row`` drops NaNs per line
     item, and yfinance can fill Total Revenue for the newest quarter before Gross Profit or
-    Operating Income; unaligned, that pairs GP(Q-1) with Rev(Q0)."""
+    Operating Income; unaligned, that pairs last quarter's Gross Profit with this quarter's
+    Total Revenue."""
     if num is None or den is None:
         return None
     both = pd.concat([num.rename("n"), den.rename("d")], axis=1).dropna()
@@ -762,7 +781,8 @@ def _margin(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optional[floa
 
 
 def _margin_trend(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optional[float]:
-    """Change in operating margin vs the prior quarter (pp); + = expanding."""
+    """Change in operating margin vs the prior quarter, in percentage points; positive
+    means expanding. None when either quarter is missing or has zero revenue."""
     a = _aligned(num, den)
     if a is None or len(a) < 2 or a["d"].iloc[-1] == 0 or a["d"].iloc[-2] == 0:
         return None
@@ -772,7 +792,8 @@ def _margin_trend(num: Optional[pd.Series], den: Optional[pd.Series]) -> Optiona
 
 
 def _jsonable(v) -> Optional[float]:
-    """Coerce numpy/pandas scalars to plain float (or None) so the dict is JSON-safe."""
+    """Convert numpy/pandas scalars to plain float (or None) so the dict can be saved as
+    JSON."""
     if v is None or (isinstance(v, float) and v != v):   # None or NaN
         return None
     try:
@@ -846,16 +867,16 @@ def _last_earnings_surprise(tk, today=None) -> tuple:
 
 
 # --------------------------------------------------------------------------- #
-# SEC EDGAR XBRL backfill
+# SEC EDGAR figures that fill gaps in the yfinance data
 # --------------------------------------------------------------------------- #
 # YoY history past yfinance's ~4 quarters, plus annual EPS growth and 3-quarter
-# acceleration, which yfinance lacks. The company-facts API needs no key. SEC fair use
-# is ~10 req/s with a contact User-Agent.
+# acceleration, which yfinance lacks. The company-facts API needs no key. The SEC asks
+# for at most ~10 requests a second and a User-Agent with contact details.
 EDGAR_UA = {"User-Agent": "ml-trading-pfopt cockpit (treblotmail@gmail.com)"}
 EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
-# Tags tried in order, as in the repo's Main.ipynb EDGAR pipeline.
+# Tags tried in order, as in the repo's Main.ipynb EDGAR code.
 EDGAR_REVENUE_TAGS = ("Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
                       "SalesRevenueNet")
 EDGAR_EPS_TAGS = ("EarningsPerShareDiluted", "EarningsPerShareBasic")
@@ -871,7 +892,7 @@ EDGAR_MAX_STALE_FY_DAYS = 500
 def _edgar_get_json(url: str) -> Optional[dict]:
     try:
         import requests
-        time.sleep(0.12)                               # stay politely under 10 req/s
+        time.sleep(0.12)                               # stay under the SEC's 10 requests/s
         r = requests.get(url, headers=EDGAR_UA, timeout=30)
         r.raise_for_status()
         return r.json()
@@ -880,7 +901,8 @@ def _edgar_get_json(url: str) -> Optional[dict]:
 
 
 def _edgar_cik(sym: str) -> Optional[int]:
-    """SEC CIK for ``sym`` from company_tickers.json, cached 30 days. None when the map
+    """SEC CIK (the SEC's company ID number) for ``sym`` from company_tickers.json, cached
+    30 days. None when the map
     lacks it or can't be fetched. Matches both the normalized dash form and the SEC's
     dot form (BRK-B, BRK.B)."""
     path = EDGAR_DIR / "company_tickers.json"
@@ -921,8 +943,9 @@ def _edgar_tag_series(units: dict, unit_keys) -> tuple:
     q: dict = {}
     a: dict = {}
     for e in entries:
-        # Only the 10-Q/10-K financial statements. A proxy's pay-versus-performance table
-        # repeats net income in millions (ANET: 3511 for $3.5B) and, filed later, would win.
+        # Only the 10-Q/10-K financial statements. A proxy statement's pay-versus-performance
+        # table repeats net income in millions (ANET: 3511 for $3.5B) and, filed later,
+        # would win.
         if not str(e.get("form") or "10-").startswith("10-"):
             continue
         try:
@@ -946,12 +969,12 @@ def _edgar_series(facts: dict, tags, unit_keys, today=None) -> tuple:
     from the us-gaap tag whose newest period ends latest (ties go to ``tags`` order).
     ``([], [])`` when no tag has any.
 
-    Quarterly means a 60-120 day period, annual 300-400 days; other durations, such as
-    10-K YTD, are dropped, and so are facts from forms other than 10-Q/10-K. A repeated
+    Quarterly means a 60-120 day period, annual 300-400 days; other durations, such as a
+    10-K's year-to-date figures, are dropped, and so are facts from forms other than 10-Q/10-K. A repeated
     period end keeps the latest ``filed``, so amended figures win. A missing fiscal Q4 is
-    derived (``_edgar_fill_q4``). Either list is
-    emptied when its newest period ended more than ``EDGAR_MAX_STALE_DAYS`` (quarterly) or
-    ``EDGAR_MAX_STALE_FY_DAYS`` (annual) before ``today``."""
+    derived (``_edgar_fill_q4``). Either list is emptied when its newest period ended more
+    than ``EDGAR_MAX_STALE_DAYS`` (quarterly) or ``EDGAR_MAX_STALE_FY_DAYS`` (annual) before
+    ``today``."""
     gaap = (facts.get("facts") or {}).get("us-gaap") or {}
     best, best_end = ([], []), None
     for tag in tags:
@@ -1097,7 +1120,8 @@ def _edgar_last_report(cik: int) -> dict:
 
 def _annual_runs(annual) -> dict:
     """``eps_fy_up``: the latest fiscal year above the one before; ``eps_fy_up_3y``: three
-    such rises in a row. Years must be consecutive (330-400 days apart); None when too few."""
+    such rises in a row. Each is None unless enough consecutive years (330-400 days apart)
+    exist."""
     def run(n):
         if len(annual) < n + 1:
             return None
@@ -1117,7 +1141,7 @@ def _edgar_backfill(sym: str, today=None, force: bool = False) -> Optional[dict]
     quarter each ``*_yoy`` describes), and the ``_code33``, ``_annual_runs`` and
     ``_edgar_last_report`` keys. A ``*_prev`` is the quarter immediately before. A key is
     None when the facts can't support it. ``force`` skips the fresh cache, and a cache
-    missing any of ``_EDGAR_KEYS`` (an older schema) is not served. With no CIK or a
+    missing any of ``_EDGAR_KEYS`` (written by older code) is not returned. With no CIK or a
     failed fetch, returns the stale cache if any, else None; foreign listings and funds
     have no CIK."""
     ensure_dirs()
@@ -1166,11 +1190,11 @@ def _edgar_backfill(sym: str, today=None, force: bool = False) -> Optional[dict]
 
 
 def _fetch_fundamentals(sym: str, today=None) -> Optional[dict]:
-    """Quarterly growth and margin metrics from yfinance, uncached, plus ``next_earnings``,
+    """Quarterly growth and margin metrics from yfinance, not cached, plus ``next_earnings``,
     ``last_surprise_pct`` / ``last_surprise_date``, and ``revenue_quarter_end`` /
     ``eps_quarter_end`` (``'YYYY-MM-DD'`` of the quarter each ``*_yoy`` describes). A key is
     None when its metric can't be computed. yfinance often has only ~4 quarters, so YoY may
-    be missing; QoQ is the reliable fallback. None when nothing could be fetched."""
+    be missing; quarter-over-quarter (QoQ) is the reliable fallback. None when nothing could be fetched."""
     try:
         import yfinance as yf
         tk = yf.Ticker(sym)
@@ -1229,8 +1253,8 @@ def _estimate_revisions(tk) -> dict:
 
 def _institutional(tk) -> dict:
     """``inst_pct`` (% of shares held by institutions) and ``inst_count`` (how many hold
-    it), from ``Ticker.major_holders``. None on any miss; never raises. A snapshot: the
-    trend comes from ``inst_history`` across refetches."""
+    it), from ``Ticker.major_holders``. None on any miss; never raises. These are today's
+    values only: the trend comes from ``inst_history`` across later downloads."""
     out = {"inst_pct": None, "inst_count": None}
     try:
         mh = tk.major_holders
@@ -1268,7 +1292,7 @@ _PAIRS = (("revenue_yoy", "revenue_yoy_prev", "revenue_quarter_end"),
 
 
 def _merge_edgar(out: dict, ed: Optional[dict]) -> dict:
-    """``out`` (yfinance) with the EDGAR backfill merged in, in place.
+    """``out`` (yfinance) with the EDGAR figures merged in, in place.
 
     yfinance values win. For each growth pair: with no yfinance YoY, EDGAR supplies the
     whole pair; with a yfinance YoY but no prior quarter, EDGAR supplies the prior only when
@@ -1301,8 +1325,9 @@ def _reported_since_written(cached: dict, path: Path, today=None) -> bool:
     return written <= report < _today(today)
 
 
-# A cache missing any of these was written by an older schema and is refetched whatever its
-# age. The newest key per schema is enough; a key present as None is a valid cache.
+# A cache missing any of these was written by older code and is downloaded again whatever
+# its age. The newest key each code change added is enough; a key present as None is a
+# valid cache.
 _FUNDAMENTALS_KEYS = ("next_earnings", "last_surprise_pct", "est_rev_90d")
 _EDGAR_KEYS = ("code33", "last_report")
 
@@ -1311,7 +1336,8 @@ def get_fundamentals(ticker: str, force: bool = False,
                      max_age_days: float = 7.0, today=None) -> Optional[dict]:
     """Quarterly fundamentals for ``ticker`` as a dict, from a per-ticker JSON cache up to
     ``max_age_days`` old, or younger when a report has come out since it was written. A
-    live fetch is backfilled from EDGAR (``_merge_edgar``) and written to the cache. Falls
+    live fetch has its gaps filled from EDGAR (``_merge_edgar``) and is written to the
+    cache. Falls
     back to a stale cache when the fetch fails; None when there is none."""
     ensure_dirs()
     sym = normalize(ticker)
@@ -1325,10 +1351,10 @@ def get_fundamentals(ticker: str, force: bool = False,
                 return cached
         except Exception:
             pass
-    out = _fetch_fundamentals(sym)
+    out = _fetch_fundamentals(sym, today)
     if out is not None:
         # Any EDGAR failure leaves the yfinance dict as is. After a report, EDGAR is
-        # refetched too, for the new release date.
+        # downloaded again too, for the new release date.
         try:
             ed = _edgar_backfill(sym, force=True) if reported else _edgar_backfill(sym)
         except Exception:

@@ -1,17 +1,20 @@
-"""Armed entries: pre-authorized next-open buys, the buy-side mirror of sells.py.
+"""Armed entries: buys the user approves in the evening for the next open, the buy-side
+mirror of sells.py.
 
-The judgment stays human, at the evening ritual. The user builds a LIMIT trade plan in
-the panel as usual, then arms it instead of (or after) submitting. That writes tonight's
-``entry_plan_YYYY-MM-DD.json`` beside the trigger reports. A pre-open CLI
-(``entry_job.py execute``, ~09:26 ET) then submits at most one still-armed row: a limit
-at the buy-zone top, which enforces no-chase, with the GTC OTO stop leg. It first clears,
-in order, the ``AUTOBUY`` env gate (the feature ships dark), plan freshness (next
-business day only) and the progressive-exposure gate. That gate fails closed on this
-unattended path: unknown state means no buys. Per-row disarm in the app is the overnight
+The decision stays with the user, at the evening review. The user builds a LIMIT trade
+plan in the panel as usual, then arms it (saves it for the morning run) instead of, or
+after, submitting it. That writes tonight's ``entry_plan_YYYY-MM-DD.json`` beside the
+trigger reports. A CLI run before the open (``entry_job.py execute``, ~09:26 ET) then
+submits at most one still-armed row: a limit at the top of the buy zone, so it never
+pays above the zone, with its GTC stop attached as an OTO order. It first checks, in
+order, the ``AUTOBUY`` setting (off by default), that the plan is current (next business
+day only) and the progressive-exposure gate (:func:`trade.gate_status`, which says
+whether a new position may be opened now). No one watches this run, so a gate that
+can't be read counts as closed: no buys. Disarming a row in the app is the overnight
 veto; rows never executed expire with the plan.
 
-Plan files live in ``cache.TRIGGERS_DIR``, so the test suite's patching keeps AppTests
-away from real state. Paper account only, like every trade path.
+Plan files live in ``cache.TRIGGERS_DIR``, so when the test suite patches it, AppTests
+never touch the real files. Paper account only, like every trade path.
 """
 from __future__ import annotations
 
@@ -33,8 +36,8 @@ ROW_SKIPPED = "skipped"
 
 
 def _row(o: dict) -> dict:
-    """One armed row from a built plan entry, coerced to plain JSON types: the scan
-    payload leaks numpy scalars into plan rows."""
+    """One armed row from a built plan entry, converted to plain JSON types: the scan
+    payload puts numpy scalars into plan rows, and ``json.dumps`` rejects ``np.int64``."""
     def f(v):
         return None if v is None else float(v)
     return {"ticker": str(o["ticker"]), "shares": int(o["shares"]),
@@ -47,17 +50,17 @@ def _row(o: dict) -> dict:
 
 
 def build_entry_plan(final_rows: List[dict], today=None) -> dict:
-    """Tonight's armed-entry plan from the panel's final rows. Pure apart from the
-    wall-clock ``generated_at``. Returns ``{date, generated_at, rows, notes,
-    executed_at}``; ``notes`` gives each refused row's reason.
+    """Tonight's armed-entry plan from the panel's final rows. No file or network
+    access; only ``generated_at`` reads the clock. Returns ``{date, generated_at, rows,
+    notes, executed_at}``; ``notes`` gives each refused row's reason.
 
-    Only genuine buy rows arm: ``shares >= 1``, not ``rearm_only``/``stop_only``, and
-    both a positive ``limit_price`` (the no-chase cap is the entry mechanic; a market
-    row MUST NOT arm) and a positive ``stop_price`` below it (the OTO leg), at most
-    ``MAX_LOSS_FROM_FILL`` below the limit, and a notional within ``MAX_ORDER_ADV_PCT`` of
-    ``adv_usd`` when that is known. The executor runs unattended, so a bad row MUST be
-    refused at arming, not at 09:26. Order is preserved — the executor walks rows
-    top-down, so the panel's ordering is the ranking."""
+    Only real buy rows arm: ``shares >= 1``, not ``rearm_only``/``stop_only``, and both
+    a positive ``limit_price`` (the limit keeps the buy inside the buy zone; a market row
+    MUST NOT arm) and a positive ``stop_price`` below it (the attached OTO stop), at most
+    ``MAX_LOSS_FROM_FILL`` below the limit, and an order value (shares × limit) within
+    ``MAX_ORDER_ADV_PCT`` of ``adv_usd`` when that is known. No one watches the morning
+    run, so a bad row MUST be refused at arming, not at 09:26. Row order is kept: the
+    morning run tries rows top-down, so the panel's order is the ranking."""
     rows = []
     skipped = []
     for o in final_rows or []:
@@ -100,14 +103,15 @@ def entry_plan_path(date_iso: str, dir_path=None) -> Path:
 
 
 def save_entry_plan(plan: dict, dir_path=None) -> Path:
-    """Atomic write; returns the path. The arming click, a disarm click and the morning
-    executor write the same day-file from separate processes."""
+    """Write the plan to a temp file, then rename it over the dated file, so a reader
+    never sees a half-written file. Returns the path. The arming click, a disarm click
+    and the morning run write the same file from separate processes."""
     return plan_store.save_plan(_PREFIX, plan, dir_path)
 
 
 def load_latest_entry_plan(dir_path=None, *, before: Optional[str] = None
                            ) -> Optional[dict]:
-    """Newest parseable ``entry_plan_*.json``, or None. ``before`` passes through to the
+    """Newest readable ``entry_plan_*.json``, or None. ``before`` passes through to the
     shared loader; only the sell planner uses it in production. Never raises."""
     return plan_store.load_latest_plan(_PREFIX, dir_path, before=before)
 
@@ -125,7 +129,7 @@ def plan_is_current(plan: dict, today=None) -> bool:
     This differs from the sells check: entries can be armed on a weekend (the Sunday
     hunt). The rule is exactly one business day in ``(plan_date, today]``; holidays
     count as business days. A Friday, Saturday or Sunday plan executes Monday. Anything
-    older is stale. Same-day execution is refused: orders are for the next open."""
+    older is out of date. Same-day execution is refused: orders are for the next open."""
     import pandas as pd
     try:
         d = pd.Timestamp(str(plan.get("date"))).normalize()
@@ -151,17 +155,18 @@ def execute_entry_plan(plan: dict, *, submit: Callable[[dict], dict],
     persists it.
 
     ``submit(row)`` sends one buy through the real plan-submit path (limit plus GTC OTO
-    stop, with its own pending-buy, tradability and cap guards) and returns ``{status,
-    detail}``. An exception from it counts as ``failed``.
+    stop, with its own checks for a pending buy, tradability and the size cap) and
+    returns ``{status, detail}``. An exception from it counts as ``failed``.
 
-    Guards, in order: ``enabled`` (default: the ``AUTOBUY`` env), plan freshness, then
-    the progressive-exposure gate. The gate fails closed: with ``gate`` None or not open,
-    every armed row is skipped. The unattended path MUST NOT buy on unknown state.
+    Checks, in order: ``enabled`` (default: the ``AUTOBUY`` setting), whether the plan
+    is current, then the progressive-exposure gate. With ``gate`` None or not open, every
+    armed row is skipped. No one watches this run, so it MUST NOT buy when the account
+    state is unknown.
 
-    Only a ``submitted`` result uses the day's one bullet. An already-held row or a
-    ``skipped`` result moves on to the next armed row. A ``failed`` result stops the
-    walk: no blind retry, as on the sell side. A plan that already has a submitted row
-    submits nothing more.
+    Only a ``submitted`` result uses the day's one buy (``bullet_used``). An already-held
+    row or a ``skipped`` result moves on to the next armed row. A ``failed`` result stops
+    the loop: no automatic retry, as on the sell side. A plan that already has a
+    submitted row submits nothing more.
 
     Returns ``{status, submitted, skipped, disarmed, failed}``. ``status`` is ``ok``,
     ``disabled``, ``stale``, ``gate_closed``, ``partial`` or ``failed``."""
@@ -216,7 +221,7 @@ def execute_entry_plan(plan: dict, *, submit: Callable[[dict], dict],
             r["status"] = ROW_FAILED
             r["detail"] = res.get("detail", "")
             summary["failed"].append(t)
-            break                       # no blind retry; later rows stay armed/expire
+            break                       # no retry; later rows stay armed and expire
         else:
             r["status"] = ROW_SKIPPED
             r["detail"] = res.get("detail", str(res.get("status")))
@@ -231,7 +236,8 @@ def execute_entry_plan(plan: dict, *, submit: Callable[[dict], dict],
 
 
 def format_plan(plan: dict) -> str:
-    """ASCII-only console rendering (journald-safe, same convention as triggers)."""
+    """The plan as ASCII-only console text, safe for the systemd journal (same
+    convention as triggers)."""
     lines = [f"ENTRY PLAN  {plan.get('date', '?')}  rows={len(plan.get('rows', []))}"]
     for r in plan.get("rows", []):
         lines.append(f"  {r.get('status', '?').upper():>9}  {r.get('ticker')} "

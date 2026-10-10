@@ -1,11 +1,12 @@
 """A weekend-hunt request and its status: two JSON files under ``data/cockpit/hunt/``.
 
-Nothing on the LAN connects to the hunt PC. The cockpit (the Start button) or the Pi's
-Friday timer writes ``request.json``; the PC's poller, which already reaches the Pi over
-ssh, claims it (an atomic rename on the Pi), runs the hunt, and writes ``status.json``
-back as the run goes: ``claimed`` → ``running`` → ``done`` or ``error``. The finished
-folder arrives beside them. This module is the Pi side; ``scripts/hunt/hunt_poller.ps1``
-is the PC side.
+Nothing on the home network connects to the hunt PC. The cockpit (the Start button) or
+the Raspberry Pi's Friday timer writes ``request.json``. A script on the PC that checks
+for it regularly (the poller), and already reaches the Pi over ssh, claims it by
+renaming it on the Pi in one step, runs the hunt, and writes ``status.json`` back as the
+run goes: ``claimed`` → ``running`` → ``done`` or ``error``. The finished folder arrives
+beside them. This module is the Pi side; ``scripts/hunt/hunt_poller.ps1`` is the PC
+side.
 
     python -m src.stock_screener.cockpit.hunt_request write --source schedule
 """
@@ -23,11 +24,11 @@ from src.stock_screener.hunt import pipeline as pl
 REQUEST_FILE = "request.json"
 STATUS_FILE = "status.json"
 ACTIVE_STATES = ("claimed", "running")
-STALE_RUN_S = 4 * 3600        # a "running" status older than this is a dead run
+STALE_RUN_S = 4 * 3600        # a "running" status older than this means the run died
 
 
 def request_path() -> Path:
-    return pl.HUNT_DIR / REQUEST_FILE      # pipeline.HUNT_DIR read at call time: patchable
+    return pl.HUNT_DIR / REQUEST_FILE      # read at call time so tests can patch it
 
 
 def status_path() -> Path:
@@ -47,8 +48,8 @@ def _read(path: Path) -> Optional[dict]:
 
 
 def _write(path: Path, data: dict) -> None:
-    """Atomic: a sibling temp file, then ``os.replace``, so the poller's ssh read never
-    sees a half-written file."""
+    """Write a temp file next to ``path``, then rename it over ``path`` with
+    ``os.replace``, so the poller's ssh read never sees a half-written file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -86,7 +87,7 @@ def progress() -> dict:
 
     ``state`` is ``requested`` (waiting for the PC to claim it), ``claimed`` or
     ``running`` (the PC's own words), ``done`` or ``error`` (the last run's end), or
-    ``idle``. A request outranks a status, because the PC removes the request when it
+    ``idle``. A request wins over a status, because the PC removes the request when it
     claims it. A ``running`` older than ``STALE_RUN_S`` reads as ``error``: the PC died
     mid-run and will never report."""
     req = read_request()

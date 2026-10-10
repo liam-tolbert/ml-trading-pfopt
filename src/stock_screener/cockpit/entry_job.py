@@ -2,14 +2,15 @@
 
     python src/stock_screener/cockpit/entry_job.py execute [--date YYYY-MM-DD] [--dry-run]
 
-Runs pre-open (~09:26 ET). It loads the latest armed entry plan, written by the app's
-"Arm for next open" button in the evening, and submits at most one still-armed buy: a
-limit at the buy-zone top with a GTC OTO stop. The buy goes through the same plan-submit
-path the panel uses. Requires ``AUTOBUY=1``; it ships dark. The progressive-exposure gate
-fails closed on this unattended path.
+Runs before the open (~09:26 ET). It loads the latest armed entry plan, written by the
+app's "Arm for next open" button in the evening, and submits at most one still-armed
+buy: a limit at the top of the buy zone with a GTC OTO stop. The buy goes through the
+same plan-submit path the panel uses. Requires ``AUTOBUY=1``; it is off by default. If
+the progressive-exposure gate (whether a new position may be opened now) can't be read,
+nothing is bought.
 
-No plan or a stale plan is normal (the user armed nothing) and exits 0, as does AUTOBUY
-off. Exit 1 only on a failed or partial submission, or an unexpected error.
+No plan or an out-of-date plan is normal (the user armed nothing) and exits 0, as does
+AUTOBUY off. Exit 1 only on a failed or partial submission, or an unexpected error.
 """
 from __future__ import annotations
 
@@ -27,8 +28,8 @@ from src.stock_screener.cockpit import entries, trade  # noqa: E402
 
 
 def _real_submit(row: dict) -> dict:
-    """Submit one armed row through the real plan-submit path, which re-checks the
-    pending-buy guard, tradability, the 10% cap, stop validity and the GTC OTO limit.
+    """Submit one armed row through the real plan-submit path, which re-checks for a
+    pending buy, tradability, the 10% cap, the stop and the GTC OTO limit order.
     Returns ``{status, detail}``."""
     out = trade.submit_buy_plan([row], attach_stop=True)
     res = (out.get("results") or [{}])[0]
@@ -53,7 +54,7 @@ def cmd_execute(date: Optional[str], dry_run: bool) -> int:
                                  gi["closed_episodes"])
         held = {p["symbol"]: int(p.get("qty") or 0) for p in gi["positions"]}
     except Exception:
-        gate = None                       # executor fails closed on unknown state
+        gate = None                       # unknown gate: every armed row is skipped
 
     if dry_run:
         submit = lambda row: {"status": "submitted", "detail": "DRY RUN"}  # noqa: E731

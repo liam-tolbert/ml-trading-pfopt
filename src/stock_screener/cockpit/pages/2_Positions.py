@@ -1,13 +1,14 @@
 """Positions page: stop management and manual sells for the Minervini Trader Alpaca paper
-account.
+account (simulated money, no real trades).
 
-A page of its own, so it loads instantly without the multi-minute scan. It is the daily
-stop-management surface. It shows each holding's P&L, protective-stop status, stage on the
-stop ladder, next earnings date, sell pillars and Minervini exit advisories, including the
-earnings-cushion rules. One click re-arms or raises all stops via the GTC one-way ratchet,
-which never lowers a stop. Each position has a manual market SELL with a two-step confirm:
-cancel stops, sell, then re-place the stop for any remainder at the same level. The page
-never sells on its own.
+A page of its own, so it loads instantly without the multi-minute scan. It is the page
+used each day to manage stops. It shows each holding's P&L, whether a stop is in place,
+its stop stage (initial, breakeven, trailing and so on), next earnings date, the sell
+pillars (four keep-or-sell checks, P1-P4) and Minervini's exit advice, including the rules
+for holding through an earnings report. One click places or raises every stop as a GTC
+order; a stop only ever moves up. Each position has a manual market SELL with a two-step
+confirm: cancel stops, sell, then place the stop again for any shares left, at the same
+level. The page never sells on its own.
 
 Run the app from the project root: ``streamlit run src/stock_screener/cockpit/app.py`` and pick
 "Positions" from the page nav.
@@ -25,21 +26,21 @@ if str(ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
-from src.stock_screener.cockpit import advisories  # noqa: E402 (display-only SEPA reads)
+from src.stock_screener.cockpit import advisories  # noqa: E402 (SEPA checks, shown only)
 from src.stock_screener.cockpit import cache  # noqa: E402
-from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared fills cache)
+from src.stock_screener.cockpit import journal_cache  # noqa: E402 (shared filled-orders cache)
 from src.stock_screener.cockpit import scan_worker  # noqa: E402
 from src.stock_screener.cockpit import sells  # noqa: E402 (evening sell plan + veto)
-from src.stock_screener.cockpit import trade  # noqa: E402 (module import → patchable in tests)
-from src.stock_screener.cockpit import triggers  # noqa: E402 (latest report = SPY fallback)
+from src.stock_screener.cockpit import trade  # noqa: E402 (module import: tests can replace it)
+from src.stock_screener.cockpit import triggers  # noqa: E402 (SPY status when there is no scan)
 from src.stock_screener.cockpit.export import load_watchlist  # noqa: E402
 
-# Warm the universe scan in the background, so it is under way by the time the user opens
-# the scan page. Inert under AppTest.
+# Start the stock scan in the background, so it is already running when the user opens
+# the scan page. Does nothing under AppTest.
 scan_worker.autostart()
 
 st.set_page_config(page_title="Positions", page_icon="📊", layout="wide")
-# Mirror app.py's padding trim so the first row isn't buried under Streamlit's header.
+# Same reduced padding as app.py, so the first row isn't hidden under Streamlit's header.
 st.markdown(
     "<style>.block-container{padding-top:4rem;padding-bottom:2rem;}"
     'div[data-testid="stVerticalBlock"]{gap:0.6rem;}</style>',
@@ -54,25 +55,28 @@ _BASIS_LABELS = {
 _ICONS = {"submitted": "✅", "stop_only": "🛑", "stop_kept": "🔒", "skipped": "—", "failed": "⚠️"}
 
 
-POS_MAX_AGE_S = 60      # a memoized account read older than this is re-fetched on the next rerun
+POS_MAX_AGE_S = 60      # seconds a stored account read is reused before it is re-read
 
 
 def _session_positions(nonce):
-    """The account read, memoized per browser session. Returns ``(data, read_at)``. A
-    ``TradeUnavailable`` propagates and is never memoized, so Refresh retries.
+    """Read the account, keeping the result in ``pos_memo`` in session_state for this
+    browser session. ``nonce`` is ``pos_nonce``, a counter that is bumped to force a
+    re-read. Returns ``(data, read_at)``. Raises ``TradeUnavailable`` when the account
+    can't be read; the error is not stored, so Refresh retries.
 
-    The memo MUST live in session_state, never ``st.cache_data``. That cache is one per
-    process, and every session starts at nonce 1, so every visitor would get the first
-    visitor's snapshot with no expiry and queue behind its in-flight fetch. Widget reruns
-    reuse the read for ``POS_MAX_AGE_S``. session_state outlives page switches, so the age
-    limit is what catches trades placed elsewhere. Refresh, sell and re-arm bump the nonce."""
+    The read MUST be stored in session_state, never ``st.cache_data``. That cache is shared
+    by every visitor, and every session starts with the counter at 1, so every visitor
+    would get the first visitor's result, never refreshed, and wait on its download. Widget
+    reruns reuse the read for ``POS_MAX_AGE_S``. session_state survives page switches, so
+    the age limit is what catches trades placed elsewhere. Refresh, sell and the Re-arm
+    button bump the counter."""
     import time
     memo = st.session_state.get("pos_memo")
     if (memo is not None and memo["nonce"] == nonce
             and time.monotonic() - memo["mono"] < POS_MAX_AGE_S):
         return memo["data"], memo["read_at"]
     with st.spinner("Reading the paper account…"):
-        data = trade.fetch_positions()          # MODULE attribute, so a test patch is honored
+        data = trade.fetch_positions()          # looked up on the module, so tests can replace it
     import pandas as pd
     read_at = pd.Timestamp.now(tz="America/New_York")
     st.session_state["pos_memo"] = {"nonce": nonce, "mono": time.monotonic(),
@@ -81,8 +85,9 @@ def _session_positions(nonce):
 
 
 def _do_rearm(positions, nonce, basis):
-    """Re-arm button callback: raise or place GTC stops at each row's edited stop via the
-    ratchet, then bump the nonce so the next run reads the new stops."""
+    """Callback for the Re-arm button: place or raise a GTC stop at the stop typed in each
+    row (a stop only ever moves up), then bump ``pos_nonce`` so the next run reads the new
+    stops."""
     targets = [{"ticker": p["symbol"],
                 "stop_price": st.session_state.get(f"posstop_{p['symbol']}_{nonce}_{basis}"),
                 "price": p["current_price"]}
@@ -95,7 +100,8 @@ def _do_rearm(positions, nonce, basis):
 
 
 def _set_sell_qty(sym, nonce, value):
-    """Preset (¼/½/All) callback. Streamlit lets another widget's key be set only in one."""
+    """Callback for the ¼/½/All buttons. Streamlit lets a callback set another widget's
+    value; the page body can't."""
     st.session_state[f"sellqty_{sym}_{nonce}"] = int(value)
 
 
@@ -104,10 +110,11 @@ def _cancel_sell():
 
 
 def _do_sell(symbol, qty, remainder_stop=None):
-    """Confirm-sell callback: submit the frozen pending quantity, not the live qty widget,
-    then bump the nonce so the next run shows the reduced position and re-placed stop.
-    ``remainder_stop`` (the free-roll's breakeven move) goes through the ratchet inside
-    ``submit_position_sell``, so it can only raise the level."""
+    """Callback for Confirm sell: sell the quantity saved when Sell was pressed, not the
+    current value of the quantity box, then bump ``pos_nonce`` so the next run shows the
+    smaller position and the re-placed stop. ``remainder_stop`` is a stop at the entry
+    price for the shares left, so they can't lose. ``submit_position_sell`` only ever
+    moves a stop up, so it can't lower the stop in force."""
     try:
         st.session_state["sell_result"] = trade.submit_position_sell(
             symbol, qty, remainder_stop=remainder_stop)
@@ -118,8 +125,10 @@ def _do_sell(symbol, qty, remainder_stop=None):
 
 
 def _do_veto(symbol):
-    """Veto callback: re-read the plan from disk, mark the order vetoed, save atomically.
-    The evening CLI or another session may have rewritten the plan since this render."""
+    """Callback for Veto: mark ``symbol``'s planned sell as vetoed (never sent) in the plan
+    file. The plan is read again first, because the evening command-line run or another
+    session may have rewritten it since this page was drawn. Never raises: an error is
+    stored in ``veto_error`` for the page to show."""
     try:
         p = sells.load_latest_sell_plan()
         if p and sells.veto_order(p, symbol):
@@ -129,9 +138,9 @@ def _do_veto(symbol):
 
 
 def _earnings_cell(p) -> str:
-    """Earnings cell for the table: 'YYYY-MM-DD (Nd)', ⚠-marked inside the ~21-day
-    no-cushion window; empty when unknown. It repeats the app's trade-panel wording here
-    because importing app.py would execute the whole scan page."""
+    """Earnings cell for the table: 'YYYY-MM-DD (Nd)', marked ⚠ when the report is ~21
+    days away or less; empty when unknown. It repeats the wording of app.py's trade panel
+    because importing app.py would run the whole scan page."""
     ne, ei = p.get("next_earnings"), p.get("earnings_in")
     if not ne and ei is None:
         return ""
@@ -160,7 +169,8 @@ acct = data["account"]
 positions = data["positions"]
 
 # --- Account headline tiles ----------------------------------------------------------------- #
-# A metric value MUST hold at most one '$': two render as a LaTeX math span.
+# A metric value MUST hold at most one '$': with two, the text between them renders as
+# LaTeX math.
 m = st.columns(4)
 m[0].metric("Equity", f"${acct['equity']:,.0f}", border=True)
 m[1].metric("Cash", f"${acct['cash']:,.0f}", border=True)
@@ -178,25 +188,27 @@ if not positions:
     st.info("No open positions in this account.")
     st.stop()
 
-# A pending sell confirm for a symbol no longer held (sold elsewhere, refreshed away) is stale.
+# A waiting sell confirmation for a symbol no longer held (sold elsewhere) is out of date.
 _sp = st.session_state.get("sell_pending")
 if _sp and _sp.get("symbol") not in {p["symbol"] for p in positions}:
     st.session_state.pop("sell_pending", None)
 
 # --- Sell pillars (P1-P4) ------------------------------------------------------------------- #
-# Every input is best effort; a pillar with no data reads "—".
+# Any input can be missing; a pillar with no data shows "—".
 _open_by_sym = {}
 _derived_pct = _avg_win = None
 try:
-    # Journal entry dates for P1, from the shared fills cache under the Journal page's
-    # jr_nonce. With Alpaca down the pillars degrade and the page still renders.
+    # Entry dates for P1 come from the filled-orders cache shared with the Journal page,
+    # read under that page's ``jr_nonce`` (its re-read counter). If Alpaca can't be
+    # reached, the pillars that need them show "—" and the page still loads.
     _fills = journal_cache.cached_fills(st.session_state.get("jr_nonce", 1))["fills"]
     _journal = trade.build_trade_journal(_fills)
     _open_by_sym = {r["symbol"]: r for r in _journal["open"]}
-    # The trade plan's stop rule, so the "initial" basis and R match what was ordered.
+    # The stop percentage the trade plan uses, so the "initial" stop basis and R (gain as
+    # a multiple of the initial risk) match what was ordered.
     _derived = trade.derived_stop_pct(_journal["closed"])
     _derived_pct = _derived["stop_pct"]
-    # The average-win triggers wait for the same win count as the derived stop.
+    # The stop moves based on the average win need as many wins as ``derived_stop_pct``.
     _avg_win = _derived["avg_win_pct"] if _derived_pct is not None else None
 except Exception:
     _open_by_sym = {}
@@ -208,10 +220,10 @@ except Exception:
 _regime = _spy = _latest = None
 _rs_map = {}
 try:
-    # The newest scan result, if any: None on a true cold start and under AppTest.
+    # The newest scan result: None before any scan has finished, and under AppTest.
     _latest = scan_worker.get_worker().latest()
     _regime = getattr(_latest, "regime", None)
-    _rs_map = getattr(_latest, "rs_ratings", None) or {}     # absent in older pickles
+    _rs_map = getattr(_latest, "rs_ratings", None) or {}     # missing from older pickled scans
 except Exception:
     _regime = None
 if _regime is None:
@@ -225,7 +237,7 @@ _pillars = {p["symbol"]: trade.sell_pillars(
                 rs=_rs_map.get(p["symbol"]))
             for p in positions}
 
-# --- The tape: market turn and weak-market advice (display only) ---------------------------- #
+# --- The market: SPY in Stage 4 and weak-market advice (display only) ----------------------- #
 try:
     _mk = (sells.load_latest_sell_plan() or {}).get("market") or {}
 except Exception:
@@ -266,7 +278,8 @@ for p in positions:
             avg_entry=p.get("avg_entry"))
     except Exception:
         _strength[p["symbol"]] = None
-# Stage and advisories again, now with R, the average win and the strength signs.
+# Stop stage and advisories again, now with R, the average win and ``strength_signs``
+# (signs of a fast run-up, when the books sell part).
 for p in positions:
     _book = {"r_now": _rmults[p["symbol"]][0], "avg_win": _avg_win}
     p["stage"] = trade.position_stage(p["gain_pct"], avg_entry=p["avg_entry"],
@@ -400,7 +413,7 @@ if _plan and _plan.get("notes"):
         for _n in _plan["notes"]:
             st.caption(_n)
 
-# --- Stop management: basis + per-row editable stops + re-arm -------------------------------- #
+# --- Stop management: stop basis, an editable stop per row, the Re-arm button --------------- #
 st.markdown("#### 🛡️ Stops & sells")
 st.caption("The GTC ratchet only ever RAISES a stop — a suggestion below the stop already in "
            "force is ignored. Edit any row before re-arming. Each row's expander sells "
@@ -431,7 +444,7 @@ for p in positions:
     if _flagged:
         cA.caption("  ↳ " + " · ".join(f"{k} {_PICON[v['status']]} {v['detail']}"
                                        for k, v in _flagged))
-    # Violations already show in P1; this adds the follow-through.
+    # P1 already shows the bad signs after the breakout; this adds the good ones.
     _pb = advisories.post_breakout_read(
         p.get("df"), (_open_by_sym.get(sym) or {}).get("entry_date"),
         avg_entry=p.get("avg_entry"), below_sma50=bool(p.get("below_sma50")),
@@ -464,9 +477,8 @@ for p in positions:
     if _held >= 1:
         with st.expander(f"Sell {sym} (market, paper)"):
             sc = st.columns([2, 1, 1, 1])
-            # The default MUST be seeded via session_state, not value=: the presets also
-            # write this key, and a widget with both a default and a state-set value logs a
-            # warning.
+            # The default MUST be set through session_state, not value=: the ¼/½/All
+            # buttons also write this key, and a widget given both logs a warning.
             _qkey = f"sellqty_{sym}_{_nonce}"
             if _qkey not in st.session_state:
                 st.session_state[_qkey] = _held
@@ -478,8 +490,8 @@ for p in positions:
                          on_click=_set_sell_qty, args=(sym, _nonce, max(1, _held // 2)))
             sc[3].button("All", key=f"sellqa_{sym}_{_nonce}", width="stretch",
                          on_click=_set_sell_qty, args=(sym, _nonce, _held))
-            # Free-roll at >=2R while the stop is below breakeven: bank half and move the
-            # remainder's stop to the entry, so the rest rides risk-free.
+            # At 2R or more with the stop below the entry price: sell half and move the
+            # stop on the rest to the entry price, so the rest can't lose.
             _rv, _rapprox = _rmults.get(sym, (None, True))
             if (_rv is not None and _rv >= trade.FREE_ROLL_R
                     and (p["current_stop"] is None
@@ -496,8 +508,8 @@ for p in positions:
                                "stop to breakeven instead (re-arm above).")
             if st.button(f"Sell (market) — {sym}", key=f"sell_{sym}_{_nonce}",
                          width="stretch"):
-                # Freeze the quantity now: the confirm MUST submit what was shown, not a
-                # qty edited while the banner is open.
+                # Save the quantity now: Confirm MUST sell what was shown, not a quantity
+                # edited while the warning is open.
                 st.session_state["sell_pending"] = {
                     "symbol": sym, "qty": int(st.session_state.get(
                         f"sellqty_{sym}_{_nonce}", _held)),

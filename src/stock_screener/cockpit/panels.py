@@ -40,7 +40,7 @@ The **next earnings date** shows here too — it's an *entry-timing* input
 (see Step 4): don't open a fresh position within ~2–3 weeks of a report.
 """
 
-# The eight Step-2 checks: scan key, chip label, and the hunt diagnostics column.
+# The eight Step-2 checks: scan key, on-screen label, and the hunt diagnostics column.
 STEP2_CHECKS = (("revenue_growth", "Rev ≥20%", "f_rev"), ("eps_growth", "EPS ≥20%", "f_eps"),
                 ("eps_accelerating", "EPS accel", "f_accel"),
                 ("margin_expanding", "Margin ↑", "f_margin"), ("code33", "Code 33", "f_code33"),
@@ -65,7 +65,8 @@ def earnings_flag(days) -> str:
 
 
 def step_badge(step: str, title: str) -> str:
-    """A consistent blue step chip + title, e.g. ':blue-background[Step 3]  Judge the VCP'."""
+    """A blue step badge and title, the same on every page, e.g.
+    ':blue-background[Step 3]  Judge the VCP'."""
     return f":blue-background[{step}]  {title}"
 
 
@@ -88,7 +89,7 @@ def _step2_header(help_popover: bool) -> None:
 
 
 def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
-    """The Step-2 box for a scan payload: header, help and the fundamentals read."""
+    """The Step-2 box for a scan payload: header, help and the fundamentals."""
     with st.container(border=True):
         _step2_header(help_popover)
         f = payload.get("fundamentals")
@@ -114,8 +115,8 @@ def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
                     else f" ({-ei}d ago)" if ei < 0 else f" (in {ei}d)")
             warn = " ⚠️" if earnings_flag(ei) else ""
             st.markdown(f"**Earnings:** {ne}{when}{warn}")
-        # From data_feed._edgar_backfill: yfinance lacks FY growth and 3-quarter
-        # acceleration.
+        # From data_feed._edgar_backfill: yfinance lacks full-year EPS growth and
+        # 3-quarter acceleration.
         _fy, _acc, _sp, _sd = (f.get("eps_fy_yoy"), f.get("eps_accel_3q"),
                                f.get("last_surprise_pct"), f.get("last_surprise_date"))
         _extra = []
@@ -123,8 +124,8 @@ def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
             _extra.append(f"**FY EPS:** {_fy:+.1f}%")
         if _acc is not None:
             _extra.append("3q accel ✅" if _acc else "3q accel —")
-        # An undated surprise comes from a cache that predates the age check and can
-        # be a year old, so it is not shown.
+        # An earnings surprise without a date has no known age and may be a year old, so
+        # it is not shown.
         if _sp is not None and _sd:
             _extra.append(f"surprise {_sp:+.1f}% ({_sd})")
         if _extra:
@@ -139,13 +140,13 @@ def render_step2_panel(payload: dict, help_popover: bool = True) -> None:
         checks = s2.get("checks", {})
         st.markdown(" ".join(f"{'✅' if checks.get(k) else '—'} {lbl}"
                              for k, lbl, _ in STEP2_CHECKS if k in checks))
-        # An older scan's summary holds four checks.
+        # The total comes from ``checks``: an old saved scan may hold only four.
         st.caption(f"Score {s2.get('score', 0)}/{len(checks) or 8}")
 
 
 def render_step2_from_hunt_row(row: dict, help_popover: bool = True) -> None:
-    """The Step-2 box from a hunt's diagnostics row, for a name the latest scan no
-    longer holds. Same header and chips; the numbers are the hunt's."""
+    """The Step-2 box from a hunt's diagnostics row, for a stock the latest scan no
+    longer has. Same header and check marks; the numbers are the hunt's."""
     with st.container(border=True):
         _step2_header(help_popover)
         st.caption("The hunt's numbers: this name is not in the latest scan.")

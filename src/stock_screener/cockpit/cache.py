@@ -1,8 +1,8 @@
-"""On-disk cache locations and staleness helpers for the cockpit.
+"""On-disk cache locations and file-age helpers for the cockpit.
 
 Everything lives under ``data/cockpit/``, gitignored like the rest of ``data/``. Prices
 are cached one parquet per ticker, so the daily scan is fast after the first run.
-Staleness is file mtime age in days.
+A file's age is the time since its mtime, in days.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 CACHE_DIR = ROOT / "data" / "cockpit"
 PRICES_DIR = CACHE_DIR / "prices"
 FUNDAMENTALS_DIR = CACHE_DIR / "fundamentals"
-EDGAR_DIR = CACHE_DIR / "edgar"                 # SEC XBRL backfill cache (per-ticker JSON)
+EDGAR_DIR = CACHE_DIR / "edgar"                 # SEC EDGAR figures (one JSON per ticker)
 WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (entry dicts, across sessions)
 TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports + entry/sell plans
 LOGS_DIR = CACHE_DIR / "logs"                   # dated run logs, pruned by runlog.RETENTION_DAYS
@@ -21,9 +21,9 @@ LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"     # newest completed ScanResult (s
 BREADTH_CSV = CACHE_DIR / "breadth.csv"         # one row per settled session (breadth_store)
 SECTORS_JSON = CACHE_DIR / "sectors.json"       # {SYMBOL: {sector, industry, fetched}} (sectors)
 
-# MUST be bumped whenever the persisted scan dict changes shape. It lives here, not in
-# scan_worker, because the weekend hunt reads the same pickle. With two copies, the writer
-# could be bumped while the reader still accepted the old shape.
+# MUST be raised by one whenever the saved scan dict changes shape. It lives here, not in
+# scan_worker, because the Weekend Hunt page reads the same pickle. With two copies, the
+# writer's could be raised while the reader still accepted the old shape.
 SCAN_PERSIST_VERSION = 1
 
 

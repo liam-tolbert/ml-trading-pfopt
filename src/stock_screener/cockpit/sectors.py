@@ -1,10 +1,11 @@
 """Sector and industry per symbol, from yfinance ``Ticker.info``, cached in one JSON.
 
-The books read stocks by group: most big winners move with their industry, and a group
-breaks together. The universe list carries symbols only, so the labels come from Yahoo.
-A company's industry rarely changes, so a label is kept ``SECTOR_MAX_AGE_DAYS``; a failed
-or empty fetch is remembered for ``SECTOR_RETRY_DAYS`` so a nightly screen doesn't ask
-again. Only names that pass the trend template and held names are looked up.
+The books judge stocks by group: most big winners rise with their industry, and a group
+tends to fall together. The list of tickers to scan holds symbols only, so the labels come
+from Yahoo. A company's industry rarely changes, so a label is kept
+``SECTOR_MAX_AGE_DAYS``; a failed or empty download is remembered for
+``SECTOR_RETRY_DAYS`` so the nightly scan doesn't ask again. Only stocks that pass the
+trend template, and held stocks, are looked up.
 """
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ from . import cache
 SECTOR_MAX_AGE_DAYS = 180
 SECTOR_RETRY_DAYS = 7
 
-# The scan thread and a page's positions read can both write the file in one process.
+# The scan thread and a page showing positions can both write the file in one process.
 _LOCK = threading.Lock()
 
 
@@ -62,8 +63,9 @@ def get_sector(symbol: str, tk=None, *, allow_network: bool = True, path=None,
     """``{sector, industry, fetched}`` for ``symbol``, both labels None when unknown.
 
     A fresh cache entry is returned as is. Otherwise, with ``allow_network``, ``tk.info``
-    is read (``tk`` defaults to ``yfinance.Ticker(symbol)``) and the result, a miss
-    included, is cached. Without network a stale entry is returned rather than nothing.
+    is read (``tk`` defaults to ``yfinance.Ticker(symbol)``) and the result, an empty one
+    included, is cached. Without network an out-of-date entry is returned rather than
+    nothing.
     Never raises."""
     sym = str(symbol or "").strip().upper()
     t = time.time() if now is None else float(now)

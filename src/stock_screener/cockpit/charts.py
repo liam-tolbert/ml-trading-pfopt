@@ -1,9 +1,9 @@
-"""Plotly charts for the cockpit: the surface where the *user* judges the VCP.
+"""Plotly charts for the cockpit: the place where the *user* judges the VCP.
 
-``build_chart`` renders a daily or weekly candlestick with 50/150/200 SMA overlays, a
-volume pane and an RMV pane. Optional: VCP contraction shading, a Bollinger-band envelope
-(toggled from the UI), and the Step-4 advisory levels (pivot / buy-zone / stop / target).
-It draws *hints*; it never decides.
+``build_chart`` renders a daily or weekly candlestick with 50/150/200 SMA lines, a volume
+pane and an RMV (relative measured volatility) pane. Optional: VCP contraction shading,
+Bollinger bands (toggled from the UI), and the Step-4 suggested levels (pivot / buy-zone /
+stop / target). It draws *hints*; it never decides.
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def _contraction_hover(c: dict) -> str:
     """One-line summary of a VCP contraction for the chart tooltip.
 
     Surfaces the numbers a user judges a VCP on: how deep the pullback was, the
-    peak->trough prices, how long it took, and whether volume dried up (< 1.0×).
+    peak->trough prices, how long it took, and whether volume fell below normal (< 1.0×).
     """
     parts = []
     dd = c.get("drawdown_pct")
@@ -43,7 +43,8 @@ def _contraction_hover(c: dict) -> str:
 
 
 def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample daily OHLCV to W-FRI (the repo's weekly convention)."""
+    """Turn daily open/high/low/close/volume bars into weeks ending Friday (``W-FRI``, the
+    repo's weekly convention)."""
     agg = {"Open": "first", "High": "max", "Low": "min", "Close": "last",
            "Volume": "sum"}
     cols = {k: v for k, v in agg.items() if k in df.columns}
@@ -80,7 +81,7 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                 show_bollinger: bool = False, marks: Optional[list] = None) -> go.Figure:
     """Return a 3-row Plotly figure: candlestick + SMAs (top), volume, RMV (bottom).
 
-    ``marks`` are Step-3 read markers, ``{"date", "pane": "price"|"volume", "text",
+    ``marks`` are Step-3 chart markers, ``{"date", "pane": "price"|"volume", "text",
     "symbol", "color"}``: a price mark sits under that bar's low, a volume mark on top of
     its bar. Drawn in the daily view only, with the overlays.
 
@@ -88,9 +89,9 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     base is visible. SMAs are still computed on the full history, so the 50/150/200
     lines stay correct. The price y-axis is fit to the window.
 
-    ``show_bollinger`` overlays the 20-period / 2σ Bollinger envelope (upper, 20-SMA
-    basis, lower) on the price row. These are the bands the TTM-squeeze and BBWP reads
-    are built from, so the chart shows the compression the Step-4 squeeze numbers report.
+    ``show_bollinger`` draws the 20-period / 2σ Bollinger bands (upper, 20-SMA middle,
+    lower) on the price row. The Step-4 squeeze numbers (TTM squeeze, BBWP) are built from
+    these bands, so the chart shows the narrowing those numbers report.
     """
     d_full = to_weekly(df) if weekly else df
 
@@ -107,7 +108,7 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
     fig = make_subplots(rows=3, cols=1, shared_xaxes=True,
                         row_heights=[0.62, 0.19, 0.19], vertical_spacing=0.03)
 
-    # The envelope MUST be added before the candles to render beneath them: Scatter has no
+    # The bands MUST be added before the candles to render beneath them: Scatter has no
     # layer="below", and z-order is trace order. "tonexty" fills the upper trace down to the
     # lower one, so lower comes first. Full history keeps the bands correct when zoomed.
     if show_bollinger and len(d_full) >= 20:
@@ -133,8 +134,8 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
             line=dict(width=1.2, color=color)), row=1, col=1)
 
     if "Volume" in d.columns:
-        # Colored by close vs prior close: heavy volume on down days is distribution, a VCP
-        # disqualifier. The window's first bar has no prior close and is gray.
+        # Colored by close vs prior close: heavy volume on down days means large holders are
+        # selling, which rules out a VCP. The window's first bar has no prior close: gray.
         _chg = d["Close"].diff()
         _vcol = ["#9aa0a6" if pd.isna(c) else ("#4c9e70" if c >= 0 else "#d96b5f")
                  for c in _chg]
@@ -152,8 +153,8 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                                      line=dict(width=1.1, color="#d93025", dash="dash")),
                           row=2, col=1)
 
-    # RMV on full history, so its min-max window stays stable when zoomed. The shaded band is
-    # the < 25 tight zone, the VCP sweet spot.
+    # RMV on full history, so its 0-100 scaling doesn't change when zoomed. The shaded band is
+    # the < 25 tight zone, where a VCP's quiet ending usually sits.
     if len(d_full) >= 15:
         rmv = relative_measured_volatility(d_full).reindex(d.index)
         fig.add_hrect(y0=0, y1=25, fillcolor="green", opacity=0.08, line_width=0,
@@ -170,7 +171,7 @@ def build_chart(ticker: str, df: pd.DataFrame, vcp: Optional[dict] = None,
                               row=1, col=1)
                 # A vrect is a layout shape and can't carry a tooltip, so an invisible scatter
                 # spans it and adds a "Contraction N" hover row. Its x MUST be visible candles,
-                # so points land on plotted, rangebreak-safe positions.
+                # so points land on plotted dates that the rangebreaks (below) don't remove.
                 hx = d.index[(d.index >= c["peak_date"]) & (d.index <= c["trough_date"])]
                 if len(hx):
                     fig.add_trace(go.Scatter(
