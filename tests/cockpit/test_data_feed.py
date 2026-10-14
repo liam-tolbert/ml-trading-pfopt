@@ -160,7 +160,7 @@ def test_fundamentals_surprise_and_edgar_merge():
                "eps_fy_yoy": 22.5, "eps_accel_3q": True}
     with tempfile.TemporaryDirectory() as tmp:
         with patch.object(dfeed, "FUNDAMENTALS_DIR", Path(tmp)), \
-                patch.object(dfeed, "_fetch_fundamentals", lambda s: dict(yf_dict)), \
+                patch.object(dfeed, "_fetch_fundamentals", lambda s, today=None: dict(yf_dict)), \
                 patch.object(dfeed, "_edgar_backfill", lambda s: dict(ed_dict)):
             out = dfeed.get_fundamentals("TSTX")
             assert out["revenue_yoy"] == 12.0             # EDGAR fills the None
@@ -446,9 +446,9 @@ def test_fundamentals_refetch_after_report_date():
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "TSTX.json"
         with patch.object(dfeed, "FUNDAMENTALS_DIR", Path(tmp)), \
-                patch.object(dfeed, "_fetch_fundamentals", lambda s: dict(fresh)), \
+                patch.object(dfeed, "_fetch_fundamentals", lambda s, today=None: dict(fresh)), \
                 patch.object(dfeed, "_edgar_backfill",
-                             lambda s, force=False: forced.append(force)):
+                             lambda s, today=None, force=False: forced.append(force)):
             def cached(report):
                 p.write_text(_json.dumps({"revenue_yoy": 1.0, "next_earnings": report,
                                           "last_surprise_pct": None, "est_rev_90d": None}))
@@ -479,8 +479,8 @@ def test_fundamentals_refetch_old_step2_cache():
     with tempfile.TemporaryDirectory() as tmp:
         p = Path(tmp) / "TSTX.json"
         with patch.object(dfeed, "FUNDAMENTALS_DIR", Path(tmp)), \
-                patch.object(dfeed, "_fetch_fundamentals", lambda s: dict(fresh)), \
-                patch.object(dfeed, "_edgar_backfill", lambda s, force=False: None):
+                patch.object(dfeed, "_fetch_fundamentals", lambda s, today=None: dict(fresh)), \
+                patch.object(dfeed, "_edgar_backfill", lambda s, today=None, force=False: None):
             p.write_text(_json.dumps({"revenue_yoy": 1.0, "next_earnings": None,
                                       "last_surprise_pct": None}))
             assert dfeed.get_fundamentals("TSTX")["revenue_yoy"] == 99.0
