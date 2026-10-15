@@ -4,7 +4,7 @@
 # data/cockpit/hunt/<date>/ lands as the same path under the Pi's data/cockpit/ (gitignored
 # there, so the deploy's dirty-checkout halt never sees it). The folder arrives whole: it is
 # copied to <date>.incoming and renamed, so the app never reads a half-pushed hunt. The
-# reviewer's working files (review_*.txt, verdicts_batch_*.csv) stay here.
+# reviewer's working files (review_*.txt, verdicts_batch_*.csv, review/*.png) stay here.
 # HUNT_PI, HUNT_PI_KEY and HUNT_PI_DIR override the host, the key and the Pi's data/cockpit.
 set -euo pipefail
 
@@ -25,7 +25,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/$DATE"
 cp -r "$SRC"/. "$STAGE/$DATE/"
-rm -f "$STAGE/$DATE"/review_*.txt "$STAGE/$DATE"/verdicts_batch_*.csv
+rm -f "$STAGE/$DATE"/review_*.txt "$STAGE/$DATE"/verdicts_batch_*.csv "$STAGE/$DATE"/review/*.png
 
 ssh "${SSH_OPTS[@]}" "$PI" "mkdir -p '$REMOTE/hunt' && rm -rf '$REMOTE/hunt/$DATE.incoming'"
 scp -q -r "${SSH_OPTS[@]}" "$STAGE/$DATE" "$PI:$REMOTE/hunt/$DATE.incoming"

@@ -556,6 +556,40 @@ def test_screen_job_appends_breadth():
         assert out["passed"] == 5 and len(breadth_store.load()) == 1
 
 
+def test_screen_job_writes_account_equity():
+    """The weekend hunt sizes a full position from the paper account's equity, which only
+    the Pi can read. The screen job saves it beside the scan; a failed read leaves the old
+    file alone and the job still exits 0 (the exit-code contract)."""
+    import json
+    import tempfile
+    from unittest.mock import patch
+
+    from src.stock_screener.cockpit import screen_job, trade
+
+    class _Res:
+        n_scanned, n_passed, errors, candidates = 10, 5, [], []
+        regime = {}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "account.json"
+        with patch.object(trade, "fetch_account_summary", lambda: {"equity": 101234.5}):
+            assert screen_job.write_account(path) is True
+        got = json.loads(path.read_text())
+        assert got["equity"] == 101234.5 and got["as_of"][:4].isdigit()
+
+        def _down():
+            raise trade.TradeUnavailable("no credentials")
+        with patch.object(trade, "fetch_account_summary", _down):
+            assert screen_job.write_account(path) is False
+        assert json.loads(path.read_text())["equity"] == 101234.5
+
+        with patch.object(screen_job.scan, "run_scan", lambda **kw: _Res()), \
+                patch.object(screen_job, "_STORE", type("S", (), {"put": lambda *a: None})()), \
+                patch.object(screen_job.cache, "ACCOUNT_JSON", path), \
+                patch.object(trade, "fetch_account_summary", _down):
+            assert screen_job.main([]) == 0
+
+
 def test_screen_universe_rows_carry_step1_reads():
     """§6.80: the three Step-1 reads reach the candidate rows and payloads: the book's
     count in ``criteria``, ``rs_trend`` and ``sma200_rising_m``. Unread row keys and the

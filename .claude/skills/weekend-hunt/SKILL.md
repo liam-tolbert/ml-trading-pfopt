@@ -1,15 +1,19 @@
 ---
 name: weekend-hunt
-description: Run the SEPA weekend hunt — chart-review every Tier A candidate from the latest cockpit scan and produce the gated report. Use when the user asks to run the weekend hunt / weekend workflow / Sunday review.
+description: Run the SEPA weekend hunt — have the hunt CLI chart-review every Tier A candidate from the latest cockpit scan, then read catalysts, write the narrative and produce the gated report. Use when the user asks to run the weekend hunt / weekend workflow / Sunday review.
 ---
 
 # Weekend Hunt
 
-You are the Step-3 reviewer in a pipeline where everything else is deterministic.
-The library (`src/stock_screener/hunt/`) computes; you judge charts. The books' chart
-rules (§4) and disqualifiers are in `src/stock_screener/SEPA_METHODOLOGY.md`; judge
-against those. Do not re-derive rules ad hoc — two of them were fumbled when this was
-improvised:
+You run a pipeline where the chart verdicts are already decided by code. The library
+(`src/stock_screener/hunt/`) computes everything, and its `review` command judges the
+charts: it asks Claude a fixed form about each base in a separate call, three times per
+ticker, and turns the answers into PASS / PASS- / FAIL with a fixed table
+(`hunt/reviewer.py`). The verdict judges the base only; distance to the pivot, F, price,
+days to earnings and the order ceiling are applied afterwards by `gates`. You MUST NOT
+change a verdict. Your judgment goes into the catalyst reads and the narrative. The
+books' rules are in `src/stock_screener/SEPA_METHODOLOGY.md`. Do not re-derive rules ad
+hoc — two of them were fumbled when this was improvised:
 
 - **Buy zone = pivot to +5%** (`scan.py buy_zone`, "no chasing"). The +10% in
   `vcp.py BUY_ZONE_PCT` is the Tier-A *screening* tolerance, never an entry bound.
@@ -32,28 +36,20 @@ bash scripts/hunt/hunt.sh <cmd>
 1. **`status`** — confirm the scan is fresh (the tool refuses > 3 days old) and
    report the regime line to the user. If it errors, stop and relay the message.
 2. **`candidates`** — writes `diagnostics.csv` + `meta.json` under
-   `data/cockpit/hunt/<date>/`. Note the candidate count.
-3. **`charts`** — renders review sheets (4 tickers per PNG) into
+   `data/cockpit/hunt/<date>/`. Note the candidate count, and whether `meta.json` has an
+   `equity` (without one, full positions are unknown and no name is marked thin).
+3. **`charts`** — renders the report's sheets (4 tickers per PNG) into
    `data/cockpit/hunt/<date>/charts/`.
-4. **Review every sheet** (Read each PNG). Judge each ticker against Step 3:
-   contractions tightening, volume drying up (computed: the title's `DU r/n` is the
-   final tight area's volume over its 50-day average and its near-silent days; read
-   it, don't re-estimate it from the bars), higher lows, base
-   depth sane, clear pivot, no distribution — plus liquidity (an order MUST stay
-   within 2% of the 20-day dollar volume; `max_order_usd` in the diagnostics is the
-   ceiling, and a ceiling under a full position is a `PASS-` at best),
-   penny/illiquid character, air pockets, stale or broken
-   pivots. Verdict per ticker: `PASS` (chart confirms), `PASS-` (real setup,
-   named caveat), `FAIL` (price action contradicts the label). Notes are one
-   dense line naming the reason, e.g. `"12-9-9-4 tightening, vol dry-up, -2% to pivot"`.
-5. **Record incrementally** (crash-safe): after each sheet batch (~16 tickers),
-   Write the batch to `data/cockpit/hunt/<date>/verdicts_batch_NN.csv` — header
-   `ticker,verdict,notes`, one row per ticker, notes quoted when they hold a comma —
-   then run **`append-verdicts --file <that path>`**. It refuses the whole batch if
-   a ticker is not a candidate, is repeated, or already has a verdict, and prints
-   how many candidates remain. Never edit `verdicts.csv` by hand.
+4. **`review-charts`** — draws each ticker's weekly and daily review charts and its
+   facts into `review/`.
+5. **`review`** — the chart review. It calls Claude three times per ticker (about 20 s a
+   call, four at a time), so 180 names take roughly 45 minutes: in a session, run it in
+   the background and wait for it. It writes every answer to `review/votes.jsonl`, the
+   combined answers to `review/form.csv` and one coded verdict per ticker to
+   `verdicts.csv`. It exits 1 when some names got no answer; run it again and it resumes.
+   Never edit `verdicts.csv` by hand.
 6. **`validate-verdicts`** — must report `ok: true` (every candidate exactly
-   once). Fix any problems it lists before proceeding.
+   once). If it lists missing names, run `review` again before proceeding.
 7. **`gates --min-fund N`** — N is the user's choice (ask or default 0; report
    the F distribution rather than silently gating). F runs 0–8. A
    missing figure fails its check, so a low F can mean thin data. Output has the buckets
@@ -85,8 +81,9 @@ bash scripts/hunt/hunt.sh <cmd>
      the F score, what would confirm it;
    - approaching names worth an alert, and earnings-blocked names to revisit;
    - the watchlist audit in words: pins that failed or drifted, names to prune;
-   - caveats of the review (thin data, position-size assumptions, pivots you
-     doubt).
+   - caveats of the review: thin data, whether full positions were known, and the
+     names `review/form.csv` lists under `needs_check` (votes split, an unsure
+     answer, or an answer the measurements contradict) — those need the user's eye.
    Verdicts and numbers come from steps 4–7; do not restate the tables. Name a
    catalyst from step 9 where it bears on a buy-zone name.
 11. **`report --min-fund N`** — writes `report.html` in the hunt dir, with the
@@ -113,15 +110,15 @@ timer. The task has already pulled the Pi's scan and checked it, and it pushes t
 finished folder to the Pi afterwards. When the prompt says the run is unattended:
 
 - Ask nothing. Use `--min-fund 0`.
-- Run steps 1–11 and skip step 12 (no Artifact tool here): the hunt folder,
+- The runner has already done steps 1–5. Start at step 6; if `validate-verdicts` is not
+  ok, stop and make the final message its output.
+- Run steps 6–11 and skip step 12 (no Artifact tool here): the hunt folder,
   reviewed on the cockpit's Weekend Hunt page, is the deliverable, and the
   narrative and the catalyst reads are where your judgment goes — write them
   with care.
 - Only the hunt CLI, file reads, and writes inside `data/cockpit/hunt/` are
   permitted. Do not try ssh, scp or any other command; a refusal is not a
   reason to look for a workaround.
-- If `verdicts.csv` already has rows, an earlier attempt was cut short: resume
-  from the tickers `validate-verdicts` lists as missing.
 - Your final message is saved as `summary.md` in the hunt dir. Make it the chat
   summary from step 11, in Markdown, and nothing else.
 - If a step fails, stop and make the final message the command and its error.
@@ -131,5 +128,5 @@ finished folder to the Pi afterwards. When the prompt says the run is unattended
 - Never arm entries, modify `watchlist.json`, or place/cancel orders — the hunt
   ends at the report; Step 4 is the user's, in the cockpit.
 - Read the scan pickle only through the CLI (it validates freshness/version).
-- A partial run resumes: existing `verdicts.csv` rows stand; review only the
-  tickers `validate-verdicts` lists as missing.
+- A partial run resumes: `review` keeps existing `verdicts.csv` rows and asks only
+  for the tickers still missing one.
