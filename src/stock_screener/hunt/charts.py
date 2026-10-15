@@ -7,6 +7,9 @@ carries the numbers the reviewer needs (quality, RS, F, vs-pivot, ADV$, DD,
 days to earnings) so a verdict never requires a second lookup.
 
 ``sheets.json`` beside the PNGs maps each sheet's file name to its tickers, in panel order.
+
+``render_review_images`` draws what the per-ticker reviewer sees instead: one ticker,
+a weekly and a daily chart, base facts only (see ``reviewer``).
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
-from matplotlib.ticker import NullFormatter, ScalarFormatter
+from matplotlib.ticker import FixedLocator, NullFormatter, ScalarFormatter
 
 from src.stock_screener.cockpit.doctrine import VOL_AVG_DAYS
 from src.stock_screener.cockpit.indicators import prior_volume_average
@@ -28,6 +31,9 @@ from .pipeline import BUY_ZONE_MAX_PCT, ScanBundle
 from .report import PER_FIG, SHEETS_JSON
 
 BARS = 185           # ~9 months of dailies: full base plus context
+REVIEW_DAILY_BARS = 126   # ~6 months; a longer base widens the daily chart to fit it
+# Raised by one whenever the review images change what they show.
+RENDER_VERSION = 1
 _UP, _DN = "#1a9850", "#d73027"
 
 
@@ -112,8 +118,114 @@ def _panel(fig, gs, j, bundle: ScanBundle, r: dict, bars: int) -> None:
         ern = "-"
     s3 = r.get("step3")
     s3 = f"  {s3}" if isinstance(s3, str) and s3 else ""
+    cap = "  cap" if _is_one(r.get("size_capped")) else ""
     axp.set_title(
         f"#{r['rank']} {t}{star}  q={r['q']:.0f} RS={r['rs']} F={r['fund']}  "
         f"c={r['close']:.2f} piv={r['pivot']:.2f} ({r['vs_pivot_pct']:+.1f}%)  "
-        f"ADV${r['adv_musd']:.1f}M  DD={r['dist_days']}  ern={ern}{s3}",
+        f"ADV${r['adv_musd']:.1f}M{cap}  DD={r['dist_days']}  ern={ern}{s3}",
         fontsize=9, loc="left")
+
+
+def _is_one(v) -> bool:
+    try:
+        return int(float(v)) == 1
+    except (TypeError, ValueError):
+        return False
+
+
+def render_review_images(bundle: ScanBundle, diag: pd.DataFrame, hunt_path: Path) -> List[str]:
+    """For each ticker in ``diag``: a weekly and a daily PNG and the facts JSON, at the
+    paths ``reviewer.review_paths`` gives. The charts carry no ticker, no levels and no
+    numbers the gates use. Returns the tickers drawn."""
+    from . import reviewer as rv
+    done = []
+    for r in diag.to_dict("records"):
+        t = r["ticker"]
+        p = bundle.result.payloads[t]
+        facts = rv.fact_sheet(p, r)
+        weekly, daily, fpath = rv.review_paths(hunt_path, t)
+        weekly.parent.mkdir(parents=True, exist_ok=True)
+        _weekly_chart(p["df"], weekly)
+        _daily_chart(p["df"], facts["swings"], daily)
+        fpath.write_text(json.dumps(facts, indent=1), encoding="utf-8")
+        done.append(t)
+    return done
+
+
+def _candles(ax, o, h, l, c, width):
+    x = np.arange(len(c))
+    color = np.where(c >= o, _UP, _DN)
+    ax.vlines(x, l, h, color=color, lw=0.8)
+    ax.vlines(x, np.minimum(o, c), np.maximum(o, c), color=color, lw=width)
+    return x, color
+
+
+def _log_axis(ax, idx, lo, hi, fmt, months=1):
+    ax.set_yscale("log")
+    # A log axis over a narrow range gets no decade ticks, so price labels are placed here.
+    ticks = sorted({float(f"{v:.2g}") for v in np.geomspace(lo, hi, 7)})
+    ax.yaxis.set_major_locator(FixedLocator(ticks))
+    ax.yaxis.set_major_formatter(ScalarFormatter())
+    ax.yaxis.set_minor_formatter(NullFormatter())
+    ax.grid(True, which="major", alpha=0.25)
+    mk = [i for i in range(1, len(idx)) if idx[i].month != idx[i - 1].month
+          and (idx[i].month - 1) % months == 0]
+    ax.set_xticks(mk)
+    ax.set_xticklabels([idx[i].strftime(fmt) for i in mk], fontsize=9)
+
+
+def _weekly_chart(df: pd.DataFrame, out: Path) -> None:
+    w = df.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min",
+                                  "Close": "last", "Volume": "sum"}).dropna()
+    fig = plt.figure(figsize=(16, 10), dpi=100)
+    gs = GridSpec(2, 1, height_ratios=[3, 1], hspace=0.05)
+    axp = fig.add_subplot(gs[0])
+    axv = fig.add_subplot(gs[1], sharex=axp)
+    x, color = _candles(axp, *(w[k].to_numpy() for k in ("Open", "High", "Low", "Close")),
+                        width=4.0)
+    for win, col in ((10, "#1f78b4"), (30, "#ff7f00"), (40, "#6a3d9a")):
+        axp.plot(x, w["Close"].rolling(win).mean().to_numpy(), color=col, lw=1.2)
+    _log_axis(axp, w.index, float(w["Low"].min()), float(w["High"].max()), "%b %y",
+              months=3)
+    plt.setp(axp.get_xticklabels(), visible=False)
+    axv.bar(x, w["Volume"].to_numpy(), color=color, width=0.8, alpha=0.8)
+    axv.plot(x, w["Volume"].rolling(10).mean().to_numpy(), color="#1f78b4", lw=1.0)
+    axv.set_yticks([])
+    axp.set_title("Weekly", fontsize=12, loc="left")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _daily_chart(df: pd.DataFrame, swings: List[dict], out: Path) -> None:
+    n = REVIEW_DAILY_BARS
+    if swings:
+        first = int(df.index.get_indexer([pd.Timestamp(swings[0]["date"])],
+                                         method="nearest")[0])
+        n = max(n, len(df) - first + 20)
+    d = df.tail(n)
+    fig = plt.figure(figsize=(16, 10), dpi=100)
+    gs = GridSpec(2, 1, height_ratios=[2, 1], hspace=0.05)
+    axp = fig.add_subplot(gs[0])
+    axv = fig.add_subplot(gs[1], sharex=axp)
+    x, color = _candles(axp, *(d[k].to_numpy() for k in ("Open", "High", "Low", "Close")),
+                        width=2.6)
+    for win, col in ((50, "#1f78b4"), (150, "#ff7f00"), (200, "#6a3d9a")):
+        axp.plot(x, df["Close"].rolling(win).mean().tail(n).to_numpy(), color=col, lw=1.2)
+    for s in swings:
+        i = int(d.index.get_indexer([pd.Timestamp(s["date"])], method="nearest")[0])
+        if s["kind"] == "peak":
+            y, off = float(d["High"].iloc[i]), 10
+        else:
+            y, off = float(d["Low"].iloc[i]), -16
+        axp.annotate(s["label"], xy=(i, y), xytext=(0, off), textcoords="offset points",
+                     ha="center", fontsize=12, fontweight="bold")
+    _log_axis(axp, d.index, float(d["Low"].min()), float(d["High"].max()), "%b")
+    plt.setp(axp.get_xticklabels(), visible=False)
+    vol = d["Volume"].to_numpy()
+    axv.bar(x, vol, color=color, width=0.8, alpha=0.8)
+    avg = prior_volume_average(df["Volume"], VOL_AVG_DAYS).tail(n).to_numpy()
+    axv.plot(x, avg, color="#1f78b4", lw=1.2)
+    axv.set_yticks([])
+    axp.set_title("Daily", fontsize=12, loc="left")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)

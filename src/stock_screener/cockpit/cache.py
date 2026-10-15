@@ -18,6 +18,7 @@ WATCHLIST_JSON = CACHE_DIR / "watchlist.json"   # persisted watchlist (entry dic
 TRIGGERS_DIR = CACHE_DIR / "triggers"           # trigger reports + entry/sell plans
 LOGS_DIR = CACHE_DIR / "logs"                   # dated run logs, pruned by runlog.RETENTION_DAYS
 LAST_SCAN_PKL = CACHE_DIR / "last_scan.pkl"     # newest completed ScanResult (scan_worker)
+ACCOUNT_JSON = CACHE_DIR / "account.json"       # paper equity beside the scan (screen_job)
 BREADTH_CSV = CACHE_DIR / "breadth.csv"         # one row per settled session (breadth_store)
 SECTORS_JSON = CACHE_DIR / "sectors.json"       # {SYMBOL: {sector, industry, fetched}} (sectors)
 

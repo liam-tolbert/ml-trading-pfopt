@@ -3,6 +3,11 @@
     python -m src.stock_screener.hunt status
     python -m src.stock_screener.hunt candidates [--min-rs 70] [--date YYYY-MM-DD]
     python -m src.stock_screener.hunt charts [--limit N] [--per-fig 4] [--date ...]
+    python -m src.stock_screener.hunt review-charts [--limit N] [--date ...]
+    python -m src.stock_screener.hunt review [--model M] [--effort E] [--votes 3] [--jobs 4]
+    python -m src.stock_screener.hunt label-template [--date ...]
+    python -m src.stock_screener.hunt score --labels MINE.csv [--against THEIRS.csv] [--date ...]
+    python -m src.stock_screener.hunt compare --date A --against B
     python -m src.stock_screener.hunt append-verdicts --file BATCH.csv [--date ...]
     python -m src.stock_screener.hunt validate-verdicts [--date ...]
     python -m src.stock_screener.hunt gates [--min-fund 0] [--date ...]
@@ -11,14 +16,20 @@
 
 Run from the repo root inside the ml-trading env; scripts/hunt/hunt.sh does both.
 State lands in data/cockpit/hunt/<date>/ — diagnostics.csv, meta.json,
-charts/sheet_NNN.png, news/<ticker>.json, verdicts.csv, narrative.md and
-catalyst.json (the last two written by the reviewer), report.html. `report` also
-mirrors report.html and the sheets to docs/hunt/<date>/, the deliverable.
+charts/sheet_NNN.png, review/ (each ticker's two review charts and facts, every answer
+in votes.jsonl, the combined answers in form.csv), news/<ticker>.json, verdicts.csv,
+narrative.md and catalyst.json (the last two written by the skill), report.html.
+`report` also mirrors report.html and the sheets to docs/hunt/<date>/, the deliverable.
+
+`review` calls the Claude Code CLI once per answer: HUNT_CLAUDE names the executable
+when `claude` is not on PATH.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -31,6 +42,7 @@ if str(_ROOT) not in sys.path:
 import pandas as pd
 
 from src.stock_screener.hunt import pipeline as pl
+from src.stock_screener.hunt import reviewer as rv
 
 
 def _load_state(args):
@@ -49,11 +61,16 @@ def cmd_status(args) -> int:
 def cmd_candidates(args) -> int:
     bundle = pl.load_scan()
     cand = pl.candidates(bundle, min_rs=args.min_rs)
-    diag = pl.diagnostics(bundle, cand)
+    equity = pl.load_equity()
+    diag = pl.diagnostics(bundle, cand, equity=equity)
     d = pl.hunt_dir(args.date)
     diag.to_csv(d / "diagnostics.csv", index=False)
     meta = pl.status(bundle)
     meta["min_rs"] = args.min_rs
+    meta["equity"] = equity
+    meta["full_position_usd"] = round(pl.FULL_POSITION_PCT * equity) if equity else None
+    if equity:
+        meta["equity_as_of"] = json.loads(pl.ACCOUNT_JSON.read_text(encoding="utf-8"))["as_of"]
     (d / "meta.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
     print(json.dumps({"hunt_dir": str(d), "candidates": len(diag),
                       "diagnostics": str(d / "diagnostics.csv")}, indent=2))
@@ -69,6 +86,88 @@ def cmd_charts(args) -> int:
     paths = render_sheets(bundle, diag, d / "charts", per_fig=args.per_fig)
     print(json.dumps({"sheets": [str(p) for p in paths],
                       "tickers": len(diag), "per_fig": args.per_fig}, indent=2))
+    return 0
+
+
+def cmd_review_charts(args) -> int:
+    from src.stock_screener.hunt.charts import RENDER_VERSION, render_review_images
+    bundle = pl.load_scan()
+    d, diag = _load_state(args)
+    if args.limit:
+        diag = diag.head(args.limit)
+    done = render_review_images(bundle, diag, d)
+    _update_meta(d, {"review_render_version": RENDER_VERSION})
+    print(json.dumps({"tickers": len(done), "dir": str(d / rv.REVIEW_SUBDIR)}, indent=2))
+    return 0
+
+
+def cmd_review(args) -> int:
+    d, diag = _load_state(args)
+    claude = os.environ.get("HUNT_CLAUDE") or shutil.which("claude")
+    if not claude:
+        raise pl.HuntError("claude CLI not found: put it on PATH or set HUNT_CLAUDE.")
+    try:
+        frames = {t: p["df"] for t, p in pl.load_scan().result.payloads.items()}
+    except pl.HuntError:
+        frames = None                     # Claude's own swing points go unmeasured
+    call = rv.claude_cli(claude, model=args.model, effort=args.effort,
+                         cwd=d / rv.REVIEW_SUBDIR)
+    _update_meta(d, {"review": {"model": args.model, "effort": args.effort,
+                                "votes": args.votes, "prompt": rv.prompt_hash(),
+                                "table_version": rv.TABLE_VERSION}})
+    out = rv.run_review(d, diag, call, votes=args.votes, jobs=args.jobs, frames=frames,
+                        log=lambda m: print(m, file=sys.stderr))
+    used = sorted({v.get("model") for v in _vote_records(d) if v.get("model")})
+    cost = sum(v.get("cost_usd") or 0.0 for v in _vote_records(d))
+    _update_meta(d, {"review_models_used": used, "review_cost_usd": round(cost, 2)})
+    print(json.dumps(out, indent=2))
+    return 1 if out["no_answer"] else 0
+
+
+def _vote_records(d: Path):
+    path = d / rv.REVIEW_SUBDIR / rv.VOTES_FILE
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            pass
+    return out
+
+
+def _update_meta(d: Path, fields: dict) -> None:
+    path = d / "meta.json"
+    meta = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    meta.update(fields)
+    path.write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8")
+
+
+def cmd_label_template(args) -> int:
+    d, diag = _load_state(args)
+    out = d / "labels.csv"
+    if out.exists():
+        raise pl.HuntError(f"{out} already exists; it is never overwritten.")
+    rv.write_label_template(out, list(diag["ticker"]))
+    print(json.dumps({"labels": str(out), "tickers": len(diag)}, indent=2))
+    return 0
+
+
+def cmd_score(args) -> int:
+    d = pl.hunt_dir(args.date)
+    theirs = Path(args.against) if args.against else d / rv.REVIEW_SUBDIR / rv.FORM_FILE
+    print(json.dumps(rv.score(rv.read_labels(Path(args.labels)), rv.read_labels(theirs)),
+                     indent=2))
+    return 0
+
+
+def cmd_compare(args) -> int:
+    a = pl.read_verdicts(pl.HUNT_DIR / args.date / "verdicts.csv")
+    b = pl.read_verdicts(pl.HUNT_DIR / args.against / "verdicts.csv")
+    if not a or not b:
+        raise pl.HuntError("both hunt folders need a verdicts.csv.")
+    print(json.dumps(pl.compare_verdicts(a, b), indent=2))
     return 0
 
 
@@ -139,6 +238,21 @@ def main(argv=None) -> int:
     p = sub.add_parser("charts"); common(p)
     p.add_argument("--limit", type=int, default=0)
     p.add_argument("--per-fig", type=int, default=4)
+    p = sub.add_parser("review-charts"); common(p)
+    p.add_argument("--limit", type=int, default=0)
+    p = sub.add_parser("review"); common(p)
+    p.add_argument("--model", default=rv.REVIEW_MODEL)
+    p.add_argument("--effort", default=rv.REVIEW_EFFORT)
+    p.add_argument("--votes", type=int, default=rv.REVIEW_VOTES)
+    p.add_argument("--jobs", type=int, default=4, help="calls running at once")
+    p = sub.add_parser("label-template"); common(p)
+    p = sub.add_parser("score"); common(p)
+    p.add_argument("--labels", required=True, help="your answers (from label-template)")
+    p.add_argument("--against", default=None,
+                   help="answers to score (default: the review's form.csv)")
+    p = sub.add_parser("compare")
+    p.add_argument("--date", required=True)
+    p.add_argument("--against", required=True)
     p = sub.add_parser("append-verdicts"); common(p)
     p.add_argument("--file", required=True, help="CSV with the header ticker,verdict,notes")
     p = sub.add_parser("validate-verdicts"); common(p)
@@ -152,6 +266,9 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         return {"status": cmd_status, "candidates": cmd_candidates, "charts": cmd_charts,
+                "review-charts": cmd_review_charts, "review": cmd_review,
+                "label-template": cmd_label_template, "score": cmd_score,
+                "compare": cmd_compare,
                 "append-verdicts": cmd_append, "validate-verdicts": cmd_validate,
                 "gates": cmd_gates, "news": cmd_news, "report": cmd_report}[args.cmd](args)
     except pl.HuntError as e:

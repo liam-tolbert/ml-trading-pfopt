@@ -46,8 +46,9 @@ $Summary  = Join-Path $HuntDir 'summary.md'
 $Settings = Join-Path $PSScriptRoot 'unattended_settings.json'
 $Prompt   = Join-Path $PSScriptRoot 'unattended_prompt.txt'
 
-$ReviewMinutes     = 90   # one headless review is stopped after this long
-$ReviewAttempts    = 2    # the skill resumes from the tickers still missing a verdict
+$ReviewMinutes     = 90   # one headless skill run is stopped after this long
+$ReviewAttempts    = 2    # the skill resumes from where the last attempt stopped
+$ChartAttempts     = 2    # `hunt review` resumes from the tickers still missing a verdict
 $WakeWindowMinutes = 10   # a resume this close to the start counts as a wake for the run
 $WakeTestSeconds   = 180  # longer than Windows' 2-minute unattended sleep timeout
 
@@ -118,7 +119,8 @@ function Get-RunWake {
     return $resume.TimeCreated
 }
 
-# One headless review. Returns claude's exit code, or -1 when it was stopped for running long.
+# One headless skill run (gates, news, catalysts, narrative, report). Returns claude's exit
+# code, or -1 when it was stopped for running long.
 function Invoke-Review([string]$Claude, [int]$Attempt) {
     $out = Join-Path $HuntDir "review_$Attempt.out.txt"
     $err = Join-Path $HuntDir "review_$Attempt.err.txt"
@@ -168,14 +170,30 @@ function Invoke-Hunt {
         Write-Log 'no CLAUDE_CODE_OAUTH_TOKEN in the environment; relying on a stored claude login'
     }
 
-    $valid = $false
-    for ($attempt = 1; $attempt -le $ReviewAttempts -and -not $valid; $attempt++) {
-        Write-Log "review attempt $attempt of $ReviewAttempts"
+    # The chart review runs here, outside the skill: one Claude call per answer, driven by
+    # the hunt CLI, so no single session judges every chart.
+    foreach ($step in @('candidates', 'charts', 'review-charts')) {
+        if ((Invoke-Bash "$huntSh $step --date $Date").Code -ne 0) { throw "hunt $step failed." }
+    }
+    $reviewed = $false
+    for ($attempt = 1; $attempt -le $ChartAttempts -and -not $reviewed; $attempt++) {
+        Write-Log "chart review attempt $attempt of $ChartAttempts"
+        $cmd = "HUNT_CLAUDE='$($claude.Source)' $huntSh review --date $Date"
+        $reviewed = (Invoke-Bash $cmd).Code -eq 0
+    }
+    if (-not $reviewed) { throw 'the chart review left names without a verdict.' }
+    if ((Invoke-Bash "$huntSh validate-verdicts --date $Date").Code -ne 0) {
+        throw 'the review did not leave one verdict per candidate.'
+    }
+
+    $done = $false
+    for ($attempt = 1; $attempt -le $ReviewAttempts -and -not $done; $attempt++) {
+        Write-Log "skill attempt $attempt of $ReviewAttempts"
         $code = Invoke-Review $claude.Source $attempt
         Write-Log "claude exited $code"
-        $valid = (Invoke-Bash "$huntSh validate-verdicts --date $Date").Code -eq 0
+        $built = Get-Item $Report -ErrorAction SilentlyContinue
+        $done = ($code -eq 0) -and $built -and $built.LastWriteTime -ge $Started
     }
-    if (-not $valid) { throw 'the review did not leave one verdict per candidate.' }
 
     $built = Get-Item $Report -ErrorAction SilentlyContinue
     if (-not $built -or $built.LastWriteTime -lt $Started) {

@@ -216,22 +216,26 @@ def test_append_batch():
             except pl.HuntError:
                 return before == (p.read_text(encoding="utf-8") if p.exists() else None)
 
-        batch.write_text('ticker,verdict,notes\nAAA,PASS,"tight, quiet"\nBBB,PASS-,y\n',
-                         encoding="utf-8")
+        batch.write_text('ticker,verdict,notes\nAAA,PASS,"OK; tight, quiet"\n'
+                         'BBB,PASS-,CAV:loose; y\n', encoding="utf-8")
         ok("batch appended", pl.append_batch(p, batch, diag) == 2)
         ok("a quoted comma survives the round trip",
-           pl.read_verdicts(p)["AAA"]["notes"] == "tight, quiet")
+           pl.read_verdicts(p)["AAA"]["notes"] == "OK; tight, quiet")
         ok("re-running a batch is rejected, nothing written",
-           rejected("ticker,verdict,notes\nAAA,PASS,again\nDDD,FAIL,z\n"))
-        ok("a non-candidate is rejected", rejected("ticker,verdict,notes\nCCC,PASS,x\n"))
+           rejected("ticker,verdict,notes\nAAA,PASS,OK; again\nDDD,FAIL,DQ:no-base; z\n"))
+        ok("a non-candidate is rejected", rejected("ticker,verdict,notes\nCCC,PASS,OK; x\n"))
         ok("a ticker repeated in the batch is rejected",
-           rejected("ticker,verdict,notes\nDDD,PASS,x\nDDD,FAIL,y\n"))
-        ok("a bad verdict is rejected", rejected("ticker,verdict,notes\nDDD,BUY,x\n"))
-        ok("a batch without the header is rejected", rejected("DDD,PASS,x\n"))
+           rejected("ticker,verdict,notes\nDDD,PASS,OK; x\nDDD,FAIL,DQ:no-base; y\n"))
+        ok("a bad verdict is rejected", rejected("ticker,verdict,notes\nDDD,BUY,OK; x\n"))
+        ok("a note without a code is rejected", rejected("ticker,verdict,notes\nDDD,FAIL,z\n"))
+        ok("a caveat on a FAIL is rejected",
+           rejected("ticker,verdict,notes\nDDD,FAIL,CAV:loose; z\n"))
+        ok("a batch without the header is rejected", rejected("DDD,PASS,OK; x\n"))
         ok("an empty batch is rejected", rejected(""))
         ok("a missing batch file is rejected",
            _raises(lambda: pl.append_batch(p, Path(td) / "absent.csv", diag)))
-        batch.write_text("ticker,verdict,notes\nDDD,FAIL,z\nEEE,FAIL,w\n", encoding="utf-8")
+        batch.write_text("ticker,verdict,notes\nDDD,FAIL,DQ:expanding; z\n"
+                         "EEE,FAIL,DQ:v-shape; w\n", encoding="utf-8")
         pl.append_batch(p, batch, diag)
         ok("batches add up to a clean validation", pl.validate_verdicts(p, diag) == [])
 
@@ -390,12 +394,14 @@ def test_load_state_tolerates_gaps():
             ok("an empty ADV cell reads as None", row["adv_musd"] is None
                and row["max_order_usd"] is None)
             old = diag.drop(columns=["f_max", "f_code33", "f_fy", "f_est", "f_react",
-                                     "stop", "max_order_usd"])
+                                     "stop", "max_order_usd", "full_position_usd",
+                                     "size_capped"])
             old.to_csv(d / "diagnostics.csv", index=False)
             st = rp.load_state(d)
             row = st.diag_rows[0]
             ok("a pre-eight-check hunt loads with defaults",
-               row["f_max"] == 8 and row["f_code33"] == 0 and row["stop"] is None)
+               row["f_max"] == 8 and row["f_code33"] == 0 and row["stop"] is None
+               and row["size_capped"] is None and row["full_position_usd"] is None)
             html = rp.build_report(d).read_text(encoding="utf-8")
             ok("and still renders a report", "Weekend Hunt" in html)
     finally:
@@ -497,12 +503,391 @@ def test_report_catalyst_line():
         pl._watchlist_tickers = real_watchlist
 
 
+def test_equity_and_full_position():
+    """A full position is 5% of the paper equity the Pi saves beside the scan (user
+    decision, 2026-10-09). The reviewer had guessed an account of about $100k, so thin
+    names were marked PASS- against the wrong size. An old or missing equity reads as
+    unknown, never as a stale number."""
+    import datetime as dt
+    import json
+    now = dt.datetime(2026, 10, 10, 9, 0)
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "account.json"
+        ok("no file: equity unknown", pl.load_equity(f, now) is None)
+        f.write_text(json.dumps({"equity": 100000.0, "as_of": "2026-10-09T16:30:00"}))
+        ok("a fresh file gives its equity", pl.load_equity(f, now) == 100000.0)
+        f.write_text(json.dumps({"equity": 100000.0, "as_of": "2026-10-06T16:30:00"}))
+        ok("an equity older than 3 days is unknown", pl.load_equity(f, now) is None)
+        f.write_text(json.dumps({"equity": 0, "as_of": "2026-10-09T16:30:00"}))
+        ok("a non-positive equity is unknown", pl.load_equity(f, now) is None)
+        f.write_text("{oops")
+        ok("an unreadable file is unknown", pl.load_equity(f, now) is None)
+
+    b = _bundle()
+    cand = pl.candidates(b)
+    base = pl.diagnostics(b, cand).set_index("ticker")
+    ok("no equity: no full position and no cap flag",
+       base["full_position_usd"].isna().all() and base["size_capped"].isna().all())
+    cap = float(base.loc["AAA", "max_order_usd"])
+    for label, equity, want in (("below", cap / 0.05 - 2000, 0), ("at", cap / 0.05, 0),
+                                ("above", cap / 0.05 + 2000, 1)):
+        row = pl.diagnostics(b, cand, equity=equity).set_index("ticker").loc["AAA"]
+        ok(f"a full position {label} the order ceiling: size_capped={want}",
+           int(row["size_capped"]) == want
+           and row["full_position_usd"] == round(0.05 * equity))
+
+
+def test_note_codes():
+    """Each verdict note opens with codes from a fixed list, so a verdict that changes
+    from one week to the next shows which reason changed."""
+    ok("a good PASS", pl.parse_note_codes("PASS", "OK; 12-8-4 legs") == [])
+    ok("a good PASS- with two caveats under one prefix",
+       pl.parse_note_codes("PASS-", "CAV:loose,no-dryup; 12-9-9 legs, DU 1.1x") == [])
+    ok("each caveat with its own prefix", pl.parse_note_codes("PASS-", "CAV:loose,CAV:late") == [])
+    ok("a good FAIL", pl.parse_note_codes("FAIL", "DQ:v-shape; straight up") == [])
+    ok("no code", pl.parse_note_codes("PASS", "nice base") != [])
+    ok("an empty note", pl.parse_note_codes("PASS", "") == ["no code"])
+    ok("an unknown code", any("unknown" in q for q in pl.parse_note_codes("FAIL", "DQ:ugly; x")))
+    ok("a caveat on a FAIL", any("belongs to PASS-" in q
+                                 for q in pl.parse_note_codes("FAIL", "CAV:loose; x")))
+    ok("a disqualifier on a PASS-", any("belongs to FAIL" in q
+                                       for q in pl.parse_note_codes("PASS-", "DQ:no-base; x")))
+    ok("two disqualifiers on a FAIL", any("exactly one" in q for q in
+                                          pl.parse_note_codes("FAIL", "DQ:no-base,v-shape; x")))
+    ok("text after the semicolon may hold commas and colons",
+       pl.parse_note_codes("PASS-", "CAV:thin; ADV $2M, cap: $40k") == [])
+
+
+def test_compare_verdicts():
+    a = {"AAA": {"verdict": "PASS", "notes": "OK"}, "BBB": {"verdict": "PASS-", "notes": "x"},
+         "CCC": {"verdict": "FAIL", "notes": "y"}, "DDD": {"verdict": "PASS", "notes": ""}}
+    b = {"AAA": {"verdict": "PASS", "notes": "OK"}, "BBB": {"verdict": "FAIL", "notes": "z"},
+         "CCC": {"verdict": "FAIL", "notes": "y"}, "EEE": {"verdict": "PASS", "notes": ""}}
+    c = pl.compare_verdicts(a, b)
+    ok("compare counts the shared names", c["shared"] == 3)
+    ok("compare overall agreement", c["agree_pct"] == 66.7)
+    ok("compare agreement where either said PASS- or FAIL",
+       c["pass_minus_or_fail"] == {"n": 2, "agree_pct": 50.0})
+    ok("compare lists the changed name with both verdicts",
+       [(x["ticker"], x["a"], x["b"]) for x in c["changed"]] == [("BBB", "PASS-", "FAIL")])
+    ok("nothing shared: agreement unknown", pl.compare_verdicts(a, {})["agree_pct"] is None)
+
+
+# ---- the per-ticker reviewer ---------------------------------------------- #
+def _form(**kw) -> dict:
+    from src.stock_screener.hunt import reviewer as rv
+    f = {"pattern": "vcp", "swings_match": "yes", "right_side": "orderly_tightening",
+         "final_area": "tight", "volume": "drying_up", "pivot": "clear",
+         "character": "quick_recoveries", "base_count": "first_or_second",
+         "swings_seen": [], "sure": True}
+    f.update(kw)
+    f["evidence"] = {q: f"why {q}" for q in rv.FORM}
+    return f
+
+
+def _facts(**kw) -> dict:
+    f = {"swings": [], "legs": [{"from": "A", "to": "B", "depth_pct": 20.0},
+                                {"from": "C", "to": "D", "depth_pct": 10.0},
+                                {"from": "E", "to": "F", "depth_pct": 5.0}],
+         "leg_ratios": [0.5, 0.5], "dryup_ratio": 0.6, "closed_below_200_in_base": False}
+    f.update(kw)
+    return f
+
+
+def test_reviewer_form_and_schema():
+    from src.stock_screener.hunt import reviewer as rv
+    sch = rv.schema()
+    ok("the schema asks every form question plus swings, evidence and sure",
+       set(sch["required"]) == set(rv.FORM) | {"swings_seen", "evidence", "sure"}
+       and all(sch["properties"][q]["enum"] == list(a) for q, a in rv.FORM.items()))
+    ok("a full answer validates", rv.validate_form(_form()) == [])
+    ok("an answer off the list is caught", rv.validate_form(_form(volume="dry")) != [])
+    bad = _form()
+    del bad["evidence"]["pivot"]
+    ok("missing evidence is caught", rv.validate_form(bad) != [])
+    ok("a non-object is caught", rv.validate_form(None) == ["not an object"])
+    ok("the prompt hash is stable", rv.prompt_hash() == rv.prompt_hash()
+       and len(rv.prompt_hash()) == 12)
+
+
+def test_reviewer_facts_hide_the_gates():
+    """The reviewer judges the base only. RS, F, the quality score, the distance to the
+    pivot, days to earnings and dollar volume decide nothing in the verdict, so they are
+    never shown to it, and neither is the ticker."""
+    from src.stock_screener.hunt import reviewer as rv
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    row = diag.set_index("ticker").loc["AAA"].to_dict()
+    facts = rv.fact_sheet(b.result.payloads["AAA"], row)
+    ok("swings are lettered peak then trough",
+       [(s["label"], s["kind"]) for s in facts["swings"]] == [("A", "peak"), ("B", "trough")])
+    ok("legs carry depth, length and volume", facts["legs"][0]["depth_pct"] == 9.5
+       and facts["legs"][0]["bars"] == 6 and facts["legs"][0]["volume_x50"] is not None)
+    for key in ("rs", "fund", "q", "vs_pivot_pct", "earnings_in", "adv_musd", "max_order_usd",
+                "size_capped", "pivot", "close"):
+        ok(f"the facts leave out {key}", key not in facts)
+    prompt = rv.build_prompt(Path("w.png"), Path("d.png"), facts)
+    ok("the prompt names both images and not the ticker",
+       "w.png" in prompt and "d.png" in prompt and "AAA" not in prompt)
+    ok("the prompt shows the measured legs", "A->B  -9.5%" in prompt)
+    ok("an unmeasured value is left out of the prompt",
+       "Base depth over the market" not in prompt)
+
+
+def test_verdict_table():
+    from src.stock_screener.hunt import reviewer as rv
+    v = rv.verdict_from_form
+    ok("a clean form is PASS", v(_form(), _facts(), {})[:2] == ("PASS", ["OK"]))
+    ok("closing below the 200-day fails whatever the form says",
+       v(_form(), _facts(closed_below_200_in_base=True), {})[:2] == ("FAIL", ["DQ:below-200"]))
+    ok("a stop inside one typical day is a bronco", v(_form(), _facts(), {"stop_room": 0.9})[1]
+       == ["DQ:bronco"])
+    ok("a stop of exactly one typical day is not", v(_form(), _facts(), {"stop_room": 1.0})[0]
+       == "PASS")
+    for kw, code in (({"pattern": "no_base"}, "DQ:no-base"),
+                     ({"right_side": "wider_leg"}, "DQ:expanding"),
+                     ({"right_side": "v_shape"}, "DQ:v-shape"),
+                     ({"volume": "heavy_selling"}, "DQ:distribution"),
+                     ({"character": "wild_swings"}, "DQ:bronco")):
+        ok(f"{kw} fails with {code}", v(_form(**kw), _facts(), {})[:2] == ("FAIL", [code]))
+    ok("several disqualifiers name the first in order",
+       v(_form(pattern="no_base", volume="heavy_selling"), _facts(), {})[1] == ["DQ:no-base"])
+    for kw, code in (({"final_area": "loose"}, "CAV:loose"),
+                     ({"final_area": "not_formed"}, "CAV:pivot"),
+                     ({"pivot": "several"}, "CAV:pivot"), ({"pivot": "none"}, "CAV:pivot"),
+                     ({"volume": "mixed"}, "CAV:no-dryup"),
+                     ({"base_count": "fourth_or_later"}, "CAV:late")):
+        ok(f"{kw} is PASS- with {code}", v(_form(**kw), _facts(), {})[:2] == ("PASS-", [code]))
+    ok("a dry-up ratio of exactly 1.0 is no dry-up",
+       v(_form(), _facts(dryup_ratio=1.0), {})[1] == ["CAV:no-dryup"])
+    ok("0.99 is a dry-up", v(_form(), _facts(dryup_ratio=0.99), {})[0] == "PASS")
+    ok("a capped order size is thin", v(_form(), _facts(), {"size_capped": 1})[1] == ["CAV:thin"])
+    ok("an unknown order size adds nothing", v(_form(), _facts(), {"size_capped": None})[0]
+       == "PASS")
+    ok("caveats add up, each once",
+       v(_form(final_area="not_formed", pivot="none", volume="mixed"), _facts(dryup_ratio=1.2),
+         {"size_capped": 1})[1] == ["CAV:pivot", "CAV:no-dryup", "CAV:thin"])
+    ok("swings and character grinding change nothing",
+       v(_form(swings_match="no", character="grinding"), _facts(), {})[0] == "PASS")
+
+
+def test_reviewer_votes_and_checks():
+    """Each ticker is asked three times; each question takes the majority, a three-way
+    split takes the answer that weighs most against the base, and anything the user
+    should look at is listed."""
+    from src.stock_screener.hunt import reviewer as rv
+    f, sure = rv.combine([_form(volume="mixed"), _form(volume="drying_up"),
+                          _form(volume="mixed")])
+    ok("the majority answer wins", f["volume"] == "mixed" and sure)
+    f, _ = rv.combine([_form(volume="mixed"), _form(volume="drying_up"),
+                       _form(volume="heavy_selling")])
+    ok("a three-way split takes the worst answer", f["volume"] == "heavy_selling")
+    ok("evidence comes from a vote that gave the chosen answer",
+       f["evidence"]["volume"] == "why volume")
+
+    d = rv.decide([_form()] * 3, _facts(), {})
+    ok("unanimous and sure: nothing to check", d["needs_check"] == [] and d["verdict"] == "PASS")
+    d = rv.decide([_form(), _form(), _form(right_side="v_shape")], _facts(), {})
+    ok("one dissenting FAIL is listed as a split",
+       d["verdict"] == "PASS" and d["needs_check"] == ["answers split FAIL/PASS"])
+    d = rv.decide([_form(), _form(sure=False), _form()], _facts(), {})
+    ok("one unsure answer is listed", "unsure" in d["needs_check"])
+    d = rv.decide([_form()], _facts(), {}, wanted=3)
+    ok("too few answers are listed", d["needs_check"] == ["only 1 of 3 answers"])
+    d = rv.decide([_form()] * 3, _facts(leg_ratios=[0.5, 1.1],
+                                        legs=[{"depth_pct": 20.0}, {"depth_pct": 10.0},
+                                              {"depth_pct": 11.0}]), {})
+    ok("tightening against a measured wider leg is a conflict",
+       any("as deep as the one before" in c for c in d["needs_check"]))
+    d = rv.decide([_form(right_side="wider_leg")] * 3, _facts(), {})
+    ok("a wider leg against shrinking measured legs is a conflict",
+       any("every measured leg is smaller" in c for c in d["needs_check"]))
+    d = rv.decide([_form()] * 3, _facts(dryup_ratio=1.3), {})
+    ok("drying up against a dry-up ratio over 1 is a conflict",
+       any("1.30x its average" in c for c in d["needs_check"]))
+    for fm, fc, row in ((_form(), _facts(), {}),
+                        (_form(volume="mixed", pivot="several"), _facts(), {"size_capped": 1}),
+                        (_form(right_side="v_shape"), _facts(), {}),
+                        (_form(), _facts(closed_below_200_in_base=True), {})):
+        d = rv.decide([fm, fm, dict(fm, sure=False)], fc, row)
+        ok(f"the {d['verdict']} note passes the code check",
+           pl.parse_note_codes(d["verdict"], d["notes"]) == [] and "Check: unsure" in d["notes"])
+
+
+def test_reviewer_measures_named_swings():
+    """When the reviewer says the lettered points are wrong, it names its own dates and
+    the code measures the legs from them."""
+    from src.stock_screener.hunt import reviewer as rv
+    idx = pd.bdate_range("2026-06-01", periods=30)
+    hi = np.full(30, 100.0)
+    lo = np.full(30, 99.0)
+    hi[5], lo[10], hi[15], lo[20] = 110.0, 88.0, 108.0, 99.0 - 1.0
+    df = pd.DataFrame({"High": hi, "Low": lo, "Close": lo + 0.5}, index=idx)
+    pts = [{"date": idx[4].strftime("%Y-%m-%d"), "kind": "peak"},
+           {"date": idx[11].strftime("%Y-%m-%d"), "kind": "trough"},
+           {"date": idx[15].strftime("%Y-%m-%d"), "kind": "peak"},
+           {"date": idx[20].strftime("%Y-%m-%d"), "kind": "trough"},
+           {"date": "not a date", "kind": "peak"}, {"date": "2030-01-01", "kind": "peak"}]
+    legs = rv.measure_swings(df, pts)
+    ok("a named date snaps to the extreme within two bars",
+       legs[0]["peak_date"] == idx[5].strftime("%Y-%m-%d")
+       and legs[0]["trough_date"] == idx[10].strftime("%Y-%m-%d"))
+    ok("depths come from the snapped highs and lows",
+       [lg["depth_pct"] for lg in legs] == [20.0, 9.3])
+    ok("an unreadable or outside date is dropped", len(legs) == 2)
+    form = _form(swings_match="no", swings_seen=pts[:4])
+    ok("conflicts use the re-measured legs",
+       rv.conflicts(form, _facts(legs=[{"depth_pct": 5.0}, {"depth_pct": 9.0}]), df) == [])
+
+
+def _review_folder(td: Path):
+    """A hunt folder with diagnostics and each ticker's review files, as review-charts
+    leaves it (the images are stand-ins: only the caller would read them)."""
+    import json
+    from src.stock_screener.hunt import reviewer as rv
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    for r in diag.to_dict("records"):
+        weekly, daily, facts = rv.review_paths(td, r["ticker"])
+        weekly.parent.mkdir(parents=True, exist_ok=True)
+        weekly.write_bytes(b"png")
+        daily.write_bytes(b"png")
+        facts.write_text(json.dumps(rv.fact_sheet(b.result.payloads[r["ticker"]], r)))
+    return diag
+
+
+def test_run_review():
+    """The review loop asks each ticker until it has its answers, records every answer
+    as it arrives so a rerun resumes, and writes one coded verdict per ticker."""
+    import json
+    from src.stock_screener.hunt import reviewer as rv
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        diag = _review_folder(d)
+        (d / "review" / "BBB_daily.png").unlink()
+        ok("review refuses a folder missing a review chart",
+           _raises(lambda: rv.run_review(d, diag, lambda p, s: {}, log=lambda m: None)))
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        diag = _review_folder(d)
+        calls = []
+
+        def caller(prompt, schema):
+            calls.append(prompt)
+            if len(calls) == 1:
+                return {"form": None, "error": "boom"}
+            if len(calls) == 2:
+                return {"form": {"pattern": "vcp"}, "error": None}
+            return {"form": _form(), "model": "m", "cost_usd": 0.1}
+
+        out = rv.run_review(d, diag, caller, votes=3, jobs=1, log=lambda m: None)
+        lines = (d / "review" / rv.VOTES_FILE).read_text().splitlines()
+        ok("every ticker answered three times, failed calls retried once",
+           len(calls) == 4 * 3 + 1 and len(lines) == 12)
+        ok("a call that failed twice is recorded with its error",
+           sum(1 for x in lines if json.loads(x)["error"]) == 1)
+        ok("the ticker short of an answer is listed for a check",
+           out["needs_check"]["AAA"] == ["only 2 of 3 answers"])
+        ok("a measured contradiction is listed too (DDD's final area is loud)",
+           out["needs_check"]["DDD"] == ["drying up, but the final area trades 1.01x its average"])
+        ok("one verdict per ticker, valid and coded",
+           pl.validate_verdicts(d / "verdicts.csv", diag) == []
+           and all(pl.parse_note_codes(v["verdict"], v["notes"]) == []
+                   for v in pl.read_verdicts(d / "verdicts.csv").values()))
+        form = rv.read_labels(d / "review" / rv.FORM_FILE)
+        ok("form.csv holds the combined answers", set(form) == set(diag["ticker"])
+           and form["AAA"]["pattern"] == "vcp")
+
+        calls.clear()
+        out2 = rv.run_review(d, diag, caller, votes=3, jobs=2, log=lambda m: None)
+        ok("a rerun asks nothing more and writes no second verdict",
+           calls == [] and pl.validate_verdicts(d / "verdicts.csv", diag) == []
+           and out2["no_answer"] == [])
+
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        diag = _review_folder(d)
+        out = rv.run_review(d, diag, lambda p, s: {"form": None, "error": "down"},
+                            votes=2, jobs=2, log=lambda m: None)
+        ok("no answers at all: no verdicts, every ticker listed",
+           sorted(out["no_answer"]) == sorted(diag["ticker"])
+           and pl.read_verdicts(d / "verdicts.csv") == {})
+
+
+def test_labels_and_score():
+    """Your own answers, in the same form, are how the reviewer is measured."""
+    from src.stock_screener.hunt import reviewer as rv
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "labels.csv"
+        rv.write_label_template(path, ["AAA", "BBB"])
+        ok("the template has a blank row per ticker",
+           rv.read_labels(path) == {"AAA": {"ticker": "AAA"}, "BBB": {"ticker": "BBB"}})
+        path.write_text("ticker,verdict,volume\nAAA,PASS,dry\n")
+        ok("an answer off the list is refused", _raises(lambda: rv.read_labels(path)))
+        path.write_text("ticker,verdict\nAAA,BUY\n")
+        ok("a bad verdict is refused", _raises(lambda: rv.read_labels(path)))
+    mine = {"A": {"verdict": "PASS", "volume": "drying_up"},
+            "B": {"verdict": "FAIL", "volume": "mixed"},
+            "C": {"verdict": "PASS-"}, "D": {"verdict": "PASS"}}
+    theirs = {"A": {"verdict": "PASS", "volume": "drying_up"},
+              "B": {"verdict": "PASS", "volume": "drying_up"},
+              "C": {"verdict": "PASS-", "volume": "mixed"}, "D": {"verdict": "FAIL"}}
+    sc = rv.score(mine, theirs)
+    ok("verdict agreement over the names both labelled",
+       sc["questions"]["verdict"] == {"n": 4, "agree_pct": 50.0})
+    ok("a question counts only names both answered",
+       sc["questions"]["volume"] == {"n": 2, "agree_pct": 50.0})
+    ok("an unanswered question has no agreement",
+       sc["questions"]["pivot"] == {"n": 0, "agree_pct": None})
+    ok("false PASS and missed PASS are named",
+       sc["verdict"]["false_pass"] == ["B"] and sc["verdict"]["missed_pass"] == ["D"])
+    ok("the confusion table counts mine -> theirs",
+       sc["verdict"]["confusion"]["FAIL"]["PASS"] == 1
+       and sc["verdict"]["confusion"]["PASS"]["PASS"] == 1)
+    ok("kappa is below the raw agreement", sc["verdict"]["kappa"] == 0.2)
+    ok("perfect agreement is kappa 1", rv.score(mine, mine)["verdict"]["kappa"] == 1.0)
+
+
+def test_review_images():
+    """The review charts need matplotlib, which the Pi image doesn't carry: this test
+    runs where the hunt runs."""
+    try:
+        from src.stock_screener.hunt import charts
+    except ImportError:
+        print("  SKIP  review images (no matplotlib)")
+        return
+    import json
+    from src.stock_screener.hunt import reviewer as rv
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        got = charts.render_review_images(b, diag.head(2), d)
+        weekly, daily, facts = rv.review_paths(d, got[0])
+        ok("each ticker gets a weekly and a daily PNG and its facts",
+           got == ["AAA", "BBB"] and weekly.read_bytes()[:4] == b"\x89PNG"
+           and daily.read_bytes()[:4] == b"\x89PNG"
+           and json.loads(facts.read_text())["swings"][0]["label"] == "A")
+
+
 if __name__ == "__main__":
     test_rs_floor_and_tier()
     test_bucket_boundaries()
     test_diagnostics_and_gates()
     test_verdict_bookkeeping()
     test_append_batch()
+    test_equity_and_full_position()
+    test_note_codes()
+    test_compare_verdicts()
+    test_reviewer_form_and_schema()
+    test_reviewer_facts_hide_the_gates()
+    test_verdict_table()
+    test_reviewer_votes_and_checks()
+    test_reviewer_measures_named_swings()
+    test_run_review()
+    test_labels_and_score()
+    test_review_images()
     test_report_builds()
     test_narrative_markdown()
     test_report_mirror()

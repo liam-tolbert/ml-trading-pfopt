@@ -22,10 +22,14 @@ yesterday's bars. During, it re-downloads what step 1 has not reached yet while 
 containers call yfinance at once.
 
 Screening only: this places no orders and touches no watchlist state.
+After the screen it saves the paper account's equity for the weekend hunt (``write_account``).
 """
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import json
+import os
 import sys
 import time
 import traceback
@@ -36,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:                       # so `from src.X import ...` resolves
     sys.path.insert(0, str(ROOT))
 
-from src.stock_screener.cockpit import breadth_store, runlog, scan  # noqa: E402
+from src.stock_screener.cockpit import breadth_store, cache, runlog, scan  # noqa: E402
 from src.stock_screener.cockpit.scan_worker import (  # noqa: E402
     _STORE, DEFAULT_MIN_CRITERIA, DEFAULT_UNIVERSE)
 
@@ -86,6 +90,28 @@ def run_screen(universe: str = DEFAULT_UNIVERSE,
     return out
 
 
+def write_account(path: Optional[Path] = None) -> bool:
+    """Write the paper account's equity to ``path`` (default ``cache.ACCOUNT_JSON``) as
+    ``{"equity": float, "as_of": ISO timestamp}``. The hunt PC copies it with the scan and
+    sizes a full position from it.
+
+    Returns False, leaving any existing file as it was, when the account cannot be read.
+    That MUST NOT fail the screen."""
+    path = cache.ACCOUNT_JSON if path is None else path
+    try:
+        from src.stock_screener.cockpit import trade      # alpaca-py stays out of the import
+        equity = float(trade.fetch_account_summary()["equity"])
+    except Exception as e:
+        _LOG.warning("account equity not written: %s", e)
+        return False
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"equity": equity,
+                               "as_of": _dt.datetime.now().isoformat(timespec="seconds")}),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+    return True
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Scheduled universe screen — rebuilds the "
                                              "scan table (places no orders).")
@@ -100,6 +126,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception:
         traceback.print_exc()
         return 1
+    write_account()
     return 0
 
 

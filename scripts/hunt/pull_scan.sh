@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Copy the Pi's last scan and watchlist into data/cockpit/. Reads the Pi, writes nothing there.
+# Copy the Pi's last scan, watchlist and account equity into data/cockpit/. Reads the Pi,
+# writes nothing there.
 #     bash scripts/hunt/pull_scan.sh
 # Waits up to HUNT_PI_WAIT seconds (default 120) for the Pi to answer: after a wake from
 # sleep the network takes a moment. HUNT_PI, HUNT_PI_KEY and HUNT_PI_DIR override the host,
@@ -36,4 +37,13 @@ for f in "${FILES[@]}"; do
     fi
     mv -f "$DEST/$f.incoming" "$DEST/$f"
 done
+# The equity is optional: the screen job skips it when Alpaca can't be read. A local copy
+# MUST NOT outlive the Pi's, or the hunt would size positions from an old account.
+if scp -q "${SSH_OPTS[@]}" "$PI:$REMOTE/account.json" "$DEST/account.json.incoming" 2>/dev/null; then
+    mv -f "$DEST/account.json.incoming" "$DEST/account.json"
+    echo "pull_scan.sh: pulled account.json"
+else
+    rm -f "$DEST/account.json" "$DEST/account.json.incoming"
+    echo "pull_scan.sh: the Pi has no account.json; full positions are unknown this run"
+fi
 echo "pull_scan.sh: pulled ${FILES[*]} from $PI"

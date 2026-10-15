@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
+import json
 import pickle
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +26,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from src.stock_screener.cockpit.cache import (CACHE_DIR, LAST_SCAN_PKL as _LAST_SCAN_PKL,
+from src.stock_screener.cockpit.cache import (ACCOUNT_JSON, CACHE_DIR,
+                                              LAST_SCAN_PKL as _LAST_SCAN_PKL,
                                               SCAN_PERSIST_VERSION as _PERSIST_VERSION,
                                               WATCHLIST_JSON)
 from src.stock_screener.cockpit.doctrine import (ADV_DAYS, MAX_ORDER_ADV_PCT,
@@ -42,11 +44,25 @@ MIN_RS = RS_FLOOR              # the book's eighth criterion; one number everywh
 BUY_ZONE_MAX_PCT = NO_CHASE_PCT * 100.0   # pivot .. +5% = the entry range (scan.py buy_zone)
 APPROACH_MIN_PCT = -3.0        # within 3% below pivot = "approaching"
 MAX_SCAN_AGE_DAYS = 3.0        # the hunt MUST run off a weekend-fresh scan
+MAX_ACCOUNT_AGE_DAYS = MAX_SCAN_AGE_DAYS
+# The user's own sizing choice for the hunt's liquidity caveat. It is not the cockpit's
+# MAX_ORDER_PCT (10%) and MUST NOT replace it.
+FULL_POSITION_PCT = 0.05
 # VOL_CONFIRM_RATIO, VOL_AVG_DAYS and EARNINGS_BLOCK_DAYS come from cockpit.doctrine: the
 # hunt MUST enforce the same entry rules as the daily trigger job.
 HUNT_DIR = CACHE_DIR / "hunt"
 
 VERDICTS = ("PASS", "PASS-", "FAIL")
+
+# The codes a verdict note starts with, keyed by the verdict they belong to. A FAIL names
+# one book disqualifier (SEPA_METHODOLOGY §4); a PASS- names one or more caveats.
+NOTE_CODES = {
+    "FAIL": ("DQ:expanding", "DQ:distribution", "DQ:bronco", "DQ:v-shape",
+             "DQ:below-200", "DQ:no-base"),
+    "PASS-": ("CAV:loose", "CAV:no-dryup", "CAV:thin", "CAV:gaps", "CAV:pivot",
+              "CAV:late"),
+    "PASS": ("OK",),
+}
 
 
 class HuntError(RuntimeError):
@@ -117,6 +133,26 @@ def _watchlist_tickers() -> List[str]:
         return []
 
 
+def load_equity(path: Optional[Path] = None,
+                now: Optional[_dt.datetime] = None) -> Optional[float]:
+    """The paper account's equity from the file the Pi writes beside the scan (default
+    ``ACCOUNT_JSON``).
+
+    Returns None when the file is missing or unreadable, holds no positive equity, or its
+    ``as_of`` is older than ``MAX_ACCOUNT_AGE_DAYS``."""
+    path = ACCOUNT_JSON if path is None else Path(path)
+    now = now or _dt.datetime.now()
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+        equity = float(d["equity"])
+        as_of = _dt.datetime.fromisoformat(str(d["as_of"]))
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    if equity <= 0 or (now - as_of).total_seconds() > MAX_ACCOUNT_AGE_DAYS * 86400:
+        return None
+    return equity
+
+
 def step3_summary(dryup: Optional[dict]) -> str:
     """The review sheet's and report's short Step-3 read, e.g. ``'DU 0.62x/2'``: the final
     tight area's volume over its 50-day average / near-silent days. Empty when unknown."""
@@ -125,11 +161,14 @@ def step3_summary(dryup: Optional[dict]) -> str:
     return f"DU {dryup['avg_ratio']:.2f}x/{dryup['quiet_days']}"
 
 
-def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
+def diagnostics(bundle: ScanBundle, cand: pd.DataFrame,
+                equity: Optional[float] = None) -> pd.DataFrame:
     """One row per candidate in ``cand``, with every column the review, gates and report read.
 
-    Derived from the scan payloads alone; nothing is fetched.
+    Derived from the scan payloads alone; nothing is fetched. ``equity`` sizes a full
+    position; without it ``full_position_usd`` and ``size_capped`` are None.
     """
+    full = round(FULL_POSITION_PCT * equity) if equity else None
     wl = set(_watchlist_tickers())
     rows = []
     for rank, (_, c) in enumerate(cand.iterrows(), start=1):
@@ -176,6 +215,9 @@ def diagnostics(bundle: ScanBundle, cand: pd.DataFrame) -> pd.DataFrame:
             "adv_musd": round(adv / 1e6, 2) if adv else None,
             # the biggest order the liquidity rule allows
             "max_order_usd": round(MAX_ORDER_ADV_PCT * adv) if adv else None,
+            "full_position_usd": full,
+            # 1 when the liquidity ceiling can't take a full position
+            "size_capped": (int(MAX_ORDER_ADV_PCT * adv < full) if adv and full else None),
             "dist_days": dist_days, "gaps8": gaps8,
             "depths": "->".join(f"{d:.0f}" for d in depths),
             "n_legs": len(depths),
@@ -304,12 +346,45 @@ def append_verdicts(path: Path, rows: List[dict]) -> int:
     return len(rows)
 
 
+def parse_note_codes(verdict: str, notes: str) -> List[str]:
+    """Problems with the codes that open ``notes`` for ``verdict``; empty means valid.
+
+    The codes come before the first semicolon, comma-joined after one prefix or each with
+    its own (``CAV:loose,no-dryup; text`` or ``CAV:loose,CAV:no-dryup; text``). A note
+    with no semicolon is all codes."""
+    head = (notes or "").split(";", 1)[0].strip()
+    if not head:
+        return ["no code"]
+    codes, prefix = [], ""
+    for part in (x.strip() for x in head.split(",")):
+        if not part:
+            continue
+        if ":" in part:
+            prefix = part.split(":", 1)[0] + ":"
+            codes.append(part)
+        elif part == "OK":
+            codes.append(part)
+        else:
+            codes.append(prefix + part)
+    owner = {c: v for v, cs in NOTE_CODES.items() for c in cs}
+    problems = []
+    for c in codes:
+        if c not in owner:
+            problems.append(f"unknown code {c!r}")
+        elif owner[c] != verdict:
+            problems.append(f"{c} belongs to {owner[c]}, not {verdict}")
+    if verdict == "FAIL" and sum(c.startswith("DQ:") for c in codes) > 1:
+        problems.append("a FAIL names exactly one DQ: code")
+    return problems
+
+
 def append_batch(path: Path, batch: Path, diag: pd.DataFrame) -> int:
     """Append the ``ticker,verdict,notes`` CSV at ``batch`` to the verdict CSV at ``path``.
 
     Raises HuntError, before writing anything, when the batch is missing or lacks that
     header, repeats a ticker, names a non-candidate, names a ticker ``path`` already
-    holds, or carries a bad verdict. Returns the number of rows appended."""
+    holds, carries a bad verdict, or has a note whose codes ``parse_note_codes`` rejects.
+    Returns the number of rows appended."""
     if not batch.exists():
         raise HuntError(f"{batch} not found.")
     with open(batch, newline="", encoding="utf-8") as f:
@@ -322,7 +397,9 @@ def append_batch(path: Path, batch: Path, diag: pd.DataFrame) -> int:
     problems = ([f"{t}: repeated in the batch" for t in sorted({t for t in tickers
                                                                 if tickers.count(t) > 1})]
                 + [f"{t}: not a candidate" for t in sorted(set(tickers) - expected)]
-                + [f"{t}: already has a verdict" for t in sorted(set(tickers) & have)])
+                + [f"{t}: already has a verdict" for t in sorted(set(tickers) & have)]
+                + [f"{r['ticker']}: {q}" for r in rows if r.get("verdict") in VERDICTS
+                   for q in parse_note_codes(r["verdict"], r.get("notes", ""))])
     if problems:
         raise HuntError(f"{batch} rejected, nothing written — " + "; ".join(problems))
     return append_verdicts(path, rows)
@@ -356,3 +433,26 @@ def validate_verdicts(path: Path, diag: pd.DataFrame) -> List[str]:
         if n > 1:
             problems.append(f"{t}: {n} verdicts (want 1)")
     return problems
+
+
+def compare_verdicts(a: Dict[str, dict], b: Dict[str, dict]) -> dict:
+    """How two reviews of the same charts agree (``read_verdicts`` results).
+
+    Returns the shared ticker count, overall agreement, agreement on the tickers either
+    review called PASS- or FAIL, and each changed ticker with both verdicts and notes.
+    Agreement is a percentage, or None with nothing to compare."""
+    shared = sorted(set(a) & set(b))
+    same = [t for t in shared if a[t]["verdict"] == b[t]["verdict"]]
+    line = [t for t in shared if {a[t]["verdict"], b[t]["verdict"]} & {"PASS-", "FAIL"}]
+
+    def pct(n, d):
+        return round(100.0 * n / d, 1) if d else None
+    return {
+        "shared": len(shared),
+        "agree_pct": pct(len(same), len(shared)),
+        "pass_minus_or_fail": {"n": len(line),
+                               "agree_pct": pct(sum(t in same for t in line), len(line))},
+        "changed": [{"ticker": t, "a": a[t]["verdict"], "b": b[t]["verdict"],
+                     "a_notes": a[t].get("notes", ""), "b_notes": b[t].get("notes", "")}
+                    for t in shared if t not in same],
+    }

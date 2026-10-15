@@ -262,8 +262,10 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 **The weekend hunt — run on the Windows box, read on the Pi (§6.101, §6.104).** A hunt is
 requested on the Pi (the Weekend Hunt page's Start button, or the Friday 17:58 timer) and run
 by the PC's poller, which calls `scripts/hunt/weekend_hunt.ps1`. That script copies the Pi's
-`last_scan.pkl` and `watchlist.json` down, runs the `/weekend-hunt` skill headless (`claude -p`),
-checks the result itself, and pushes the hunt folder back to the Pi.
+`last_scan.pkl`, `watchlist.json` and `account.json` down, runs the chart review (`hunt
+review`, §6.106), then the `/weekend-hunt` skill headless (`claude -p`) for the gates,
+catalysts, narrative and report, checks the result itself, and pushes the hunt folder back to
+the Pi.
 
 - **Requests and tasks (§6.104): nothing connects to the PC.** A request is
   `data/cockpit/hunt/request.json` on the Pi (`cockpit/hunt_request.py`), written by the page's
@@ -294,6 +296,8 @@ checks the result itself, and pushes the hunt folder back to the Pi.
   `pivot_drift`). A name the latest scan no longer holds shows its quarter of the hunt's sheet.
 - **The allowlist is the safety boundary** (`scripts/hunt/unattended_settings.json`): the hunt
   CLI, file reads, and writes inside `data/cockpit/hunt/`. No ssh, no cockpit or trade code.
+  Each chart-review call gets the Read tool only, in `--safe-mode` (no project files or skills),
+  with `dontAsk` refusing everything else (`reviewer.claude_cli`).
 - **Needs:** the standalone `claude` CLI on PATH (`~/.local/bin/claude.exe`), logged in once:
   the stored login in `~/.claude/.credentials.json` is used, and bills the subscription, not the
   API. `CLAUDE_CODE_OAUTH_TOKEN` also works. The desktop app's login is not usable from a task.
@@ -543,6 +547,13 @@ source comments live. A new entry goes there, numbered after the last one.
 - **The SEPA audit is frozen (§6.100).** No new feature is built from `SEPA_AUDIT.md` until the
   journal has about 20 more closed trades; then re-read it against the record. A change MUST
   come from a real trade that would have gone differently, or from a gap the journal shows.
+- **The chart reviewer is unmeasured (§6.106).** Until it passes, the user still checks every
+  chart. The plan: two weeks of the user's own answers in `hunt label-template` files (week 1
+  to tune the prompt, week 2 scored once with `hunt score`), 40 of them re-labelled blind for
+  the user's own agreement, and a pass mark fixed before the scored run. Then the user checks
+  only the PASS names near the buy zone, `needs_check` names and 10 random others. The prompt,
+  the form and `TABLE_VERSION` change only through that measurement. The six reference charts
+  the design puts in the prompt wait for the labels.
 - **The catalyst read is unscored (§6.104).** Every PASS name now carries a category, a
   sentiment and a summary from its headlines. Nothing yet says whether a named catalyst
   predicts anything; like the verdicts, it is a frozen weekly label waiting for a scorecard.
@@ -594,7 +605,7 @@ source comments live. A new entry goes there, numbered after the last one.
 - **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package (what was deleted and why: `PROVENANCE.md`).
 - **Test fixture:** `backtest_daily/` — `providers.py`, `fundamentals_adapter.py`, `synthetic_provider.py`: the seeded synthetic market `tests/cockpit/_common.py` builds its prices from. The backtest simulator that lived here was removed (§6.102) and is parked on branch `park/backtest-daily`; its findings are `HANDOFF_HISTORY.md` §1.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
-- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`; `charts` and the CLI stay off the Pi); the `/weekend-hunt` skill judges the charts and the catalysts. `scripts/hunt/` (repo root) holds the PC side (§8): `weekend_hunt.ps1` (one run), `hunt.sh` (the env wrapper), `pull_scan.sh` / `push_result.sh` (scan down, result up), `hunt_poller.ps1` + `pi_request.sh` (requests), `register_task.ps1` + `hidden.vbs` (the tasks and their windowless launch), and the unattended review's prompt and allowlist. The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
+- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`, `reviewer`; `charts` and the CLI stay off the Pi); `reviewer` asks Claude a fixed form per ticker and code decides the verdict (§6.106); the `/weekend-hunt` skill reads the catalysts and writes the narrative. `scripts/hunt/` (repo root) holds the PC side (§8): `weekend_hunt.ps1` (one run), `hunt.sh` (the env wrapper), `pull_scan.sh` / `push_result.sh` (scan down, result up), `hunt_poller.ps1` + `pi_request.sh` (requests), `register_task.ps1` + `hidden.vbs` (the tasks and their windowless launch), and the unattended review's prompt and allowlist. The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
 - **Method:** `SEPA_METHODOLOGY.md` — the books' rules for sessions, with a rule-to-code map (§9 of that file) and the deviations; `minervini_sepa_system.md` is the user-facing guide the app renders. A rule change updates both, plus the ledger in `HANDOFF_HISTORY.md`.
 - **History:** `HANDOFF_HISTORY.md` — the research record (§1, §3, §5), the change ledger (§11) and parked ideas.
 - **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suite runs in neither CI nor `deploy.sh`.
