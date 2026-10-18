@@ -8,6 +8,7 @@ mis-remembered boundaries are precisely why this pipeline exists.
 """
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -672,10 +673,13 @@ def test_verdict_table():
 
 
 def test_reviewer_votes_and_checks():
-    """Each ticker is asked three times; each question takes the majority, a three-way
-    split takes the answer that weighs most against the base, and anything the user
-    should look at is listed."""
+    """Each question takes the majority of a ticker's answers, a three-way split takes the
+    answer that weighs most against the base, and anything the user should look at is
+    listed."""
     from src.stock_screener.hunt import reviewer as rv
+    ok("two identical answers are settled", rv.settled([_form(), _form()]))
+    ok("one differing question is not", not rv.settled([_form(), _form(pivot="several")]))
+    ok("one answer is not", not rv.settled([_form()]))
     f, sure = rv.combine([_form(volume="mixed"), _form(volume="drying_up"),
                           _form(volume="mixed")])
     ok("the majority answer wins", f["volume"] == "mixed" and sure)
@@ -771,33 +775,51 @@ def test_run_review():
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         diag = _review_folder(d)
+        bbb = rv.review_paths(d, "BBB")[2]
+        bbb.write_text(json.dumps({**json.loads(bbb.read_text()),
+                                   "closed_below_200_in_base": True}))
+        script = {"AAA": [_form(base_count="third"), _form(), _form()],
+                  "DDD": [_form(), _form()],
+                  "EEE": [None, {"pattern": "vcp"}, _form(), _form(base_count="third"),
+                          None, None]}
         calls = []
 
         def caller(prompt, schema):
-            calls.append(prompt)
-            if len(calls) == 1:
+            t = re.search(r"(\w+)_weekly\.png", prompt).group(1)
+            n = calls.count(t)
+            calls.append(t)
+            form = script[t][n]
+            if form is None:
                 return {"form": None, "error": "boom"}
-            if len(calls) == 2:
-                return {"form": {"pattern": "vcp"}, "error": None}
-            return {"form": _form(), "model": "m", "cost_usd": 0.1}
+            return {"form": form, "model": "m", "cost_usd": 0.1}
 
         out = rv.run_review(d, diag, caller, votes=3, jobs=1, log=lambda m: None)
         lines = (d / "review" / rv.VOTES_FILE).read_text().splitlines()
-        ok("every ticker answered three times, failed calls retried once",
-           len(calls) == 4 * 3 + 1 and len(lines) == 12)
-        ok("a call that failed twice is recorded with its error",
-           sum(1 for x in lines if json.loads(x)["error"]) == 1)
-        ok("the ticker short of an answer is listed for a check",
-           out["needs_check"]["AAA"] == ["only 2 of 3 answers"])
-        ok("a measured contradiction is listed too (DDD's final area is loud)",
-           out["needs_check"]["DDD"] == ["drying up, but the final area trades 1.01x its average"])
+        verdicts = pl.read_verdicts(d / "verdicts.csv")
+        ok("a name a measurement fails is not asked and FAILs with its code",
+           "BBB" not in calls and out["measured"] == ["BBB"]
+           and verdicts["BBB"]["verdict"] == "FAIL"
+           and verdicts["BBB"]["notes"].startswith("DQ:below-200;"))
+        ok("two answers that agree on every question settle a name",
+           calls.count("DDD") == 2)
+        ok("two answers that differ get a third", calls.count("AAA") == 3)
+        ok("failed calls are retried once and recorded with their error",
+           calls.count("EEE") == 6 and len(lines) == 9
+           and sum(1 for x in lines if json.loads(x)["error"]) == 2)
+        ok("a name short of an answer is listed for a check",
+           out["needs_check"]["EEE"] == ["only 2 of 3 answers"])
+        ok("a settled name is not short, and a measured contradiction is listed",
+           out["needs_check"]["DDD"] == ["drying up, but the final area trades 1.01x its average"]
+           and "AAA" not in out["needs_check"])
+        ok("the counts include the measured FAIL",
+           out["verdicts"] == {"PASS": 2, "PASS-": 1, "FAIL": 1})
         ok("one verdict per ticker, valid and coded",
            pl.validate_verdicts(d / "verdicts.csv", diag) == []
            and all(pl.parse_note_codes(v["verdict"], v["notes"]) == []
-                   for v in pl.read_verdicts(d / "verdicts.csv").values()))
+                   for v in verdicts.values()))
         form = rv.read_labels(d / "review" / rv.FORM_FILE)
-        ok("form.csv holds the combined answers", set(form) == set(diag["ticker"])
-           and form["AAA"]["pattern"] == "vcp")
+        ok("form.csv holds the combined answers of the names asked",
+           set(form) == {"AAA", "DDD", "EEE"} and form["AAA"]["base_count"] == "first_or_second")
 
         calls.clear()
         out2 = rv.run_review(d, diag, caller, votes=3, jobs=2, log=lambda m: None)

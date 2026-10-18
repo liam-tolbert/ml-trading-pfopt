@@ -6,9 +6,11 @@ the run, daily for the base) and the base's measurements (``fact_sheet``), and a
 ``verdict_from_form`` turns the answers, plus the book rules that are plain numbers,
 into PASS / PASS- / FAIL and the codes in ``pipeline.NOTE_CODES``.
 
-Each ticker is asked ``votes`` times in separate calls, and each question takes the
-majority answer. ``needs_check`` lists what sends a name to the user: the votes'
-verdicts differ, a vote was unsure, or an answer contradicts the measurements.
+Each ticker is asked twice in separate calls, and up to ``votes`` times when the first
+two answers differ on any question. Each question takes the majority answer. A ticker a
+measurement already fails (``measured_fail``) is not asked. ``needs_check`` lists what
+sends a name to the user: the votes' verdicts differ, a vote was unsure, or an answer
+contradicts the measurements.
 
 The reviewer MUST NOT see RS, F, the quality score, the distance to the pivot, days to
 earnings or dollar volume. The gates apply those, and what the reviewer can't see it
@@ -260,6 +262,21 @@ _CAV = (("final_area", "loose", "CAV:loose"), ("final_area", "not_formed", "CAV:
         ("volume", "mixed", "CAV:no-dryup"), ("base_count", "fourth_or_later", "CAV:late"))
 
 
+_MEASURED = {"DQ:below-200": "closed below the 200-day during the base",
+             "DQ:bronco": "stop inside one typical day"}
+
+
+def measured_fail(facts: dict, row: dict) -> Optional[str]:
+    """The DQ code when a measurement fails the base whatever the form says, else None:
+    a close below the 200-day during the base, then a stop inside one typical day."""
+    if facts.get("closed_below_200_in_base"):
+        return "DQ:below-200"
+    room = _num(row.get("stop_room"))
+    if room is not None and room < 1.0:
+        return "DQ:bronco"
+    return None
+
+
 def verdict_from_form(form: dict, facts: dict, row: dict) -> Tuple[str, List[str], str]:
     """The verdict table (version ``TABLE_VERSION``).
 
@@ -269,11 +286,9 @@ def verdict_from_form(form: dict, facts: dict, row: dict) -> Tuple[str, List[str
     the form's no base, wider leg, V, heavy selling, wild swings. Otherwise each caveat
     adds a code (a dry-up ratio of 1.0 or more and a capped order size count too) and
     makes it PASS-. Otherwise PASS."""
-    if facts.get("closed_below_200_in_base"):
-        return "FAIL", ["DQ:below-200"], ""
-    room = _num(row.get("stop_room"))
-    if room is not None and room < 1.0:
-        return "FAIL", ["DQ:bronco"], ""
+    code = measured_fail(facts, row)
+    if code:
+        return "FAIL", [code], ""
     for q, a, code in _DQ:
         if form.get(q) == a:
             return "FAIL", [code], q
@@ -361,6 +376,12 @@ def combine(votes: List[dict]) -> Tuple[dict, bool]:
     sure = all(v.get("sure") for v in votes)
     form["sure"] = sure
     return form, sure
+
+
+def settled(votes: List[dict]) -> bool:
+    """True when the first two answers agree on every question. A third answer can't
+    change any majority then, so the ticker needs no more."""
+    return len(votes) >= 2 and all(votes[0][q] == votes[1][q] for q in FORM)
 
 
 def decide(votes: List[dict], facts: dict, row: dict, df: Optional[pd.DataFrame] = None,
@@ -476,14 +497,18 @@ def run_review(hunt_path: Path, diag: pd.DataFrame, call: Caller, *,
                log: Callable[[str], None] = print) -> dict:
     """Review every candidate in ``diag`` that has no verdict yet, and record verdicts.
 
-    Needs ``review-charts`` to have written each ticker's images and facts. Asks each
-    ticker until it has ``votes`` valid answers (one retry per failed call), appending
-    every answer to ``votes.jsonl`` as it arrives, so a rerun resumes. Then writes
-    ``form.csv`` and appends one coded verdict per ticker that has at least one answer.
-    ``frames`` (ticker -> daily OHLCV) lets ``conflicts`` re-measure Claude's swings.
+    Needs ``review-charts`` to have written each ticker's images and facts. A ticker
+    ``measured_fail`` fails gets its FAIL without a call. Every other ticker is asked
+    for two valid answers. A ticker that got some answer but isn't ``settled`` is then
+    asked until it has ``votes``. A failed call is retried once. Every answer is
+    appended to ``votes.jsonl`` as it arrives, so a rerun resumes. Then writes
+    ``form.csv`` (asked tickers only) and appends one coded verdict per ticker that has a
+    measured FAIL or at least one answer. ``frames`` (ticker -> daily OHLCV) lets
+    ``conflicts`` re-measure Claude's swings.
 
-    Returns ``{verdicts, needs_check, no_answer}``: the counts, the tickers to look at
-    with their reasons, and the tickers left without a verdict."""
+    Returns ``{verdicts, needs_check, no_answer, measured}``: the counts, the tickers to
+    look at with their reasons, the tickers left without a verdict, and the tickers that
+    failed on a measurement."""
     vpath = hunt_path / "verdicts.csv"
     rdir = hunt_path / REVIEW_SUBDIR
     rdir.mkdir(exist_ok=True)
@@ -495,6 +520,13 @@ def run_review(hunt_path: Path, diag: pd.DataFrame, call: Caller, *,
             if not p.exists():
                 raise pl.HuntError(f"{p} not found — run `review-charts` first.")
 
+    def read_facts(t: str) -> dict:
+        return json.loads(review_paths(hunt_path, t)[2].read_text(encoding="utf-8"))
+
+    facts = {t: read_facts(t) for t in todo}
+    measured = {t: measured_fail(facts[t], rows[t]) for t in todo}
+    measured = {t: c for t, c in measured.items() if c}
+    asked = [t for t in todo if t not in measured]
     got = read_votes(hunt_path)
     lock = threading.Lock()
     sch = schema()
@@ -518,31 +550,44 @@ def run_review(hunt_path: Path, diag: pd.DataFrame, call: Caller, *,
             if rec["error"]:
                 log(f"{t}: {rec['error']}")
 
-    tasks = [t for t in todo for _ in range(max(0, votes - len(got.get(t, []))))]
-    log(f"review: {len(todo)} tickers, {len(tasks)} calls, {jobs} at a time")
-    with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
-        list(ex.map(ask, tasks))
+    def run(want: Callable[[str], int], what: str) -> None:
+        tasks = [t for t in asked for _ in range(max(0, want(t) - len(got.get(t, []))))]
+        log(f"review: {what}, {len(tasks)} calls, {jobs} at a time")
+        with ThreadPoolExecutor(max_workers=max(1, jobs)) as ex:
+            list(ex.map(ask, tasks))
+
+    log(f"review: {len(todo)} tickers, {len(measured)} failed on a measurement")
+    run(lambda t: min(votes, 2), f"{len(asked)} tickers asked")
+    got = read_votes(hunt_path)
+    open_ = {t for t in asked if got.get(t) and not settled(got[t])}
+    run(lambda t: votes if t in open_ else 0, f"{len(open_)} not settled by two answers")
 
     got = read_votes(hunt_path)
     decided, new_rows, no_answer = {}, [], []
     for t in rows:
+        if t in measured:
+            new_rows.append({"ticker": t, "verdict": "FAIL",
+                             "notes": f"{measured[t]}; {_MEASURED[measured[t]]}, not asked"})
+            continue
         if not got.get(t):
             if t not in have:
                 no_answer.append(t)
             continue
-        facts = json.loads(review_paths(hunt_path, t)[2].read_text(encoding="utf-8"))
+        v = got[t][:votes]
         df = (frames or {}).get(t)
-        decided[t] = decide(got[t][:votes], facts, rows[t], df, votes)
+        need = min(votes, 2) if settled(v) else votes
+        decided[t] = decide(v, facts.get(t) or read_facts(t), rows[t], df, need)
         if t not in have:
             new_rows.append({"ticker": t, "verdict": decided[t]["verdict"],
                              "notes": decided[t]["notes"]})
     _write_form(rdir / FORM_FILE, decided, {t: len(v) for t, v in got.items()})
     pl.append_verdicts(vpath, new_rows)
     counts = Counter(d["verdict"] for d in decided.values())
-    return {"verdicts": dict(counts),
+    counts["FAIL"] += len(measured)
+    return {"verdicts": {k: n for k, n in counts.items() if n},
             "needs_check": {t: d["needs_check"] for t, d in decided.items()
                             if d["needs_check"]},
-            "no_answer": no_answer}
+            "no_answer": no_answer, "measured": sorted(measured)}
 
 
 FORM_COLUMNS = ["ticker", "verdict", "codes", *FORM, "sure", "swings_seen", "needs_check",
