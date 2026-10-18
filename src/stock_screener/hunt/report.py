@@ -231,7 +231,7 @@ def load_state(hunt_path: Path, min_fund: int = 0) -> HuntState:
     for r in diag_rows:
         for k in ("q", "close", "pivot", "vs_pivot_pct", "volume_ratio"):
             r[k] = float(r[k])
-        for k in ("adv_musd", "stop", "max_order_usd"):
+        for k in ("adv_musd", "stop", "max_order_usd", "full_position_usd", "size_capped"):
             r[k] = _opt_float(r.get(k))
         for k in ("rs", "fund", "wl", "dist_days", "breakout_today",
                   "f_rev", "f_eps", "f_accel", "f_margin"):
@@ -316,7 +316,8 @@ def build_report(hunt_path: Path, min_fund: int = 0) -> Path:
          f'<td class="n">{_f(r["close"])}</td><td class="n">{_f(r["pivot"])}</td>'
          f'<td class="n {"pos" if r["vs_pivot_pct"] >= 0 else "neg"}">{r["vs_pivot_pct"]:+.1f}%</td>'
          f'<td class="n">{_f(r["adv_musd"], "{:.1f}")}</td>'
-         f'<td class="n">{_f(r.get("max_order_usd"), "{:,.0f}")}</td>'
+         f'<td class="n">{_f(r.get("max_order_usd"), "{:,.0f}")}'
+         f'{" cap" if r.get("size_capped") == 1 else ""}</td>'
          f'<td class="n">{r["dist_days"]}</td>'
          f'<td class="mono dim">{_esc(r["depths"])}</td>'
          f'<td class="n">{_f(r.get("depth_vs_spy"), "{:.1f}")}</td>'

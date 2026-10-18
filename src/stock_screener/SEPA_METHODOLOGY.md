@@ -293,6 +293,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | VCP detection | `cockpit/vcp.py` `detect_vcp`, tiers A/B/C | Looser tightening and 2-week bases on purpose, so it never misses a real base; benchmark-calibrated (§10) |
 | Books' halving, base length | `advisories.book_tightening` | Numbers only; no verdict (§6.94, §6.100) |
 | Volume dry-up | `advisories.volume_dryup` | Numbers only: doesn't separate good from bad on the benchmark (§6.91, §6.100) |
+| Step-3 chart verdict | `hunt/reviewer.py`: Claude answers an eight-question form per ticker in three separate calls; `verdict_from_form` turns the majority into PASS / PASS- / FAIL. FAIL names one §4 disqualifier (`DQ:` codes); PASS- names caveats (`CAV:`). Code applies the plain-number rules itself: closing below the 200-day during the base, a stop inside one typical day, a dry-up ratio of 1.0 or more, and an order ceiling under a full position (5% of equity, the user's choice) | Judges the base only: distance to the pivot, F, price, earnings and order size go to the gates (user decision, 2026-10-09). Unmeasured against the user's labels yet (§12, §6.106) |
 | Shakeouts, V recovery | — | Not built: removed after failing pre-registered checks (§6.92, §6.93, §6.100) |
 | Other setups | none | Parked (`HANDOFF_HISTORY.md`, Ideas) |
 | Breakout volume | `VOL_CONFIRM_RATIO` (1.5×) over `VOL_AVG_DAYS` (50), today excluded; `indicators.volume_ratio` | One rule everywhere |
@@ -313,8 +314,9 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Re-entry lag | `REGIME_CONFIRM_DAYS` (15) with `BREADTH_MIN_PHASE2` | From the backtest (§6.82) |
 | Keeping score | Journal page: `trade.build_trade_journal`, `journal_stats`, `loss_adjustment_sweep` | — |
 
-Decisions are made on the settled daily close and act at the next open. The user judges every
-chart; the machine sorts and warns.
+Decisions are made on the settled daily close and act at the next open. The machine sorts and
+warns. The weekend hunt's chart verdicts come from the reviewer, but until it passes the
+user's labelled test (HANDOFF §12) the user still judges every chart.
 
 ---
 
