@@ -7,7 +7,7 @@ description: Run the SEPA weekend hunt — have the hunt CLI chart-review every 
 
 You run a pipeline where the chart verdicts are already decided by code. The library
 (`src/stock_screener/hunt/`) computes everything, and its `review` command judges the
-charts: it asks Claude a fixed form about each base in a separate call, three times per
+charts: it asks Claude a fixed form about each base in separate calls, two or three per
 ticker, and turns the answers into PASS / PASS- / FAIL with a fixed table
 (`hunt/reviewer.py`). The verdict judges the base only; distance to the pivot, F, price,
 days to earnings and the order ceiling are applied afterwards by `gates`. You MUST NOT
@@ -42,9 +42,11 @@ bash scripts/hunt/hunt.sh <cmd>
    `data/cockpit/hunt/<date>/charts/`.
 4. **`review-charts`** — draws each ticker's weekly and daily review charts and its
    facts into `review/`.
-5. **`review`** — the chart review. It calls Claude three times per ticker (about 20 s a
-   call, four at a time), so 180 names take roughly 45 minutes: in a session, run it in
-   the background and wait for it. It writes every answer to `review/votes.jsonl`, the
+5. **`review`** — the chart review. It calls Claude twice per ticker, and a third time
+   when the first two answers differ (about 22 s a call, four at a time), so 180 names
+   take up to 45 minutes: in a session, run it in the background and wait for it. Names
+   a measurement already fails (a close below the 200-day in the base, a stop inside one
+   typical day) get their FAIL without a call. It writes every answer to `review/votes.jsonl`, the
    combined answers to `review/form.csv` and one coded verdict per ticker to
    `verdicts.csv`. It exits 1 when some names got no answer; run it again and it resumes.
    Never edit `verdicts.csv` by hand.
