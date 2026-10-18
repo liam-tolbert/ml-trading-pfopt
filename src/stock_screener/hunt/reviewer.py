@@ -45,6 +45,9 @@ REVIEW_EFFORT = "medium"
 REVIEW_VOTES = 3
 # Raised by one whenever the verdict table in verdict_from_form changes meaning.
 TABLE_VERSION = 1
+# A pullback counts as wider only when it is more than this many times as deep as the one
+# before. Halving is the books' rule of thumb, not a disqualifier (HANDOFF §6.94).
+EXPAND_RATIO = 1.10
 
 REVIEW_SUBDIR = "review"
 VOTES_FILE = "votes.jsonl"
@@ -173,11 +176,13 @@ Measured from the price data (exact; trust these over pixel estimates):
 
 What a sound base looks like (Minervini): after an advance the stock pulls back two to \
 six times, each pullback smaller than the one before, roughly half (25 -> 12 -> 6 -> 3%). \
-Volume dries up as the swings shrink and is lowest in the final tight area. Higher lows; \
-quick bounces off lows and closes in the upper half of the day's range. The pivot is the \
-high of the last tight area. Warning signs: pullbacks getting larger, heavy volume on \
-down days, wide erratic daily swings, a V-shaped run up the right side with no pause, \
-breaking the 200-day. The first and second bases of an advance work best.
+Halving is a rule of thumb, not a requirement: pullbacks that shrink slowly, or level off \
+at about the same depth, are still a sound base. Volume dries up as the swings shrink \
+and is lowest in the final tight area. Higher lows; quick bounces off lows and closes in \
+the upper half of the day's range. The pivot is the high of the last tight area. Warning \
+signs: pullbacks getting clearly larger, heavy volume on down days, wide erratic daily \
+swings, a V-shaped run up the right side with no pause, breaking the 200-day. The first \
+and second bases of an advance work best.
 
 Answer every question with exactly one of its options:
 - pattern: what is this? vcp | cup_with_handle | flat_base | double_bottom | \
@@ -186,9 +191,12 @@ toward a pivot).
 - swings_match: do the lettered points sit on the real swing highs and lows of the \
 base? yes | no. If no, list the peaks and troughs you see in swings_seen as dates \
 (YYYY-MM-DD) with kind peak or trough; otherwise leave swings_seen empty.
-- right_side: how do the pullbacks behave from left to right? orderly_tightening | \
-wider_leg (a later pullback as deep as or deeper than the one before) | v_shape (a \
-straight run up the right side with no pause).
+- right_side: how do the pullbacks behave from left to right? orderly_tightening (each \
+pullback smaller than, or about as deep as, the one before; shrinking slowly or not \
+halving still counts) | wider_leg (a later pullback clearly deeper than the one before: \
+more than {expand:.2f} times its depth, on the measured legs or, if the lettered points \
+are wrong, on the swings you see) | v_shape (a straight run up the right side with no \
+pause).
 - final_area: the last tight area before the pivot. tight (narrow days, closes stacked) \
 | loose (wide days or closes) | not_formed (no tight area yet).
 - volume: through the base. drying_up | mixed | heavy_selling (clusters of heavy volume \
@@ -201,11 +209,14 @@ sensible stop).
 first_or_second | third | fourth_or_later | cant_tell.
 
 For each question write one short line of evidence in evidence (what on the chart or in \
-the numbers decided it). Set sure to false if any answer was a close call."""
+the numbers decided it). Set sure to false only if, on pattern, right_side, volume or \
+character, two answers were about equally likely. A close call on any other question is \
+not a reason."""
 
 
 def build_prompt(weekly: Path, daily: Path, facts: dict) -> str:
-    return _PROMPT.format(weekly=weekly, daily=daily, facts=facts_text(facts))
+    return _PROMPT.format(weekly=weekly, daily=daily, facts=facts_text(facts),
+                          expand=EXPAND_RATIO)
 
 
 def schema() -> dict:
@@ -231,7 +242,8 @@ def schema() -> dict:
 def prompt_hash() -> str:
     """Short hash of the prompt, the schema and the verdict table: one value per review
     method, recorded with every run."""
-    blob = _PROMPT + json.dumps(schema(), sort_keys=True) + f"table{TABLE_VERSION}"
+    blob = (_PROMPT + json.dumps(schema(), sort_keys=True) + f"table{TABLE_VERSION}"
+            + f"expand{EXPAND_RATIO}")
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
@@ -316,10 +328,11 @@ def conflicts(form: dict, facts: dict, df: Optional[pd.DataFrame] = None) -> Lis
         depths = mine or depths
     ratios = _ratios(depths)
     out = []
-    if form.get("right_side") == "orderly_tightening" and any(r >= 1.0 for r in ratios):
-        out.append("tightening, but a measured leg is as deep as the one before")
-    if form.get("right_side") == "wider_leg" and ratios and all(r < 1.0 for r in ratios):
-        out.append("wider leg, but every measured leg is smaller")
+    side = form.get("right_side")
+    if side == "orderly_tightening" and any(r > EXPAND_RATIO for r in ratios):
+        out.append("tightening, but a measured leg is clearly deeper than the one before")
+    if side == "wider_leg" and ratios and all(r <= EXPAND_RATIO for r in ratios):
+        out.append("wider leg, but no measured leg is clearly deeper than the one before")
     du = _num(facts.get("dryup_ratio"))
     if form.get("volume") == "drying_up" and du is not None and du >= 1.0:
         out.append(f"drying up, but the final area trades {du:.2f}x its average")

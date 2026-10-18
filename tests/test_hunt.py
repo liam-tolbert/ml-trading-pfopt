@@ -698,14 +698,21 @@ def test_reviewer_votes_and_checks():
     ok("one unsure answer is listed", "unsure" in d["needs_check"])
     d = rv.decide([_form()], _facts(), {}, wanted=3)
     ok("too few answers are listed", d["needs_check"] == ["only 1 of 3 answers"])
-    d = rv.decide([_form()] * 3, _facts(leg_ratios=[0.5, 1.1],
-                                        legs=[{"depth_pct": 20.0}, {"depth_pct": 10.0},
-                                              {"depth_pct": 11.0}]), {})
-    ok("tightening against a measured wider leg is a conflict",
-       any("as deep as the one before" in c for c in d["needs_check"]))
+    def legs(*depths):
+        return _facts(legs=[{"depth_pct": x} for x in depths])
+
+    d = rv.decide([_form()] * 3, legs(20.0, 10.0, 12.0), {})
+    ok("tightening against a measured leg 1.2x the one before is a conflict",
+       any("clearly deeper than the one before" in c for c in d["needs_check"]))
+    ok("a leg exactly 1.10x the one before is still tightening",
+       rv.conflicts(_form(), legs(20.0, 10.0, 11.0)) == [])
     d = rv.decide([_form(right_side="wider_leg")] * 3, _facts(), {})
     ok("a wider leg against shrinking measured legs is a conflict",
-       any("every measured leg is smaller" in c for c in d["needs_check"]))
+       any("no measured leg is clearly deeper" in c for c in d["needs_check"]))
+    ok("so is a wider leg against legs that barely shrink (0.99x)",
+       rv.conflicts(_form(right_side="wider_leg"), legs(7.9, 7.8)) != [])
+    ok("a wider leg against a leg 1.2x the one before is not",
+       rv.conflicts(_form(right_side="wider_leg"), legs(10.0, 12.0)) == [])
     d = rv.decide([_form()] * 3, _facts(dryup_ratio=1.3), {})
     ok("drying up against a dry-up ratio over 1 is a conflict",
        any("1.30x its average" in c for c in d["needs_check"]))
