@@ -714,7 +714,8 @@ def _write_form(path: Path, decided: Dict[str, dict], n_answers: Dict[str, int])
 
 
 # ---- measuring agreement with the user ------------------------------------ #
-LABEL_COLUMNS = ["ticker", "verdict", *FORM]
+LABEL_COLUMNS = ["ticker", "tier", "verdict", *FORM]
+LABEL_TIERS = ("A", "B")
 
 
 def label_sample(tickers: List[str], n: int, seed: str) -> List[str]:
@@ -727,14 +728,25 @@ def label_sample(tickers: List[str], n: int, seed: str) -> List[str]:
     return [t for t in tickers if t in keep]
 
 
-def write_label_template(path: Path, tickers: List[str]) -> None:
-    """A CSV with one blank row per ticker for the user's own answers. Any column MAY
-    stay blank; blanks are left out of the scores."""
+def label_rows(tier_a: List[str], tier_b: List[str], n_a: int, n_b: int,
+               seed: str) -> List[Tuple[str, str]]:
+    """``(ticker, tier)`` pairs to label: ``label_sample(tier_a, n_a, seed)``, then
+    ``n_b`` of ``tier_b`` (none when ``n_b`` is 0). Tier B draws from its own seed, so
+    the tier-A names are the same whatever ``n_b`` is."""
+    rows = [(t, "A") for t in label_sample(tier_a, n_a, seed)]
+    if n_b > 0:
+        rows += [(t, "B") for t in label_sample(tier_b, n_b, f"{seed}:B")]
+    return rows
+
+
+def write_label_template(path: Path, rows: List[Tuple[str, str]]) -> None:
+    """A CSV with one blank row per ``(ticker, tier)`` pair for the user's own answers.
+    Any answer column MAY stay blank; blanks are left out of the scores."""
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=LABEL_COLUMNS)
         w.writeheader()
-        for t in tickers:
-            w.writerow({"ticker": t})
+        for t, tier in rows:
+            w.writerow({"ticker": t, "tier": tier})
 
 
 def read_labels(path: Path) -> Dict[str, dict]:
@@ -756,6 +768,8 @@ def read_labels(path: Path) -> Dict[str, dict]:
                                        f"{list(FORM[k])}")
                 if k == "verdict" and v not in pl.VERDICTS:
                     raise pl.HuntError(f"{path}: {r['ticker']} verdict {v!r}")
+                if k == "tier" and v not in LABEL_TIERS:
+                    raise pl.HuntError(f"{path}: {r['ticker']} tier {v!r}")
             out[row.get("ticker", "")] = row
     out.pop("", None)
     return out
@@ -767,7 +781,12 @@ def score(mine: Dict[str, dict], theirs: Dict[str, dict]) -> dict:
     Each question counts only tickers both answered. Returns per-question agreement, the
     verdict agreement with Cohen's kappa and the confusion table (``mine -> theirs ->
     count``), and the two costly errors: ``false_pass`` (theirs PASS where mine is not)
-    and ``missed_pass`` (mine PASS where theirs is not)."""
+    and ``missed_pass`` (mine PASS where theirs is not).
+
+    ``pass_by_tier`` lists every PASS in ``mine`` under its ``tier`` column (``"?"`` when
+    blank), answered by ``theirs`` or not. The review never sees tier B, so its list is
+    the setups the detector left out, and those names are in neither kappa nor
+    ``missed_pass``."""
     out: dict = {"questions": {}}
     for q in ("verdict", *FORM):
         both = [t for t in mine if q in mine[t] and q in (theirs.get(t) or {})]
@@ -790,6 +809,11 @@ def score(mine: Dict[str, dict], theirs: Dict[str, dict]) -> dict:
         "missed_pass": [t for t in both if mine[t]["verdict"] == "PASS"
                         and theirs[t]["verdict"] != "PASS"],
     }
+    by_tier: Dict[str, List[str]] = {}
+    for t, row in mine.items():
+        if row.get("verdict") == "PASS":
+            by_tier.setdefault(row.get("tier", "?"), []).append(t)
+    out["pass_by_tier"] = by_tier
     return out
 
 

@@ -290,12 +290,14 @@ the Pi.
 - **The Weekend Hunt page (§6.104, §6.105)** lists a dated folder only once it holds
   `report.html` (`hunt_view.FINISHED_FILES`), so a run in progress never shows. It shows every
   PASS name one at a time, laid out to fit one laptop screen: a control strip (Prev, the
-  verdict, ⭐ Add to watchlist, Next), the chart at 500 px beside the verdict and entry numbers,
-  then Step 2 beside the catalyst read. **The chart draws the hunt's levels**, not the latest
-  scan's: the detector re-anchors pivots as bars arrive, and the verdict, the numbers and the
-  watchlist entry all refer to the pivot the hunt judged. When today's scan puts the pivot
-  ≥ 0.5% elsewhere, a dotted "today's pivot" line and a caption show it (`hunt_view.hunt_levels`,
-  `pivot_drift`). A name the latest scan no longer holds shows its quarter of the hunt's sheet.
+  verdict, ⭐ Add to watchlist, Next), the chart beside the verdict and entry numbers, then
+  Step 2 beside the catalyst read. **The chart is the name's quarter of the hunt's review
+  sheet** (§6.112), the matplotlib chart the verdict was made on, so it draws the hunt's levels,
+  not the latest scan's: the detector re-anchors pivots as bars arrive, and the verdict, the
+  numbers and the watchlist entry all refer to the pivot the hunt judged. When today's scan puts
+  the pivot ≥ 0.5% elsewhere, a caption says so (`hunt_view.pivot_drift`). Only a name with no
+  sheet gets the interactive scan chart at 500 px, with the hunt's levels and a dotted "today's
+  pivot" line (`hunt_view.hunt_levels`).
 - **The allowlist is the safety boundary** (`scripts/hunt/unattended_settings.json`): the hunt
   CLI, file reads, and writes inside `data/cockpit/hunt/`. No ssh, no cockpit or trade code.
   The weekly run makes no chart-review call. Run by hand, `review --reviewer claude` gives
@@ -566,12 +568,15 @@ source comments live. A new entry goes there, numbered after the last one.
   come from a real trade that would have gone differently, or from a gap the journal shows.
 - **The detector and the rules reviewer are unmeasured (§6.109, §6.110).** Until they pass,
   the user still checks every chart. The check, fixed before anyone looks: on the next hunt,
-  `hunt label-template --sample 40` (seeded by the hunt's date) writes 40 names; the user
-  judges them from the report's sheets and runs `hunt score`. Pass = verdict kappa ≥ 0.4 and
-  missed PASS ≤ 15% of the user's PASS names. Pass or fail, the numbers go in the ledger, and
-  no threshold changes without a new pre-registration. The sample holds tier-A names only, so
-  it cannot show a setup the detector left in tier B; a sample across tiers needs its own
-  command. Known before the check: on the 10-18 hunt the rules gave 37 `DQ:expanding`
+  `hunt label-template --sample 40 --sample-b 20` (seeded by the hunt's date) writes 40
+  tier-A names plus 20 tier-B names (RS ≥ the floor) to one `labels.csv` with a `tier`
+  column; the user judges tier A from the report's sheets and tier B from `label_charts/` in
+  the hunt folder, then runs `hunt score`. Run it the same weekend: `--sample-b` reads the
+  scan, which goes stale after 3 days. Pass = verdict kappa ≥ 0.4 and missed PASS ≤ 15% of
+  the user's tier-A PASS names. `score`'s `pass_by_tier["B"]` counts the setups the detector
+  left in tier B (§6.111); it goes in the ledger beside the pass mark, not into it. Pass or
+  fail, the numbers go in the ledger, and no threshold changes without a new
+  pre-registration. Known before the check: on the 10-18 hunt the rules gave 37 `DQ:expanding`
   (Claude 12), many on ~4% swings, and `needs_check` on 115 of 136 names, too many to be a
   useful list. The Claude reviewer (§6.106) stays behind `--reviewer claude` for comparison.
 - **The catalyst read is unscored (§6.104).** Every PASS name now carries a category, a

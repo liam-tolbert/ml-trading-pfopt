@@ -116,10 +116,10 @@ def status(bundle: ScanBundle) -> dict:
     }
 
 
-def candidates(bundle: ScanBundle, min_rs: int = MIN_RS) -> pd.DataFrame:
-    """Tier-A rows with ``rs >= min_rs``, in scan order (tier, quality, fund, rs)."""
+def candidates(bundle: ScanBundle, min_rs: int = MIN_RS, tier: str = "A") -> pd.DataFrame:
+    """Rows of ``tier`` with ``rs >= min_rs``, in scan order (tier, quality, fund, rs)."""
     cand = bundle.result.candidates
-    out = cand[(cand["tier"] == "A") & (cand["rs"] >= min_rs)].reset_index(drop=True)
+    out = cand[(cand["tier"] == tier) & (cand["rs"] >= min_rs)].reset_index(drop=True)
     return out
 
 

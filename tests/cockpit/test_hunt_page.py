@@ -260,8 +260,10 @@ def test_hunt_levels_and_drift():
 
 
 def test_hunt_page_chart_path_when_scanned():
-    """A name in the latest scan gets the interactive chart and the shared Step-2 panel."""
-    with _HuntDir():
+    """A name in the latest scan gets the shared Step-2 panel. The chart is the hunt's
+    sheet panel (user request, 2026-10-19); the interactive chart only stands in when the
+    hunt left no sheet for the name."""
+    with _HuntDir() as h:
         payload = _payload(100.0, 102.0)
         payload["fundamentals"].update({"revenue_qoq": 5.0, "eps_qoq": 7.0,
                                         "operating_margin": 21.0, "margin_trend": 1.5})
@@ -273,8 +275,8 @@ def test_hunt_page_chart_path_when_scanned():
             assert not at.exception, at.exception
             text = _rendered_text(at)
             assert "+25.0%" in text and "+5.0%" in text, text[:800]
-            assert at.get("plotly_chart"), "the interactive chart"
-            assert "the levels are the hunt's" in text
+            assert at.get("imgs") and not at.get("plotly_chart"), "the hunt's sheet panel"
+            assert "review sheet 1 of 1 (top-left)" in text
         moved = _payload(110.0, 102.0)
         with patch.object(hunt_view, "latest_payloads", return_value={"AAA": moved}):
             at = _apptest()
@@ -283,6 +285,13 @@ def test_hunt_page_chart_path_when_scanned():
             text = _rendered_text(at)
             assert "110.00" in text and "(+10.0%" in text, \
                 text[:900]
+            (h.path / "charts" / "sheets.json").write_text(
+                json.dumps({"sheet_001.png": ["BBB", "DDD", "EEE"]}))
+            at = _apptest()
+            at.run()
+            assert not at.exception, at.exception
+            assert at.get("plotly_chart") and not at.get("imgs"), "no sheet: the scan's chart"
+            assert "(+10.0%" in _rendered_text(at), "the drift caption under either chart"
 
 
 def test_hunt_page_add_to_watchlist():

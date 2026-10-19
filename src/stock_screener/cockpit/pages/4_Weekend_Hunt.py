@@ -54,7 +54,7 @@ _VERDICT_COLOR = {"PASS": "green", "PASS-": "orange", "FAIL": "red"}
 # The page MUST fit a ticker's chart, verdict and entry numbers on one laptop screen
 # without scrolling; the scan page keeps the full 720 px chart.
 CHART_HEIGHT = 500
-SHEET_WIDTH = 560          # the hunt's own chart image, for a ticker not in the latest scan
+SHEET_WIDTH = 560          # the ticker's panel of the hunt's review sheet
 REPORT_HEIGHT = 820        # the iframe scrolls itself; the page does not
 
 
@@ -213,39 +213,37 @@ with tab_review:
         # Row 1: the chart and the verdict with its entry numbers, side by side.
         colChart, colSide = st.columns([2.4, 1])
         with colChart:
-            if payload is not None and payload.get("df") is not None:
-                scan_lv = payload.get("levels")
+            scan_lv = payload.get("levels") if payload is not None else None
+            drift = hunt_view.pivot_drift(pick.row, scan_lv)
+            drift_note = ("" if not drift else
+                          f":orange[Since the hunt the scan finds the pivot at {drift[0]:.2f} "
+                          f"({drift[1]:+.1f}% vs the hunt's {_fmt(nums['pivot'])}).] The "
+                          "levels drawn, the numbers and ⭐ Add use the hunt's pivot; save the "
+                          "new one with 📌 on the scan page if you think it is right.")
+            # The hunt's own chart is the one the verdict was made on, so it comes first.
+            sheet = hunt_view.sheet_for(hunt_path, state, pick.ticker)
+            if sheet:
+                png, k, total, j = sheet
+                panel = hunt_view.sheet_panel(png, j)
+                st.image(panel if panel is not None else str(png), width=SHEET_WIDTH)
+                st.caption(drift_note or f"The hunt's chart, from review sheet {k} of {total} "
+                                         f"({hunt_view.panel_name(j)}).")
+            elif payload is not None and payload.get("df") is not None:
                 fig = build_chart(pick.ticker, payload["df"], vcp=payload.get("vcp"),
                                   levels=hunt_view.hunt_levels(pick.row, scan_lv),
                                   marks=advisories.step3_marks(payload))
                 fig.update_layout(height=CHART_HEIGHT, margin=dict(l=10, r=24, t=30, b=6))
-                drift = hunt_view.pivot_drift(pick.row, scan_lv)
                 if drift:
                     fig.add_hline(y=drift[0], row=1, col=1, line_dash="dot", line_width=1,
                                   line_color="#9e9e9e", annotation_text="today's pivot",
                                   annotation_position="top left",
                                   annotation_font_color="#9e9e9e")
                 st.plotly_chart(fig, width="stretch")
-                if drift:
-                    st.caption(f":orange[Since the hunt the scan finds the pivot at "
-                               f"{drift[0]:.2f} ({drift[1]:+.1f}% vs the hunt's "
-                               f"{_fmt(nums['pivot'])}; dotted line).] The levels drawn, the "
-                               "numbers and ⭐ Add use the hunt's pivot; save the new one with "
-                               "📌 on the scan page if you think it is right.")
-                else:
-                    st.caption("Today's price bars and the contractions found; the levels "
-                               "are the hunt's.")
+                st.caption(drift_note or "The hunt left no review sheet for this stock: "
+                                         "today's price bars, with the hunt's levels.")
             else:
-                sheet = hunt_view.sheet_for(hunt_path, state, pick.ticker)
-                if sheet:
-                    png, k, total, j = sheet
-                    panel = hunt_view.sheet_panel(png, j)
-                    st.image(panel if panel is not None else str(png), width=SHEET_WIDTH)
-                    st.caption(f"From review sheet {k} of {total} ({hunt_view.panel_name(j)}): "
-                               f"{pick.ticker} is not in the latest scan on the Pi.")
-                else:
-                    st.info("No chart: the stock is not in the latest scan and the hunt "
-                            "left no review sheet for it.")
+                st.info("No chart: the hunt left no review sheet for this stock and it is "
+                        "not in the latest scan.")
 
         with colSide:
             with st.container(border=True):

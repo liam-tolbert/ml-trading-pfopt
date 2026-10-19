@@ -68,13 +68,14 @@ def _payload(pivot: float, close: float, *, last_vol_mult=0.8, breakout=False,
 
 def _bundle():
     # AAA 2% above pivot / BBB 2% below / CCC rs 69 (filtered) / DDD confirmed
-    # breakout / EEE earnings-blocked
+    # breakout / EEE earnings-blocked / ZZZ tier B
     payloads = {
         "AAA": _payload(100.0, 102.0),
         "BBB": _payload(100.0, 98.0),
         "CCC": _payload(50.0, 50.0),
         "DDD": _payload(20.0, 20.4, last_vol_mult=1.50, breakout=True),
         "EEE": _payload(10.0, 10.1, earnings_in=21),
+        "ZZZ": _payload(30.0, 29.0),
     }
     cand = pd.DataFrame([
         {"ticker": "AAA", "tier": "A", "rs": 95, "vcp_quality": 90.0, "fund_score": 2},
@@ -97,6 +98,7 @@ def test_rs_floor_and_tier():
     ok("rs 69 excluded by floor", "CCC" not in got)
     ok("floor keeps the rest", got == ["AAA", "BBB", "DDD", "EEE"])
     ok("min_rs is 70", pl.MIN_RS == 70)
+    ok("tier B is asked for by name", list(pl.candidates(b, tier="B")["ticker"]) == ["ZZZ"])
 
 
 def test_bucket_boundaries():
@@ -931,6 +933,15 @@ def test_rules_hash_and_scan_read():
        pick == rv.label_sample(names, 4, "2026-10-18") and len(pick) == 4
        and pick == [t for t in names if t in pick])
     ok("no sample size means every name", rv.label_sample(names, 0, "x") == names)
+    tier_b = [f"B{i}" for i in range(10)]
+    alone = rv.label_rows(names, tier_b, 4, 0, "2026-10-18")
+    mixed = rv.label_rows(names, tier_b, 4, 3, "2026-10-18")
+    ok("a tier-B draw leaves the tier-A names as label_sample picks them",
+       alone == [(t, "A") for t in pick] and mixed[:4] == alone)
+    ok("the tier-B names are seeded, tagged B and come after tier A",
+       [tier for _, tier in mixed[4:]] == ["B"] * 3
+       and mixed == rv.label_rows(names, tier_b, 4, 3, "2026-10-18")
+       and {t for t, _ in mixed[4:]} <= set(tier_b))
 
 
 def test_labels_and_score():
@@ -938,13 +949,16 @@ def test_labels_and_score():
     from src.stock_screener.hunt import reviewer as rv
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "labels.csv"
-        rv.write_label_template(path, ["AAA", "BBB"])
-        ok("the template has a blank row per ticker",
-           rv.read_labels(path) == {"AAA": {"ticker": "AAA"}, "BBB": {"ticker": "BBB"}})
+        rv.write_label_template(path, [("AAA", "A"), ("ZZZ", "B")])
+        ok("the template has a blank row per ticker, with its tier",
+           rv.read_labels(path) == {"AAA": {"ticker": "AAA", "tier": "A"},
+                                    "ZZZ": {"ticker": "ZZZ", "tier": "B"}})
         path.write_text("ticker,verdict,volume\nAAA,PASS,dry\n")
         ok("an answer off the list is refused", _raises(lambda: rv.read_labels(path)))
         path.write_text("ticker,verdict\nAAA,BUY\n")
         ok("a bad verdict is refused", _raises(lambda: rv.read_labels(path)))
+        path.write_text("ticker,tier\nAAA,C\n")
+        ok("a tier other than A or B is refused", _raises(lambda: rv.read_labels(path)))
     mine = {"A": {"verdict": "PASS", "volume": "drying_up"},
             "B": {"verdict": "FAIL", "volume": "mixed"},
             "C": {"verdict": "PASS-"}, "D": {"verdict": "PASS"}}
@@ -965,6 +979,57 @@ def test_labels_and_score():
        and sc["verdict"]["confusion"]["PASS"]["PASS"] == 1)
     ok("kappa is below the raw agreement", sc["verdict"]["kappa"] == 0.2)
     ok("perfect agreement is kappa 1", rv.score(mine, mine)["verdict"]["kappa"] == 1.0)
+    ok("a PASS with no tier is listed under ?", sc["pass_by_tier"] == {"?": ["A", "D"]})
+    tiered = {**{t: {**r, "tier": "A"} for t, r in mine.items()},
+              "E": {"verdict": "PASS", "tier": "B"}, "F": {"verdict": "FAIL", "tier": "B"}}
+    sc2 = rv.score(tiered, theirs)
+    ok("a tier-B PASS the review never saw is counted as a missed setup",
+       sc2["pass_by_tier"] == {"A": ["A", "D"], "B": ["E"]})
+    ok("tier-B names leave kappa and missed PASS as they were",
+       sc2["verdict"]["kappa"] == sc["verdict"]["kappa"]
+       and sc2["verdict"]["missed_pass"] == ["D"] and sc2["verdict"]["n"] == 4)
+
+
+def test_label_template_command():
+    """§6.111: the pre-registered sample held tier A only, so it could not show a setup
+    the detector left in tier B. ``--sample-b`` adds tier-B names to the same file and
+    draws their sheets; it needs matplotlib, so it runs where the hunt runs."""
+    try:
+        from src.stock_screener.hunt import charts  # noqa: F401
+    except ImportError:
+        print("  SKIP  label-template command (no matplotlib)")
+        return
+    import json
+    from src.stock_screener.hunt import __main__ as cli
+    from src.stock_screener.hunt import reviewer as rv
+    b = _bundle()
+    saved = pl.HUNT_DIR, pl.load_scan, pl.load_equity, pl._watchlist_tickers
+    with tempfile.TemporaryDirectory() as td:
+        pl.HUNT_DIR = Path(td)
+        pl.load_scan = lambda: b
+        pl.load_equity = lambda: None
+        pl._watchlist_tickers = lambda: []
+        try:
+            for date in ("2026-10-18", "2026-10-19"):
+                d = pl.hunt_dir(date)
+                pl.diagnostics(b, pl.candidates(b)).to_csv(d / "diagnostics.csv", index=False)
+            cli.main(["label-template", "--sample", "2", "--date", "2026-10-18"])
+            cli.main(["label-template", "--sample", "2", "--sample-b", "1",
+                      "--date", "2026-10-19", "--seed", "2026-10-18"])
+            alone = rv.read_labels(Path(td) / "2026-10-18" / "labels.csv")
+            mixed = rv.read_labels(Path(td) / "2026-10-19" / "labels.csv")
+            sheets = Path(td) / "2026-10-19" / cli.LABEL_CHARTS / "sheets.json"
+            ok("without --sample-b the file holds tier A only and draws no sheets",
+               {r["tier"] for r in alone.values()} == {"A"} and len(alone) == 2
+               and not (Path(td) / "2026-10-18" / cli.LABEL_CHARTS).exists())
+            ok("--sample-b adds tier-B names after the same tier-A names",
+               list(mixed) == [*alone, "ZZZ"] and mixed["ZZZ"]["tier"] == "B")
+            ok("the tier-B names get their own sheets",
+               json.loads(sheets.read_text()) == {"sheet_001.png": ["ZZZ"]})
+            ok("a labels file is never overwritten",
+               cli.main(["label-template", "--date", "2026-10-19"]) == 2)
+        finally:
+            pl.HUNT_DIR, pl.load_scan, pl.load_equity, pl._watchlist_tickers = saved
 
 
 def test_review_images():
@@ -987,6 +1052,12 @@ def test_review_images():
            got == ["AAA", "BBB"] and weekly.read_bytes()[:4] == b"\x89PNG"
            and daily.read_bytes()[:4] == b"\x89PNG"
            and json.loads(facts.read_text())["swings"][0]["label"] == "A")
+        diag_b = pl.diagnostics(b, pl.candidates(b, tier="B"))
+        sheets = charts.render_sheets(b, diag_b, d / "label_charts")
+        ok("a tier-B name gets a sheet of its own outside charts/",
+           [p.name for p in sheets] == ["sheet_001.png"]
+           and json.loads((d / "label_charts" / "sheets.json").read_text())
+           == {"sheet_001.png": ["ZZZ"]} and not (d / "charts").exists())
 
 
 if __name__ == "__main__":
@@ -1007,6 +1078,7 @@ if __name__ == "__main__":
     test_run_rules_review()
     test_rules_hash_and_scan_read()
     test_labels_and_score()
+    test_label_template_command()
     test_review_images()
     test_report_builds()
     test_narrative_markdown()

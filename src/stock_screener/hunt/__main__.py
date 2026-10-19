@@ -6,7 +6,8 @@
     python -m src.stock_screener.hunt review-charts [--limit N] [--date ...]
     python -m src.stock_screener.hunt review [--reviewer rules|claude] [--model M] [--effort E]
                                              [--votes 3] [--jobs 4]
-    python -m src.stock_screener.hunt label-template [--sample N] [--seed S] [--date ...]
+    python -m src.stock_screener.hunt label-template [--sample N] [--sample-b N] [--seed S]
+                                                     [--date ...]
     python -m src.stock_screener.hunt score --labels MINE.csv [--against THEIRS.csv] [--date ...]
     python -m src.stock_screener.hunt compare --date A --against B
     python -m src.stock_screener.hunt append-verdicts --file BATCH.csv [--date ...]
@@ -19,7 +20,8 @@ Run from the repo root inside the ml-trading env; scripts/hunt/hunt.sh does both
 State lands in data/cockpit/hunt/<date>/ — diagnostics.csv, meta.json,
 charts/sheet_NNN.png, review/ (each ticker's two review charts and facts, every answer
 in votes.jsonl, the combined answers in form.csv), news/<ticker>.json, verdicts.csv,
-narrative.md and catalyst.json (the last two written by the skill), report.html.
+narrative.md and catalyst.json (the last two written by the skill), report.html,
+labels.csv and label_charts/ (the hand-label sample and its tier-B sheets).
 `report` also mirrors report.html and the sheets to docs/hunt/<date>/, the deliverable.
 
 `review` answers each chart's form from the detector's numbers. With `--reviewer claude`
@@ -45,6 +47,8 @@ import pandas as pd
 
 from src.stock_screener.hunt import pipeline as pl
 from src.stock_screener.hunt import reviewer as rv
+
+LABEL_CHARTS = "label_charts"     # the tier-B label sample's sheets
 
 
 def _load_state(args):
@@ -160,9 +164,26 @@ def cmd_label_template(args) -> int:
     out = d / "labels.csv"
     if out.exists():
         raise pl.HuntError(f"{out} already exists; it is never overwritten.")
-    tickers = rv.label_sample(list(diag["ticker"]), args.sample, args.seed or d.name)
-    rv.write_label_template(out, tickers)
-    print(json.dumps({"labels": str(out), "tickers": len(tickers)}, indent=2))
+    bundle, cand_b = None, pd.DataFrame(columns=["ticker"])
+    if args.sample_b > 0:
+        bundle = pl.load_scan()
+        meta_path = d / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+        cand_b = pl.candidates(bundle, min_rs=meta.get("min_rs") or pl.MIN_RS, tier="B")
+    rows = rv.label_rows(list(diag["ticker"]), list(cand_b["ticker"]), args.sample,
+                         args.sample_b, args.seed or d.name)
+    picked_b = {t for t, tier in rows if tier == "B"}
+    summary = {"labels": str(out), "tickers": len(rows),
+               "tier_a": len(rows) - len(picked_b), "tier_b": len(picked_b)}
+    if picked_b:
+        from src.stock_screener.hunt.charts import render_sheets
+        diag_b = pl.diagnostics(bundle, cand_b[cand_b["ticker"].isin(picked_b)],
+                                equity=pl.load_equity())
+        # Its own folder: render_sheets numbers from sheet_001 and would overwrite charts/.
+        render_sheets(bundle, diag_b, d / LABEL_CHARTS)
+        summary["tier_b_sheets"] = str(d / LABEL_CHARTS)
+    rv.write_label_template(out, rows)
+    print(json.dumps(summary, indent=2))
     return 0
 
 
@@ -262,6 +283,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("label-template"); common(p)
     p.add_argument("--sample", type=int, default=0,
                    help="label only this many candidates, picked at random (default: all)")
+    p.add_argument("--sample-b", type=int, default=0,
+                   help="also label this many tier-B names, with sheets in label_charts/ "
+                        "(needs the hunt's scan; default: none)")
     p.add_argument("--seed", default=None,
                    help="what picks the sample (default: the hunt's date)")
     p = sub.add_parser("score"); common(p)
