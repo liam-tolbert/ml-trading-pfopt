@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
 from tests.cockpit import (  # noqa: E402
     test_advisories,
     test_app,
+    test_base_read,
     test_data_feed,
     test_entries,
     test_hunt_page,
@@ -42,6 +43,7 @@ SUITES = (
     test_data_feed,
     test_scan,
     test_vcp,
+    test_base_read,
     test_watchlist,
     test_trade,
     test_positions,

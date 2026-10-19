@@ -27,9 +27,10 @@ The key words MUST, MUST NOT, SHOULD and MAY are used as described in RFC 2119.
 - **No ad-hoc rules.** A session MUST NOT invent thresholds while judging charts, running
   the weekend hunt or answering "what would Minervini do". A missing rule is a question for
   the user, or a plan.
-- **No tuning to the benchmark.** A new read's thresholds are fixed before it is measured on
-  the 200 labelled charts (`tests/vcp_labels.py`) and MUST NOT be adjusted to the result.
-  A failed pre-registered check ships the read without its verdict (HANDOFF §6.76, §6.91–6.93).
+- **No tuning to the check.** A new read's thresholds are fixed before it is measured on the
+  user's own hand-judged hunt charts (HANDOFF §12) and MUST NOT be adjusted to the result.
+  A failed pre-registered check ships the read without its verdict (HANDOFF §6.76,
+  §6.91–6.93). The 200 charts in `tests/vcp_labels.py` are a printed report only (§6.110).
 - **Advice.** The account is a paper account. A session MUST NOT give personalized
   investment advice. It explains what the books and the user's own rules say and leaves
   the decision to the user.
@@ -290,10 +291,10 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Step-2 score F (0–8) | `scan._step2_summary`: rev ≥ 20%, EPS ≥ 20%, EPS accel, margin ↑, Code 33, annual EPS ↑, estimates ↑ ≥ 5%, last report held | Never a default gate: thin free data would drop names for missing data (§7, §6.89) |
 | Earnings reaction | `advisories.earnings_reaction`, `EARNINGS_REACTION_PCT` (5%) | The books give no number (§6.87) |
 | Catalyst | `hunt news` fetches each PASS name's headlines; the reviewer writes `catalyst.json` (category, sentiment, summary, cited sources); the Weekend Hunt page and the report show it | A label beside the verdict, never a gate (§6.103, §6.104) |
-| VCP detection | `cockpit/vcp.py` `detect_vcp`, tiers A/B/C | Looser tightening and 2-week bases on purpose, so it never misses a real base; benchmark-calibrated (§10) |
+| VCP detection | `cockpit/vcp.py` `detect_vcp` (legs from `swings.py`), tiers A/B/C | Looser tightening, one out-of-order leg and 2-week bases on purpose, so it never misses a real base. Unmeasured against the user's hand judgments yet (§10, §12) |
 | Books' halving, base length | `advisories.book_tightening` | Numbers only; no verdict (§6.94, §6.100) |
 | Volume dry-up | `advisories.volume_dryup` | Numbers only: doesn't separate good from bad on the benchmark (§6.91, §6.100) |
-| Step-3 chart verdict | `hunt/reviewer.py`: Claude answers an eight-question form per ticker in two or three separate calls, and a pullback is wider only above 1.10× the one before; `verdict_from_form` turns the majority into PASS / PASS- / FAIL. FAIL names one §4 disqualifier (`DQ:` codes); PASS- names caveats (`CAV:`). Code applies the plain-number rules itself: closing below the 200-day during the base, a stop inside one typical day, a dry-up ratio of 1.0 or more, and an order ceiling under a full position (5% of equity, the user's choice) | Judges the base only: distance to the pivot, F, price, earnings and order size go to the gates (user decision, 2026-10-09). Unmeasured against the user's labels yet (§12, §6.106) |
+| Step-3 chart verdict | `hunt/reviewer.py` `run_rules_review`: the eight-question form is answered from the detector's reads (`cockpit/base_read.py`), and `verdict_from_form` turns it into PASS / PASS- / FAIL. FAIL names one §4 disqualifier (`DQ:` codes); PASS- names caveats (`CAV:`). A swing is wider only above 1.10× the one before. Code also applies closing below the 200-day during the base, a stop inside one typical day, a dry-up ratio of 1.0 or more, and an order ceiling under a full position (5% of equity, the user's choice). Claude's answers (§6.106) stay behind `--reviewer claude` for comparison | Judges the base only: distance to the pivot, F, price, earnings and order size go to the gates (user decision, 2026-10-09). The V and the base count are not read; other setups read as `vcp` or `no_base`. Unmeasured against the user's labels yet (§12, §6.109) |
 | Shakeouts, V recovery | — | Not built: removed after failing pre-registered checks (§6.92, §6.93, §6.100) |
 | Other setups | none | Parked (`HANDOFF_HISTORY.md`, Ideas) |
 | Breakout volume | `VOL_CONFIRM_RATIO` (1.5×) over `VOL_AVG_DAYS` (50), today excluded; `indicators.volume_ratio` | One rule everywhere |
@@ -315,7 +316,7 @@ Constants live in `src/stock_screener/cockpit/doctrine.py` unless another module
 | Keeping score | Journal page: `trade.build_trade_journal`, `journal_stats`, `loss_adjustment_sweep` | — |
 
 Decisions are made on the settled daily close and act at the next open. The machine sorts and
-warns. The weekend hunt's chart verdicts come from the reviewer, but until it passes the
+warns. The weekend hunt's chart verdicts come from the rules reviewer, but until it passes the
 user's labelled test (HANDOFF §12) the user still judges every chart.
 
 ---

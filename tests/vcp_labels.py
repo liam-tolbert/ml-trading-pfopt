@@ -16,6 +16,9 @@ Label semantics:
 
 Batches 1-5 (the first 40) were labeled across two sessions on 2026-07-03; the remaining
 160 follow the identical protocol against the frozen fixtures.
+
+Retired as a check of the detector (HANDOFF_HISTORY §6.110): the tests print how the
+detector tiers these charts and assert nothing about the labels.
 """
 
 LABEL_DATE = "2026-07-03"

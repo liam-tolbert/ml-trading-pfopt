@@ -82,21 +82,6 @@ def test_vcp_base_does_not_span_a_collapse():
         [c["drawdown_pct"] for c in v["contractions"]]
 
 
-def test_adaptive_threshold_scales_with_volatility():
-    """The ZigZag threshold floats with the stock's own volatility (clamped to
-    [THR_MIN, THR_MAX]) instead of a fixed 0.04 — a quiet name gets a tighter swing filter,
-    a wild one a wider one."""
-    from src.stock_screener.cockpit.vcp import _adaptive_threshold, THR_MIN, THR_MAX
-
-    quiet = _lin_series([(200, 108)])                       # ~0.04%/bar drift -> very quiet
-    wild = _lin_series([(10, 150), (10, 100), (10, 150), (10, 100),
-                        (10, 150), (10, 100), (10, 150), (10, 100)])   # ±40% whipsaws
-    t_quiet, t_wild = _adaptive_threshold(quiet), _adaptive_threshold(wild)
-    assert THR_MIN <= t_quiet <= THR_MAX, t_quiet
-    assert THR_MIN <= t_wild <= THR_MAX, t_wild
-    assert t_quiet < t_wild, (t_quiet, t_wild)
-
-
 def test_bbwp_and_squeeze_indicators():
     """BBWP stays in 0-100 and reads low (a squeeze) as a wide base coils tight; TTM squeeze
     returns a bool Series that is on in the tight tail."""
@@ -193,10 +178,10 @@ def test_rmv_gate_vetoes_below_pivot_only():
     assert vh["tier"] == "A", (vh["tier"], vh["pattern_details"])
 
 
-def test_vcp_multi_threshold_sees_quiet_taper_after_loud_history():
+def test_vcp_sees_quiet_taper_after_loud_history():
     """SMBC shape: a formerly-loud stock (±20% swings) whose base tapers 9→7→5.5→4.5%.
-    The long-history threshold alone is calibrated to the loud past and cannot see the
-    tight legs — the multi-threshold ladder must find them (tier A, adaptive mode)."""
+    A swing filter sized to the loud past cannot see the tight legs; the detector must
+    find them (tier A, default mode)."""
     from src.stock_screener.cockpit.vcp import detect_vcp
 
     df = _ohlc_series([(60, 150), (15, 115), (15, 150), (15, 122), (15, 152),
@@ -270,58 +255,50 @@ def _bench_results() -> dict:
     """``{ticker: (df, detect_vcp result)}`` over the 200 benchmark fixtures, computed once
     per process for the benchmark and the Step-3 cross-tab."""
     if not _BENCH:
+        import time
         import pandas as pd
         from vcp_labels import LABELS, fixture_filename
         from src.stock_screener.cockpit.vcp import detect_vcp
 
         fdir = ROOT / "tests" / "fixtures" / "vcp_bench"
         assert fdir.exists(), "benchmark fixtures missing — were tests/fixtures committed?"
-        for t in LABELS:
-            df = pd.read_parquet(fdir / fixture_filename(t))
+        frames = {t: pd.read_parquet(fdir / fixture_filename(t)) for t in LABELS}
+        t0 = time.perf_counter()
+        for t, df in frames.items():
             _BENCH[t] = (df, detect_vcp(df, float(df["Close"].iloc[-1]), {}))
+        ms = (time.perf_counter() - t0) * 1000.0 / len(frames)
+        print(f"    detect_vcp: {ms:.1f} ms per chart over {len(frames)} charts")
     return _BENCH
 
 
-def test_vcp_benchmark_200_charts():
-    """The 200-chart hand-labeled benchmark (see tests/vcp_labels.py for the blind
-    protocol). Hard contracts:
-      - never-miss: ZERO YES-labeled charts land in tier C;
-      - shortlist:  every YES-labeled chart lands in tier A or B;
-      - regression floor: tier A captures at least 45 of the 72 YES charts.
-    Soft stats (tier sizes, precision) are printed for future tuning."""
+def test_vcp_benchmark_report():
+    """The 200 charts in tests/vcp_labels.py, as a printed report, not a gate. The user
+    retired their labels as the check of the detector (HANDOFF_HISTORY §6.110); the user's
+    own judgments of real hunt charts replace them (HANDOFF §12). What is asserted is the
+    code's own contract: every result, tier C included, carries the typical day the stop
+    is judged by (§6.75), and only a dead tape, no pullbacks or a stale base is tier C."""
+    from collections import Counter
     from vcp_labels import LABELS
 
-    tiers, misses = {}, []
-    for t, lab in LABELS.items():
+    tiers = {}
+    for t in LABELS:
         df, r = _bench_results()[t]
         tiers[t] = r["tier"]
-        # §6.75: every result, C included, carries the typical day the stop is judged by
         assert r.get("median_tr_pct") is not None, (t, r["tier"], r["pattern_details"])
-        if lab["label"] == "YES" and r["tier"] == "C":
-            misses.append((t, r["pattern_details"]))
-
-    yes = [t for t, v in LABELS.items() if v["label"] == "YES"]
-    n_a = sum(1 for t in tiers if tiers[t] == "A")
-    n_b = sum(1 for t in tiers if tiers[t] == "B")
-    n_c = sum(1 for t in tiers if tiers[t] == "C")
-    yes_a = sum(1 for t in yes if tiers[t] == "A")
-    yes_b = sum(1 for t in yes if tiers[t] == "B")
-    print(f"    benchmark: A={n_a} (YES {yes_a}, precision {yes_a / max(n_a, 1) * 100:.0f}%)"
-          f"  B={n_b} (YES {yes_b})  C={n_c}  | YES total {len(yes)}")
-
-    assert not misses, f"never-miss violated — YES charts in tier C: {misses}"
-    assert all(tiers[t] in ("A", "B") for t in yes), "a YES chart left tier A/B"
-    assert yes_a >= 45, f"tier-A recall regressed: only {yes_a}/{len(yes)} YES in A"
+        if r["tier"] == "C":
+            why = r["pattern_details"]
+            assert (why.startswith(("Barely moving", "No pullbacks", "Insufficient"))
+                    or "weeks old" in why), (t, why)
+    tab = Counter((LABELS[t]["label"], tiers[t]) for t in LABELS)
+    print("    labelled charts by tier (report only): " + "  ".join(
+        f"{tier}: YES {tab[('YES', tier)]} NO {tab[('NO', tier)]}" for tier in "ABC"))
 
 
 def test_step3_reads_on_benchmark():
-    """§6.91+: the Step-3 reads over the 200 labelled charts. The thresholds were set in the
-    plan before this ran and MUST NOT be tuned to it. The tables are printed for the ledger;
-    only the pre-registered named charts are asserted: RLYB ("extreme vol dry-up") reads
-    dry, JAKK ("drying volume") and BATRA ("quiet volume") read at least partial, and BEAM
-    ("no dry-up") does not read dry. The read lost its verdict in §6.100; ``kind`` rebuilds
-    the old one here so the pre-registered record stays checkable. The shakeout and
-    V-recovery reads, which failed their checks (§6.92, §6.93), were removed then."""
+    """The dry-up read over the 200 charts, printed for the ledger. Its pre-registered
+    named-chart check (§6.91) was made against the earlier detector's legs and those
+    labels; both are retired (§6.110), so nothing here is asserted. The read itself is
+    tested on synthetic frames in test_advisories."""
     from collections import Counter
     from vcp_labels import LABELS
     from src.stock_screener.cockpit import advisories
@@ -340,15 +317,12 @@ def test_step3_reads_on_benchmark():
     print("    step3 dry-up: " + "  ".join(
         f"{lab} " + " ".join(f"{v}={tab[(lab, v)]}" for v in ("dry", "partial", "none", "n/a"))
         for lab in ("YES", "NO")))
-    assert dry["RLYB"] == "dry", dry["RLYB"]
-    assert dry["JAKK"] != "none" and dry["BATRA"] != "none"
-    assert dry["BEAM"] != "dry", dry["BEAM"]
 
 
 def test_zigzag_fast_parity():
     """_zigzag_pivots (plain-float hot path) returns EXACTLY the reference
     implementation's pivots — same indices, prices, kinds — across all 200 benchmark
-    fixtures at a threshold grid spanning what detect_vcp actually tries, plus seeded
+    fixtures at a threshold grid around the one detect_vcp uses, plus seeded
     random walks. This is the ship-gate for the vcp.py fast path."""
     import numpy as np
     import pandas as pd

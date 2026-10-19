@@ -7,8 +7,8 @@ description: Run the SEPA weekend hunt — have the hunt CLI chart-review every 
 
 You run a pipeline where the chart verdicts are already decided by code. The library
 (`src/stock_screener/hunt/`) computes everything, and its `review` command judges the
-charts: it asks Claude a fixed form about each base in separate calls, two or three per
-ticker, and turns the answers into PASS / PASS- / FAIL with a fixed table
+charts: it answers a fixed form about each base from the detector's numbers
+(`cockpit/base_read.py`) and turns the answers into PASS / PASS- / FAIL with a fixed table
 (`hunt/reviewer.py`). The verdict judges the base only; distance to the pivot, F, price,
 days to earnings and the order ceiling are applied afterwards by `gates`. You MUST NOT
 change a verdict. Your judgment goes into the catalyst reads and the narrative. The
@@ -40,27 +40,26 @@ bash scripts/hunt/hunt.sh <cmd>
    `equity` (without one, full positions are unknown and no name is marked thin).
 3. **`charts`** — renders the report's sheets (4 tickers per PNG) into
    `data/cockpit/hunt/<date>/charts/`.
-4. **`review-charts`** — draws each ticker's weekly and daily review charts and its
-   facts into `review/`.
-5. **`review`** — the chart review. It calls Claude twice per ticker, and a third time
-   when the first two answers differ (about 22 s a call, four at a time), so 180 names
-   take up to 45 minutes: in a session, run it in the background and wait for it. Names
-   a measurement already fails (a close below the 200-day in the base, a stop inside one
-   typical day) get their FAIL without a call. It writes every answer to `review/votes.jsonl`, the
-   combined answers to `review/form.csv` and one coded verdict per ticker to
-   `verdicts.csv`. It exits 1 when some names got no answer; run it again and it resumes.
-   Never edit `verdicts.csv` by hand.
-6. **`validate-verdicts`** — must report `ok: true` (every candidate exactly
+4. **`review`** — the chart review, computed from numbers in a few seconds. Names a
+   measurement already fails (a close below the 200-day in the base, a stop inside one
+   typical day) get that FAIL. Every other name gets one answer to the form: the swings,
+   the final tight area, the pivot, the volume and the daily character, each from the
+   detector's reads. It writes each answer to `review/votes.jsonl` and `review/form.csv`,
+   each name's facts to `review/<ticker>.json`, and one coded verdict per ticker to
+   `verdicts.csv`. Never edit `verdicts.csv` by hand. `review --reviewer claude` (after
+   `review-charts`, which draws the images) asks Claude instead; it is kept for comparing
+   the two on the same hunt, never for the weekly run.
+5. **`validate-verdicts`** — must report `ok: true` (every candidate exactly
    once). If it lists missing names, run `review` again before proceeding.
-7. **`gates --min-fund N`** — N is the user's choice (ask or default 0; report
+6. **`gates --min-fund N`** — N is the user's choice (ask or default 0; report
    the F distribution rather than silently gating). F runs 0–8. A
    missing figure fails its check, so a low F can mean thin data. Output has the buckets
    (buy_zone / approaching / below / past_entry), earnings-blocked names,
    volume-confirmed names, and the watchlist audit.
-8. **`news`** — fetches the recent headlines of every PASS name (public RSS feeds)
+7. **`news`** — fetches the recent headlines of every PASS name (public RSS feeds)
    into `data/cockpit/hunt/<date>/news/<ticker>.json`: `{title, publisher, date,
    url, summary}` each, newest first. The command reports names without any.
-9. **Read the catalyst** of every PASS name from its `news/<ticker>.json` alone
+8. **Read the catalyst** of every PASS name from its `news/<ticker>.json` alone
    (`SEPA_METHODOLOGY.md` §3: the books' third element). Write
    `data/cockpit/hunt/<date>/catalyst.json`, one object keyed by ticker:
    - `category`: one of `product`, `contract or approval`, `management`,
@@ -74,7 +73,7 @@ bash scripts/hunt/hunt.sh <cmd>
      copied from the news file; `read_at`: today's date.
    No headlines, or nothing but noise, is `none found` with a one-line summary
    saying so. A catalyst is a label beside the verdict and MUST NOT change it.
-10. **Write the narrative** to `data/cockpit/hunt/<date>/narrative.md`. This is
+9. **Write the narrative** to `data/cockpit/hunt/<date>/narrative.md`. This is
    your read of the week, in Markdown (headings, paragraphs, bullets, pipe
    tables; nothing fancier renders), 300–700 words:
    - the regime and what the breadth numbers mean for taking entries;
@@ -84,11 +83,11 @@ bash scripts/hunt/hunt.sh <cmd>
    - approaching names worth an alert, and earnings-blocked names to revisit;
    - the watchlist audit in words: pins that failed or drifted, names to prune;
    - caveats of the review: thin data, whether full positions were known, and the
-     names `review/form.csv` lists under `needs_check` (votes split, an unsure
-     answer, or an answer the measurements contradict) — those need the user's eye.
-   Verdicts and numbers come from steps 4–7; do not restate the tables. Name a
-   catalyst from step 9 where it bears on a buy-zone name.
-11. **`report --min-fund N`** — writes `report.html` in the hunt dir, with the
+     names `review/form.csv` lists under `needs_check` (an earlier swing deeper than the
+     one before it, which the detector's legs leave out) — those need the user's eye.
+   Verdicts and numbers come from steps 4–6; do not restate the tables. Name a
+   catalyst from step 8 where it bears on a buy-zone name.
+10. **`report --min-fund N`** — writes `report.html` in the hunt dir, with the
     narrative under "Reviewer's read", each PASS row's catalyst under its notes,
     and every chart sheet under its verdicts, and mirrors it with its `charts/`
     to **`docs/hunt/<date>/`**. Summarize in chat: verdict counts, buy-zone list,
@@ -96,7 +95,7 @@ bash scripts/hunt/hunt.sh <cmd>
     earnings blocks, and watchlist audit including any pins that failed review.
     The hunt folder itself is what the cockpit's Weekend Hunt page reads once the
     task has pushed it to the Pi; the push is the task's job, never yours.
-12. **Publish the artifact** (in a session, never unattended): the Artifact tool
+11. **Publish the artifact** (in a session, never unattended): the Artifact tool
     with `file_path` = `docs/hunt/<date>/report.html`, `root` = that folder,
     `files` = every `charts/sheet_NNN.png` mapped to itself, icon `chart`.
     Re-publish to the same URL when re-running in one session. To publish a
@@ -112,9 +111,9 @@ timer. The task has already pulled the Pi's scan and checked it, and it pushes t
 finished folder to the Pi afterwards. When the prompt says the run is unattended:
 
 - Ask nothing. Use `--min-fund 0`.
-- The runner has already done steps 1–5. Start at step 6; if `validate-verdicts` is not
+- The runner has already done steps 1–4. Start at step 5; if `validate-verdicts` is not
   ok, stop and make the final message its output.
-- Run steps 6–11 and skip step 12 (no Artifact tool here): the hunt folder,
+- Run steps 5–10 and skip step 11 (no Artifact tool here): the hunt folder,
   reviewed on the cockpit's Weekend Hunt page, is the deliverable, and the
   narrative and the catalyst reads are where your judgment goes — write them
   with care.
@@ -122,7 +121,7 @@ finished folder to the Pi afterwards. When the prompt says the run is unattended
   permitted. Do not try ssh, scp or any other command; a refusal is not a
   reason to look for a workaround.
 - Your final message is saved as `summary.md` in the hunt dir. Make it the chat
-  summary from step 11, in Markdown, and nothing else.
+  summary from step 10, in Markdown, and nothing else.
 - If a step fails, stop and make the final message the command and its error.
 
 ## Boundaries

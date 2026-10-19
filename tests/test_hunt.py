@@ -844,6 +844,95 @@ def test_run_review():
            and pl.read_verdicts(d / "verdicts.csv") == {})
 
 
+def _rules_payloads(b):
+    """The bundle's payloads with the reads the rules answer from, as a scan with the
+    current detector stores them: AAA clean, DDD with an earlier wider swing, EEE with a
+    loose final area."""
+    out = {}
+    for t, p in b.result.payloads.items():
+        close = float(p["df"]["Close"].iloc[-1])
+        v = {**p["vcp"], "contraction_count": 2, "final_area": "tight", "area_bars": 6,
+             "zz_legs": [{"drawdown_pct": 9.5}, {"drawdown_pct": 4.0}],
+             "pivot_price": close * 1.05, "area_high": close * 1.04, "median_tr_pct": 2.0,
+             "recoveries": [], "swings_disagree": t == "DDD", "v_shape": None}
+        if t == "EEE":
+            v["final_area"] = "loose"
+        out[t] = {**p, "vcp": v}
+    return out
+
+
+def test_run_rules_review():
+    """The rules answer every chart's form from numbers: one answer per ticker, no call,
+    the same verdict table and codes as Claude's answers, and a rerun adds nothing."""
+    import json
+    from src.stock_screener.hunt import reviewer as rv
+    b = _bundle()
+    diag = pl.diagnostics(b, pl.candidates(b))
+    diag.loc[diag.ticker == "BBB", "stop_room"] = 0.5
+    payloads = _rules_payloads(b)
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        out = rv.run_rules_review(d, diag, payloads, log=lambda m: None)
+        verdicts = pl.read_verdicts(d / "verdicts.csv")
+        ok("a name a measurement fails gets its FAIL and no answer",
+           out["measured"] == ["BBB"] and verdicts["BBB"]["verdict"] == "FAIL"
+           and verdicts["BBB"]["notes"].startswith("DQ:bronco;"))
+        ok("a loose final area is PASS- with its caveat",
+           verdicts["EEE"]["verdict"] == "PASS-"
+           and verdicts["EEE"]["notes"].startswith("CAV:loose"))
+        ok("an earlier wider swing sends the name to the user and nothing else does",
+           list(out["needs_check"]) == ["DDD"] and out["no_answer"] == [])
+        ok("one verdict per ticker, valid and coded",
+           pl.validate_verdicts(d / "verdicts.csv", diag) == []
+           and all(pl.parse_note_codes(v["verdict"], v["notes"]) == []
+                   for v in verdicts.values()))
+        lines = (d / "review" / rv.VOTES_FILE).read_text().splitlines()
+        ok("one recorded answer per asked ticker, from the rules, at no cost",
+           len(lines) == 3 and all(json.loads(x)["model"] == rv.RULES_MODEL
+                                   and json.loads(x)["cost_usd"] == 0.0 for x in lines)
+           and set(rv.read_votes(d)) == {"AAA", "DDD", "EEE"})
+        form = rv.read_labels(d / "review" / rv.FORM_FILE)
+        ok("form.csv holds the answers in the form the labels are scored against",
+           set(form) == {"AAA", "DDD", "EEE"} and form["AAA"]["base_count"] == "cant_tell")
+        ok("each answered ticker's facts are kept",
+           json.loads(rv.review_paths(d, "AAA")[2].read_text())["legs"][0]["depth_pct"] == 9.5)
+
+        before = ((d / "verdicts.csv").read_text(), (d / "review" / rv.FORM_FILE).read_text())
+        rv.run_rules_review(d, diag, payloads, log=lambda m: None)
+        ok("a rerun writes no new answer or verdict",
+           len((d / "review" / rv.VOTES_FILE).read_text().splitlines()) == 3
+           and ((d / "verdicts.csv").read_text(),
+                (d / "review" / rv.FORM_FILE).read_text()) == before)
+        ok("a candidate the scan no longer holds is refused",
+           _raises(lambda: rv.run_rules_review(d, diag, {"AAA": payloads["AAA"]},
+                                               log=lambda m: None)))
+
+
+def test_rules_hash_and_scan_read():
+    """The rules record which numbers decided them, and a scan saved before the detector
+    returned its reads is re-read from its own prices."""
+    from src.stock_screener.cockpit import vcp
+    from src.stock_screener.hunt import reviewer as rv
+    h = rv.rules_hash()
+    ok("the rules hash is stable", h == rv.rules_hash() and len(h) == 12)
+    old = vcp.AREA_RANGE_PCT
+    vcp.AREA_RANGE_PCT = 0.07
+    try:
+        ok("changing a number the rules read changes the hash", rv.rules_hash() != h)
+    finally:
+        vcp.AREA_RANGE_PCT = old
+    p = _bundle().result.payloads["AAA"]
+    ok("an old payload is re-read with the reads", "final_area" in rv.scan_read(p))
+    v = {"final_area": "tight"}
+    ok("a current payload is used as stored", rv.scan_read({**p, "vcp": v}) is v)
+    names = [f"T{i}" for i in range(10)]
+    pick = rv.label_sample(names, 4, "2026-10-18")
+    ok("the label sample is seeded and keeps the list's order",
+       pick == rv.label_sample(names, 4, "2026-10-18") and len(pick) == 4
+       and pick == [t for t in names if t in pick])
+    ok("no sample size means every name", rv.label_sample(names, 0, "x") == names)
+
+
 def test_labels_and_score():
     """Your own answers, in the same form, are how the reviewer is measured."""
     from src.stock_screener.hunt import reviewer as rv
@@ -915,6 +1004,8 @@ if __name__ == "__main__":
     test_reviewer_votes_and_checks()
     test_reviewer_measures_named_swings()
     test_run_review()
+    test_run_rules_review()
+    test_rules_hash_and_scan_read()
     test_labels_and_score()
     test_review_images()
     test_report_builds()

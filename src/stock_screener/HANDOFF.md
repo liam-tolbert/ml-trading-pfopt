@@ -99,6 +99,7 @@ the discipline.
 |---|---|
 | `data_feed.py` | yfinance layer: universe, price cache, incremental top-ups, fundamentals (yfinance quarters, estimates, holders; EDGAR facts and 8-K release dates) |
 | `scan.py` / `vcp.py` / `indicators.py` | the funnel, the VCP tier detector, RMV/BBWP/squeeze |
+| `swings.py` / `base_read.py` | the ZigZag and the final-area read the detector uses; the hunt's eight base answers computed from the detector's reads (§10) |
 | `scan_worker.py` | background scan thread + process-wide result store (`last_scan.pkl`) |
 | `triggers.py` | pure trigger evaluation; `export.py` the watchlist store |
 | `trade.py` | Alpaca paper submit path, stops, the exposure gate, the journal + Loss Adjustment Exercise |
@@ -263,7 +264,8 @@ cockpit_<date>.log` holds dated run logs (14-day retention) and **survives deplo
 requested on the Pi (the Weekend Hunt page's Start button, or the Friday 17:58 timer) and run
 by the PC's poller, which calls `scripts/hunt/weekend_hunt.ps1`. That script copies the Pi's
 `last_scan.pkl`, `watchlist.json` and `account.json` down, runs the chart review (`hunt
-review`, §6.106), then the `/weekend-hunt` skill headless (`claude -p`) for the gates,
+review`, answered from the detector's numbers since §6.109), then the `/weekend-hunt` skill
+headless (`claude -p`) for the gates,
 catalysts, narrative and report, checks the result itself, and pushes the hunt folder back to
 the Pi.
 
@@ -296,8 +298,9 @@ the Pi.
   `pivot_drift`). A name the latest scan no longer holds shows its quarter of the hunt's sheet.
 - **The allowlist is the safety boundary** (`scripts/hunt/unattended_settings.json`): the hunt
   CLI, file reads, and writes inside `data/cockpit/hunt/`. No ssh, no cockpit or trade code.
-  Each chart-review call gets the Read tool only, in `--safe-mode` (no project files or skills),
-  with `dontAsk` refusing everything else (`reviewer.claude_cli`).
+  The weekly run makes no chart-review call. Run by hand, `review --reviewer claude` gives
+  each call the Read tool only, in `--safe-mode` (no project files or skills), with `dontAsk`
+  refusing everything else (`reviewer.claude_cli`).
 - **Needs:** the standalone `claude` CLI on PATH (`~/.local/bin/claude.exe`), logged in once:
   the stored login in `~/.claude/.credentials.json` is used, and bills the subscription, not the
   API. `CLAUDE_CODE_OAUTH_TOKEN` also works. The desktop app's login is not usable from a task.
@@ -309,7 +312,7 @@ the Pi.
   `register_task.ps1 -WakeTestInMinutes 5` proves the wake without spending a review;
   `-Unregister` removes all three tasks.
 - **Artifact:** the task cannot publish one (no Artifact tool outside a session). Ask a session
-  to publish a run; the skill's step 12 has the call (`report.html` plus its sheets). Printing
+  to publish a run; the skill's step 11 has the call (`report.html` plus its sheets). Printing
   an artifact from the claude.ai viewer cuts it off; print `report.html` from a browser instead.
 
 **App hung?** (a page spins forever and Refresh does nothing). Separate "the account is unreachable"
@@ -373,31 +376,45 @@ stuck Alpaca call: a finished request leaves exactly that.
 
 ## 10. Reference — hard-won specifics
 
-Constants and API facts that are expensive to rediscover. Change these only with the benchmark green.
+Constants and API facts that are expensive to rediscover. Change one only with a reason fixed before it is measured.
 
-**VCP detector (`vcp.py`), calibrated against the 200-chart benchmark:**
-- **Multi-threshold:** up to 4 ZigZag thresholds — long-history, recent-window (~2 mo), 0.7× recent
-  (floor 2%), and a fixed 3.5%. A VCP by definition ends *quieter* than its history, so one
-  history-calibrated threshold goes blind at the tight ending; the recent window gets polluted by the
-  breakout burst itself (WERN read 9.6% while its coil legs were 5–7%). Best read wins.
+**VCP detector (`vcp.py` + `swings.py`, §6.109, §6.110):**
+- **Segments and the walk.** The 325-bar window is cut at every breakout close (a close above
+  every earlier high). In each segment the walk starts at the highest high before the
+  segment's lowest low. A swing high is a high price pulls back from by ≥ **2%**
+  (`THR_MIN_TIGHT`) before trading above it, and a leg's trough is the lowest low before price
+  trades above its peak. A climb back to the top at the end adds no leg and hides none (the
+  survey's "highest high after the low" swallowed every leg then). A one-bar plunge is no leg.
+- **The base:** walk back from the newest leg; an older leg joins while no > **35%** leg lies
+  between, the tops stay within **1.15×**, and it is ≥ **0.9×** as deep as the leg after it,
+  **one** exception tolerated. At most 6 legs. On the 200 old charts the exception is what
+  moved most YES charts from A to B (§6.109).
 - **RMV veto is conditional** — only while price is *below* the pivot (a breakout IS a volatility
-  burst; SMBC read RMV 100 mid-breakout). Cutoff **30**. Removing the below-pivot veto was measured
-  and rejected: +6 real / +14 junk.
-- **Sanity rules:** leg ≥ **2** bars (quiet climbers have genuine 2-day final shakeouts; 1-bar gap
-  legs are junk anchors) · base ≥ **2.0** weeks (length is measured over the *selected* legs, which
-  under-reads — VRA's ~6-week base measures 2.1) · newest leg ≤ **13** weeks · **dead tape** = median
-  daily true-range% over the last 42 bars < **1%** (median, not max — one pop-day defeats a max rule;
-  all 7 deal-zombies ≤0.95%, quietest real setup 1.64%). Dead-tape runs in adaptive mode only, so
-  pinned `thr=` keeps synthetic H=L=C tests deterministic.
+  burst; SMBC read RMV 100 mid-breakout). Cutoff **30**.
+- **Sanity rules:** leg ≥ **2** bars (quiet climbers have genuine 2-day final shakeouts) · base ≥
+  **2.0** weeks · newest leg ≤ **13** weeks · **dead tape** = median daily true-range% over the
+  last 42 bars < **1%** (median, not max — one pop-day defeats a max rule). Dead-tape runs only
+  when `thr` is not given, so synthetic H=L=C tests stay usable.
 - **Tightness:** final leg ≤12% AND (≤0.8× first leg OR ≤6.5% absolute — uniform quiet shelves can't
   shrink 20% further but ARE tight).
-- **Tiers:** **A** = valid base within −10%..+10% of the *detected* pivot · **B** = forming or
-  extended, never hidden · **C** = safe exclusions only (dead tape / no pullbacks / stale), reason
-  recorded. **Benchmark contract (`test_vcp_benchmark_200_charts`)** — what is ASSERTED: every YES
-  lands in A or B (**C contains zero YES**) and A-recall ≥ 45. The split it PRINTS for reference is
-  A=79 (53 YES, precision 67%), B=114 (19 YES), C=7; those numbers drift and are not enforced.
-  **C containing zero YES is the never-miss contract** — squeezing A below the true setup count
-  reintroduces misses.
+- **Tiers:** **A** = valid base within −10%..+10% of the base top (`pivot_price`) · **B** = forming
+  or extended, never hidden · **C** = safe exclusions only (dead tape / no pullbacks / stale),
+  reason recorded. **Never-miss is the design rule:** C holds only what can't be a setup.
+- **No label gate (§6.110).** The 200 charts in `tests/vcp_labels.py` are a printed report
+  (`test_vcp_benchmark_report`: tier split by label and the cost per chart, about 2.5 ms), not a
+  check. The check is the user's own judgment of real hunt charts (§12).
+- **Reads after the tier** — computed on the chosen legs, never changing the tier:
+  `pivot_price` (the base top, internal: the app's pivot is `_entry_levels`'s); the **final area**
+  (`swings.tight_area`: the longest run of the last 3–10 bars before any breakout whose range
+  is ≤ **8%** of the close; tight at ≥ **5** bars, loose under, not formed until 3 bars
+  follow the last trough); one **ZigZag at 3.5%** over the base (`zz_legs`, `recoveries`,
+  `swings_disagree` = an earlier swing more than **1.10×** the one before); the breakout bar;
+  `violations`; and a V read that answers nothing (`base_read.V_SHAPE_ENABLED` off).
+- **The hunt's base answers (`base_read.read_form`, §6.109).** Wider leg = the newest ZigZag
+  swing > 1.10× the one before. Heavy selling = ≥ 3 heavy down days with up/down volume < 1.
+  Drying up = dry-up ratio < 1, else mixed. Pivot several = the base top more than
+  `NO_CHASE_PCT` above the area's high. Wild swings = typical day ≥ 8% or stop room < 1.
+  `pattern` is vcp/no_base only and `base_count` is always `cant_tell`.
 
 **`pct_to_pivot` sign convention:** negative = price ABOVE the pivot (into/past the buy zone);
 positive = BELOW it (not yet triggered). Sweet spot ≈ 0 to −5%; deeply negative = chasing.
@@ -547,13 +564,16 @@ source comments live. A new entry goes there, numbered after the last one.
 - **The SEPA audit is frozen (§6.100).** No new feature is built from `SEPA_AUDIT.md` until the
   journal has about 20 more closed trades; then re-read it against the record. A change MUST
   come from a real trade that would have gone differently, or from a gap the journal shows.
-- **The chart reviewer is unmeasured (§6.106).** Until it passes, the user still checks every
-  chart. The plan: two weeks of the user's own answers in `hunt label-template` files (week 1
-  to tune the prompt, week 2 scored once with `hunt score`), 40 of them re-labelled blind for
-  the user's own agreement, and a pass mark fixed before the scored run. Then the user checks
-  only the PASS names near the buy zone, `needs_check` names and 10 random others. The prompt,
-  the form and `TABLE_VERSION` change only through that measurement. The six reference charts
-  the design puts in the prompt wait for the labels.
+- **The detector and the rules reviewer are unmeasured (§6.109, §6.110).** Until they pass,
+  the user still checks every chart. The check, fixed before anyone looks: on the next hunt,
+  `hunt label-template --sample 40` (seeded by the hunt's date) writes 40 names; the user
+  judges them from the report's sheets and runs `hunt score`. Pass = verdict kappa ≥ 0.4 and
+  missed PASS ≤ 15% of the user's PASS names. Pass or fail, the numbers go in the ledger, and
+  no threshold changes without a new pre-registration. The sample holds tier-A names only, so
+  it cannot show a setup the detector left in tier B; a sample across tiers needs its own
+  command. Known before the check: on the 10-18 hunt the rules gave 37 `DQ:expanding`
+  (Claude 12), many on ~4% swings, and `needs_check` on 115 of 136 names, too many to be a
+  useful list. The Claude reviewer (§6.106) stays behind `--reviewer claude` for comparison.
 - **The catalyst read is unscored (§6.104).** Every PASS name now carries a category, a
   sentiment and a summary from its headlines. Nothing yet says whether a named catalyst
   predicts anything; like the verdicts, it is a frozen weekly label waiting for a scorecard.
@@ -605,7 +625,7 @@ source comments live. A new entry goes there, numbered after the last one.
 - **Vendored rules:** `minervini_screener/` — `screening/{phase_indicators,signal_engine,benchmark,indicators}.py`; `LICENSE`, `PROVENANCE.md`. That is the whole package (what was deleted and why: `PROVENANCE.md`).
 - **Test fixture:** `backtest_daily/` — `providers.py`, `fundamentals_adapter.py`, `synthetic_provider.py`: the seeded synthetic market `tests/cockpit/_common.py` builds its prices from. The backtest simulator that lived here was removed (§6.102) and is parked on branch `park/backtest-daily`; its findings are `HANDOFF_HISTORY.md` §1.
 - **Cockpit:** `cockpit/` — see the module map in §6. Deployment in `deploy/` (`deploy.sh`, `install-units.sh`, `units/`, `PI_SETUP.md`).
-- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`, `reviewer`; `charts` and the CLI stay off the Pi); `reviewer` asks Claude a fixed form per ticker and code decides the verdict (§6.106); the `/weekend-hunt` skill reads the catalysts and writes the narrative. `scripts/hunt/` (repo root) holds the PC side (§8): `weekend_hunt.ps1` (one run), `hunt.sh` (the env wrapper), `pull_scan.sh` / `push_result.sh` (scan down, result up), `hunt_poller.ps1` + `pi_request.sh` (requests), `register_task.ps1` + `hidden.vbs` (the tasks and their windowless launch), and the unattended review's prompt and allowlist. The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
+- **Weekend hunt:** `hunt/` — deterministic Step-3 review pipeline (`pipeline`, `report`, `news`, `reviewer`; `charts` and the CLI stay off the Pi); `reviewer` answers a fixed form per ticker from the detector's numbers (`cockpit/base_read.py`, §6.109; Claude's answers stay behind `--reviewer claude`, §6.106) and code decides the verdict; the `/weekend-hunt` skill reads the catalysts and writes the narrative. `scripts/hunt/` (repo root) holds the PC side (§8): `weekend_hunt.ps1` (one run), `hunt.sh` (the env wrapper), `pull_scan.sh` / `push_result.sh` (scan down, result up), `hunt_poller.ps1` + `pi_request.sh` (requests), `register_task.ps1` + `hidden.vbs` (the tasks and their windowless launch), and the unattended review's prompt and allowlist. The cockpit's `pages/4_Weekend_Hunt.py` reviews a pushed run.
 - **Method:** `SEPA_METHODOLOGY.md` — the books' rules for sessions, with a rule-to-code map (§9 of that file) and the deviations; `minervini_sepa_system.md` is the user-facing guide the app renders. A rule change updates both, plus the ledger in `HANDOFF_HISTORY.md`.
 - **History:** `HANDOFF_HISTORY.md` — the research record (§1, §3, §5), the change ledger (§11) and parked ideas.
 - **Tests:** `tests/test_cockpit.py` (runner) + `tests/cockpit/` · `tests/test_hunt.py` · `tests/test_momentum_lib.py`. Run as plain scripts. **Only the first two gate** — the parked-track suite runs in neither CI nor `deploy.sh`.

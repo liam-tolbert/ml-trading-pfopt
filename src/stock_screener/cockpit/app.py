@@ -221,8 +221,7 @@ COL_HELP = {
     "tier": "Review tier (errs toward showing more): A = valid tightening base in/near the "
             "buy zone — review these. B = watch: base still forming, or valid but already "
             "risen past the buy zone; never hidden. C = safely skipped (barely moving / no "
-            "pullbacks / base too old). Tested on 200 hand-labeled charts: zero real bases "
-            "landed in C.",
+            "pullbacks / base too old).",
     "vcp": "A valid Volatility Contraction Pattern was detected: 2–6 progressively tighter "
            "pullbacks, the last one tight (≤12%), with price near its 52-week high.",
     "num_contractions": "Number of peak-to-low pullbacks in the current base. Minervini's "

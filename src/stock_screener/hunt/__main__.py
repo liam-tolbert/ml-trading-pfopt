@@ -4,8 +4,9 @@
     python -m src.stock_screener.hunt candidates [--min-rs 70] [--date YYYY-MM-DD]
     python -m src.stock_screener.hunt charts [--limit N] [--per-fig 4] [--date ...]
     python -m src.stock_screener.hunt review-charts [--limit N] [--date ...]
-    python -m src.stock_screener.hunt review [--model M] [--effort E] [--votes 3] [--jobs 4]
-    python -m src.stock_screener.hunt label-template [--date ...]
+    python -m src.stock_screener.hunt review [--reviewer rules|claude] [--model M] [--effort E]
+                                             [--votes 3] [--jobs 4]
+    python -m src.stock_screener.hunt label-template [--sample N] [--seed S] [--date ...]
     python -m src.stock_screener.hunt score --labels MINE.csv [--against THEIRS.csv] [--date ...]
     python -m src.stock_screener.hunt compare --date A --against B
     python -m src.stock_screener.hunt append-verdicts --file BATCH.csv [--date ...]
@@ -21,8 +22,9 @@ in votes.jsonl, the combined answers in form.csv), news/<ticker>.json, verdicts.
 narrative.md and catalyst.json (the last two written by the skill), report.html.
 `report` also mirrors report.html and the sheets to docs/hunt/<date>/, the deliverable.
 
-`review` calls the Claude Code CLI once per answer: HUNT_CLAUDE names the executable
-when `claude` is not on PATH.
+`review` answers each chart's form from the detector's numbers. With `--reviewer claude`
+it calls the Claude Code CLI once per answer instead, from the images `review-charts`
+drew: HUNT_CLAUDE names the executable when `claude` is not on PATH.
 """
 from __future__ import annotations
 
@@ -103,6 +105,14 @@ def cmd_review_charts(args) -> int:
 
 def cmd_review(args) -> int:
     d, diag = _load_state(args)
+    if args.reviewer == "rules":
+        payloads = pl.load_scan().result.payloads
+        _update_meta(d, {"review": {"reviewer": "rules", "rules": rv.rules_hash(),
+                                    "table_version": rv.TABLE_VERSION}})
+        out = rv.run_rules_review(d, diag, payloads, log=lambda m: print(m, file=sys.stderr))
+        _update_meta(d, {"review_models_used": [rv.RULES_MODEL], "review_cost_usd": 0.0})
+        print(json.dumps(out, indent=2))
+        return 0
     claude = os.environ.get("HUNT_CLAUDE") or shutil.which("claude")
     if not claude:
         raise pl.HuntError("claude CLI not found: put it on PATH or set HUNT_CLAUDE.")
@@ -112,7 +122,8 @@ def cmd_review(args) -> int:
         frames = None                     # Claude's own swing points go unmeasured
     call = rv.claude_cli(claude, model=args.model, effort=args.effort,
                          cwd=d / rv.REVIEW_SUBDIR)
-    _update_meta(d, {"review": {"model": args.model, "effort": args.effort,
+    _update_meta(d, {"review": {"reviewer": "claude", "model": args.model,
+                                "effort": args.effort,
                                 "votes": args.votes, "prompt": rv.prompt_hash(),
                                 "table_version": rv.TABLE_VERSION}})
     out = rv.run_review(d, diag, call, votes=args.votes, jobs=args.jobs, frames=frames,
@@ -149,8 +160,9 @@ def cmd_label_template(args) -> int:
     out = d / "labels.csv"
     if out.exists():
         raise pl.HuntError(f"{out} already exists; it is never overwritten.")
-    rv.write_label_template(out, list(diag["ticker"]))
-    print(json.dumps({"labels": str(out), "tickers": len(diag)}, indent=2))
+    tickers = rv.label_sample(list(diag["ticker"]), args.sample, args.seed or d.name)
+    rv.write_label_template(out, tickers)
+    print(json.dumps({"labels": str(out), "tickers": len(tickers)}, indent=2))
     return 0
 
 
@@ -241,11 +253,17 @@ def main(argv=None) -> int:
     p = sub.add_parser("review-charts"); common(p)
     p.add_argument("--limit", type=int, default=0)
     p = sub.add_parser("review"); common(p)
+    p.add_argument("--reviewer", choices=("rules", "claude"), default="rules",
+                   help="who answers each chart's form (default: rules, from the numbers)")
     p.add_argument("--model", default=rv.REVIEW_MODEL)
     p.add_argument("--effort", default=rv.REVIEW_EFFORT)
     p.add_argument("--votes", type=int, default=rv.REVIEW_VOTES)
     p.add_argument("--jobs", type=int, default=4, help="calls running at once")
     p = sub.add_parser("label-template"); common(p)
+    p.add_argument("--sample", type=int, default=0,
+                   help="label only this many candidates, picked at random (default: all)")
+    p.add_argument("--seed", default=None,
+                   help="what picks the sample (default: the hunt's date)")
     p = sub.add_parser("score"); common(p)
     p.add_argument("--labels", required=True, help="your answers (from label-template)")
     p.add_argument("--against", default=None,

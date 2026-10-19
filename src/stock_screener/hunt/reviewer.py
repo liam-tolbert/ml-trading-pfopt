@@ -1,4 +1,8 @@
-"""Per-ticker chart review: Claude answers a fixed form, code decides the verdict.
+"""Per-ticker chart review: a fixed form is answered, code decides the verdict.
+
+Two things can answer the form. ``run_rules_review`` (the default) answers it from the
+detector's numbers (``cockpit.base_read``), with no call to anything. ``run_review``
+asks Claude, as below; it stays so the two can be compared on the same hunt.
 
 For each candidate Claude sees two charts (``charts.render_review_images``: weekly for
 the run, daily for the base) and the base's measurements (``fact_sheet``), and answers
@@ -23,6 +27,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import random
 import subprocess
 import threading
 import time
@@ -34,8 +39,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from src.stock_screener.cockpit import base_read
+from src.stock_screener.cockpit import vcp as vcp_mod
 from src.stock_screener.cockpit.doctrine import VOL_AVG_DAYS
 from src.stock_screener.cockpit.indicators import prior_volume_average
+# A pullback counts as wider only when it is more than this many times as deep as the one
+# before. One value for Claude's prompt, the conflicts check and the rules' answers.
+from src.stock_screener.cockpit.vcp import EXPAND_RATIO
 
 from . import pipeline as pl
 
@@ -43,11 +53,10 @@ from . import pipeline as pl
 REVIEW_MODEL = "claude-opus-5-5"
 REVIEW_EFFORT = "medium"
 REVIEW_VOTES = 3
+# What votes.jsonl records as the model for an answer computed from numbers.
+RULES_MODEL = "rules"
 # Raised by one whenever the verdict table in verdict_from_form changes meaning.
 TABLE_VERSION = 1
-# A pullback counts as wider only when it is more than this many times as deep as the one
-# before. Halving is the books' rule of thumb, not a disqualifier (HANDOFF §6.94).
-EXPAND_RATIO = 1.10
 
 REVIEW_SUBDIR = "review"
 VOTES_FILE = "votes.jsonl"
@@ -603,6 +612,90 @@ def run_review(hunt_path: Path, diag: pd.DataFrame, call: Caller, *,
             "no_answer": no_answer, "measured": sorted(measured)}
 
 
+def rules_hash() -> str:
+    """Short hash of every number the rules review reads (the detector's and
+    ``base_read``'s constants) and the verdict table: one value per method, recorded with
+    every run as ``prompt_hash`` is for Claude's."""
+    consts = {f"{m.__name__.rsplit('.', 1)[-1]}.{k}": getattr(m, k)
+              for m in (vcp_mod, base_read) for k in dir(m) if k.isupper()}
+    blob = json.dumps({**consts, "table": TABLE_VERSION}, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def scan_read(payload: dict) -> dict:
+    """The payload's ``detect_vcp`` result with the reads the rules need. A scan saved
+    before the detector returned them is re-read from the payload's own price frame,
+    which gives the same legs: the frame, the last close and the phase are the ones the
+    scan used."""
+    v = payload.get("vcp") or {}
+    if "final_area" in v:
+        return v
+    df = payload["df"]
+    return vcp_mod.detect_vcp(df, float(df["Close"].iloc[-1]), payload.get("phase_info") or {})
+
+
+def run_rules_review(hunt_path: Path, diag: pd.DataFrame, payloads: Dict[str, dict], *,
+                     log: Callable[[str], None] = print) -> dict:
+    """Answer the form from numbers for every candidate in ``diag``, and record verdicts.
+
+    ``payloads`` are the scan's (ticker -> payload). A ticker ``measured_fail`` fails gets
+    its FAIL as in ``run_review``. Every other ticker gets one answer from
+    ``base_read.read_form``, appended to ``votes.jsonl`` with model ``RULES_MODEL``, and
+    its facts are saved as ``review/<ticker>.json``. Tickers that already have a verdict
+    keep it and add nothing, so a rerun writes no new answer or verdict. ``form.csv`` is
+    rewritten with every answered ticker. Raises HuntError when a candidate has no
+    payload.
+
+    Returns ``{verdicts, needs_check, no_answer, measured}`` like ``run_review``;
+    ``no_answer`` is always empty."""
+    vpath = hunt_path / "verdicts.csv"
+    rdir = hunt_path / REVIEW_SUBDIR
+    rdir.mkdir(exist_ok=True)
+    have = pl.read_verdicts(vpath)
+    rows = {r["ticker"]: r for r in diag.to_dict("records")}
+    missing = [t for t in rows if t not in payloads]
+    if missing:
+        raise pl.HuntError(f"the scan has no payload for {', '.join(missing)}: "
+                           "re-run `candidates` on the current scan.")
+    decided, new_rows, measured, records = {}, [], [], []
+    for t, row in rows.items():
+        p = payloads[t]
+        v = scan_read(p)
+        facts = fact_sheet({**p, "vcp": v}, row)
+        code = measured_fail(facts, row)
+        if code:
+            measured.append(t)
+            if t not in have:
+                new_rows.append({"ticker": t, "verdict": "FAIL",
+                                 "notes": f"{code}; {_MEASURED[code]}"})
+            continue
+        form = base_read.read_form(v, facts, row)
+        checks = form.pop("checks")
+        verdict, codes, q = verdict_from_form(form, facts, row)
+        decided[t] = {"verdict": verdict, "codes": codes, "form": form,
+                      "needs_check": checks,
+                      "notes": _note(verdict, codes, form, facts, q, checks)}
+        if t not in have:
+            new_rows.append({"ticker": t, "verdict": verdict, "notes": decided[t]["notes"]})
+            records.append({"ticker": t, "form": form, "error": None, "model": RULES_MODEL,
+                            "cost_usd": 0.0, "seconds": 0.0})
+            review_paths(hunt_path, t)[2].write_text(json.dumps(facts), encoding="utf-8")
+    if records:
+        with open(rdir / VOTES_FILE, "a", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
+    _write_form(rdir / FORM_FILE, decided, {t: 1 for t in decided})
+    pl.append_verdicts(vpath, new_rows)
+    counts = Counter(d["verdict"] for d in decided.values())
+    counts["FAIL"] += len(measured)
+    log(f"review (rules): {len(rows)} tickers, {len(new_rows)} new verdicts, "
+        f"{len(measured)} failed on a measurement")
+    return {"verdicts": {k: n for k, n in counts.items() if n},
+            "needs_check": {t: d["needs_check"] for t, d in decided.items()
+                            if d["needs_check"]},
+            "no_answer": [], "measured": sorted(measured)}
+
+
 FORM_COLUMNS = ["ticker", "verdict", "codes", *FORM, "sure", "swings_seen", "needs_check",
                 "answers"]
 
@@ -622,6 +715,16 @@ def _write_form(path: Path, decided: Dict[str, dict], n_answers: Dict[str, int])
 
 # ---- measuring agreement with the user ------------------------------------ #
 LABEL_COLUMNS = ["ticker", "verdict", *FORM]
+
+
+def label_sample(tickers: List[str], n: int, seed: str) -> List[str]:
+    """``n`` of ``tickers`` picked at random from ``seed``, in their original order; all
+    of them when ``n`` is 0 or at least their count. The same seed picks the same names
+    on every run, so a sample can be drawn before anyone looks at the charts."""
+    if n <= 0 or n >= len(tickers):
+        return list(tickers)
+    keep = set(random.Random(seed).sample(sorted(tickers), n))
+    return [t for t in tickers if t in keep]
 
 
 def write_label_template(path: Path, tickers: List[str]) -> None:
